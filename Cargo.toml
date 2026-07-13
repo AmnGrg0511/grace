@@ -1,0 +1,27 @@
+[package]
+name = "grace"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal vendor-neutral ReAct agent core (Grace), std-only, zero dependencies"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+authors = ["Aman Garg"]
+
+# Deliberately dependency-free. The core builds and runs with nothing but
+# `std`. This is a conscious best-practice choice: no supply chain, no
+# crates.io round-trip, compiles fully offline. The only thing `std` cannot
+# do natively is TLS, so the real HTTP transport targets an OpenAI-compatible
+# *plaintext* endpoint (e.g. a local proxy / ollama / llama.cpp) — see README.
+
+[lib]
+name = "grace"
+path = "src/lib.rs"
+
+[[bin]]
+name = "grace"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

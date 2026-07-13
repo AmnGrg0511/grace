@@ -1,0 +1,261 @@
+//! Built-in tools: terminal, file read/write, and patch.
+//!
+//! These are intentionally thin wrappers over `std` I/O — the minimal core's
+//! "tool substrate". Each tool:
+//!   1. declares its name/description/parameters,
+//!   2. pulls typed fields out of the JSON args,
+//!   3. performs the side effect,
+//!   4. returns a short string result (fed back to the model).
+//!
+//! Safety note: a real deployment must guard `run_terminal` (command
+//! allow-list / sandbox) and `write_file`/`patch` (path allow-list). We keep
+//! the minimal core unguarded but document the gap in the README.
+
+use crate::error::{AgentError, Result};
+use crate::json::Json;
+use crate::tool::Tool;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+// ---- helpers ---------------------------------------------------------------
+
+fn arg_str(args: &Json, key: &str) -> Result<String> {
+    args.get(key)
+        .and_then(Json::as_str)
+        .map(|s| s.to_string())
+        .ok_or_else(|| AgentError::Tool(format!("missing string argument '{key}'")))
+}
+
+fn str_prop(_name: &str, desc: &str) -> Json {
+    Json::Object(vec![
+        (String::from("type"), Json::String(String::from("string"))),
+        (String::from("description"), Json::String(desc.to_string())),
+    ])
+}
+
+// ---- run_terminal ----------------------------------------------------------
+
+/// Executes a shell command and returns its stdout (or stderr + exit code).
+pub struct TerminalTool;
+
+impl Tool for TerminalTool {
+    fn name(&self) -> &str {
+        "run_terminal"
+    }
+
+    fn description(&self) -> &str {
+        "Run a shell command and return its combined stdout/stderr and exit code."
+    }
+
+    fn parameters(&self) -> Json {
+        Json::Object(vec![
+            (
+                String::from("type"),
+                Json::String(String::from("object")),
+            ),
+            (
+                String::from("properties"),
+                Json::Object(vec![
+                    (String::from("command"), str_prop("command", "The shell command to execute.")),
+                ]),
+            ),
+            (
+                String::from("required"),
+                Json::Array(vec![Json::String(String::from("command"))]),
+            ),
+        ])
+    }
+
+    fn run(&self, args: &Json) -> Result<String> {
+        let command = arg_str(args, "command")?;
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .output()
+            .map_err(|e| AgentError::Tool(format!("failed to spawn 'sh': {e}")))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut result = String::new();
+        if !stdout.is_empty() {
+            result.push_str(stdout.trim_end());
+        }
+        if !stderr.is_empty() {
+            result.push_str(&format!("\n[stderr] {}", stderr.trim_end()));
+        }
+        result.push_str(&format!("\n[exit code {}]", output.status.code().unwrap_or(-1)));
+        Ok(result)
+    }
+}
+
+// ---- read_file -------------------------------------------------------------
+
+/// Reads a UTF-8 file and returns its contents.
+pub struct ReadFileTool;
+
+impl Tool for ReadFileTool {
+    fn name(&self) -> &str {
+        "read_file"
+    }
+
+    fn description(&self) -> &str {
+        "Read a text file and return its contents."
+    }
+
+    fn parameters(&self) -> Json {
+        Json::Object(vec![
+            (String::from("type"), Json::String(String::from("object"))),
+            (
+                String::from("properties"),
+                Json::Object(vec![(
+                    String::from("path"),
+                    str_prop("path", "Absolute or relative path to the file."),
+                )]),
+            ),
+            (
+                String::from("required"),
+                Json::Array(vec![Json::String(String::from("path"))]),
+            ),
+        ])
+    }
+
+    fn run(&self, args: &Json) -> Result<String> {
+        let path = arg_str(args, "path")?;
+        let content = fs::read_to_string(&path)
+            .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
+        Ok(content)
+    }
+}
+
+// ---- write_file ------------------------------------------------------------
+
+/// Writes UTF-8 content to a file (creating parent dirs, overwriting).
+pub struct WriteFileTool;
+
+impl Tool for WriteFileTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+
+    fn description(&self) -> &str {
+        "Write text content to a file, creating parent directories as needed. Overwrites."
+    }
+
+    fn parameters(&self) -> Json {
+        Json::Object(vec![
+            (String::from("type"), Json::String(String::from("object"))),
+            (
+                String::from("properties"),
+                Json::Object(vec![
+                    (String::from("path"), str_prop("path", "Path to write.")),
+                    (String::from("content"), str_prop("content", "Text to write.")),
+                ]),
+            ),
+            (
+                String::from("required"),
+                Json::Array(vec![
+                    Json::String(String::from("path")),
+                    Json::String(String::from("content")),
+                ]),
+            ),
+        ])
+    }
+
+    fn run(&self, args: &Json) -> Result<String> {
+        let path = arg_str(args, "path")?;
+        let content = arg_str(args, "content")?;
+        if let Some(parent) = Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    AgentError::Tool(format!("create dirs for {}: {e}", path))
+                })?;
+            }
+        }
+        let nbytes = content.len();
+        fs::write(&path, &content).map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
+        Ok(format!("wrote {nbytes} bytes to {}", path))
+    }
+}
+
+// ---- patch (unified diff apply) --------------------------------------------
+
+/// Applies a small unified diff to a file. This is the "edit" primitive: we
+/// implement a minimal `patch` (no fuzz, no context beyond a literal old block
+/// search) so the core can modify files without shelling out to GNU patch.
+pub struct PatchTool;
+
+impl Tool for PatchTool {
+    fn name(&self) -> &str {
+        "patch"
+    }
+
+    fn description(&self) -> &str {
+        "Replace the first occurrence of `old_string` with `new_string` in a file (case-sensitive, literal)."
+    }
+
+    fn parameters(&self) -> Json {
+        Json::Object(vec![
+            (String::from("type"), Json::String(String::from("object"))),
+            (
+                String::from("properties"),
+                Json::Object(vec![
+                    (String::from("path"), str_prop("path", "File to edit.")),
+                    (
+                        String::from("old_string"),
+                        str_prop("old_string", "Exact text to find and replace."),
+                    ),
+                    (
+                        String::from("new_string"),
+                        str_prop("new_string", "Replacement text."),
+                    ),
+                ]),
+            ),
+            (
+                String::from("required"),
+                Json::Array(vec![
+                    Json::String(String::from("path")),
+                    Json::String(String::from("old_string")),
+                    Json::String(String::from("new_string")),
+                ]),
+            ),
+        ])
+    }
+
+    fn run(&self, args: &Json) -> Result<String> {
+        let path = arg_str(args, "path")?;
+        let old = arg_str(args, "old_string")?;
+        let new = arg_str(args, "new_string")?;
+        let original = fs::read_to_string(&path)
+            .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
+        match original.find(&old) {
+            Some(idx) => {
+                let replaced = format!(
+                    "{}{}{}",
+                    &original[..idx],
+                    new,
+                    &original[idx + old.len()..]
+                );
+                fs::write(&path, &replaced)
+                    .map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
+                Ok(format!(
+                    "patched {} (replaced {}-byte block with {}-byte block)",
+                    path,
+                    old.len(),
+                    new.len()
+                ))
+            }
+            None => Err(AgentError::Tool(format!(
+                "old_string not found in {} (exact, case-sensitive match required)",
+                path
+            ))),
+        }
+    }
+}
+
+/// Register the default built-in tool set into a registry.
+pub fn register_builtins(registry: &mut crate::tool::ToolRegistry) {
+    registry.register(Box::new(TerminalTool));
+    registry.register(Box::new(ReadFileTool));
+    registry.register(Box::new(WriteFileTool));
+    registry.register(Box::new(PatchTool));
+}

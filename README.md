@@ -1,0 +1,92 @@
+# grace
+
+A **minimal, vendor-neutral ReAct agent core** — the irreducible spine of an
+agent (Hermes-inspired), written in Rust with best practices and **zero
+dependencies** (only `std`).
+
+This is the result of a careful analysis of the Hermes engine: we extracted
+what is *core tech* (a normalized LLM loop + a tool substrate) and dropped the
+*wrapper* (multi-provider fallback chains, context compression, tool-safety
+guardrails, `/steer`, skills/vault knowledge, the TUI). Those are real value in
+production; they are not the core.
+
+## What it is
+
+```
+Message list  ──►  ProviderTransport (normalized LLM call)
+                   │  returns content + optional tool_calls
+                   ▼
+              if tool_calls: ToolRegistry executes each
+                   │  results appended as `tool` messages
+                   ▼
+              loop until FinishReason::Stop (or budget exhausted)
+```
+
+That is the whole agent. Everything else is configuration.
+
+## Modules
+
+| Module | Role |
+|---|---|
+| `message` | The unified conversation record (the source of truth). |
+| `transport` | `ProviderTransport` trait + normalized `ModelResponse`/`FinishReason`. |
+| `transport_http` | OpenAI-compatible `/chat/completions` over plain `http://` (no TLS). |
+| `transport_mock` | Scripted offline "model" — proves the loop with zero network. |
+| `tool` | `Tool` trait + `ToolRegistry` (name → handler dispatch). |
+| `tools` | Built-ins: `run_terminal`, `read_file`, `write_file`, `patch`. |
+| `agent` | The ReAct loop. |
+| `config` | Runtime wiring (which transport, which model, budget). |
+| `json` | A tiny dependency-free JSON value/parser/serializer. |
+| `error` | One flat error type. |
+
+## Build & run
+
+Requires Rust ≥ 1.75 (no external crates — builds fully offline).
+
+```bash
+cargo build --release
+cargo test                 # unit + integration tests (no network)
+
+# Offline demo (scripted model drives the real tools):
+./target/release/grace --mock --prompt "run a terminal command"
+
+# Real OpenAI-compatible endpoint (see TLS note below):
+./target/release/grace \
+  --base-url http://127.0.0.1:8080/v1 \
+  --api-key "$KEY" --model grace-1 \
+  --prompt "list the files in the current directory"
+```
+
+## Why std-only (and the TLS caveat)
+
+`std` has no TLS, so `transport_http` speaks **plaintext `http://`**. To reach a
+TLS provider (OpenAI, Nous, etc.), front it with a local proxy
+(`nginx`/`mitmproxy`/a one-liner) and point `--base-url` at
+`http://127.0.0.1:PORT`. This is a deliberate, common production pattern and it
+keeps the crate **dependency-free and supply-chain-free**.
+
+The `ProviderTransport` seam means you can add a real TLS transport (e.g. via
+`hyper`/`rustls`) without touching the loop.
+
+## What is intentionally NOT here
+
+The analysis concluded these are *wrapper*, not core. They belong in a
+production agent; omitting them is the point of the minimal rewrite:
+
+- **Multi-provider fallback** — `HttpTransport` is one provider. Chain several
+  behind a `ProviderTransport` if you need resilience.
+- **Context compression** — long sessions will hit the model's context limit.
+- **Tool-safety guardrails** — `run_terminal` is unguarded. In production, add a
+  command allow-list / sandbox and a path allow-list for file tools.
+- **Streaming, retries, `/steer`, skills** — out of scope by design.
+
+## Lines of code
+
+~1,770 lines of Rust across the modules above (including tests). The **agent
+loop itself is ~60 lines**; the bulk is the dependency-free JSON parser (with
+tests) and the HTTP transport. The point stands: the *core logic* is tiny; the
+volume is plumbing you can drop or swap.
+
+## License
+
+MIT OR Apache-2.0
