@@ -10,6 +10,10 @@
 //!   # Real OpenAI-compatible endpoint (plaintext http://, front TLS w/ proxy):
 //!   grace --base-url http://127.0.0.1:8080/v1 \
 //!                --api-key "$KEY" --model grace-1 --prompt "list files"
+//!
+//!   # OpenRouter (HTTPS via auto-spawned python3 TLS proxy; key from env):
+//!   export OPENROUTER_API_KEY=sk-or-...
+//!   grace --openrouter --model openai/gpt-4o-mini --prompt "list files"
 
 use std::process::ExitCode;
 
@@ -35,6 +39,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut model: Option<String> = None;
     let mut mock = false;
     let mut chat = false;
+    let mut openrouter = false;
     let mut max_iterations: u32 = 16;
     let mut system_prompt: Option<String> = None;
 
@@ -59,6 +64,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
             "--mock" => {
                 mock = true;
+                i += 1;
+            }
+            "--openrouter" => {
+                openrouter = true;
                 i += 1;
             }
             "--chat" => {
@@ -93,16 +102,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(ExitCode::FAILURE);
     }
 
-    let config = Config::from_args(base_url, api_key, model, mock, max_iterations, system_prompt)
+    let config = Config::from_args(base_url, api_key, model, mock, openrouter, max_iterations, system_prompt)
         .map_err(|e| e.to_string())?;
 
     let transport = config.build_transport().map_err(|e| e.to_string())?;
     let tools = Config::build_registry();
 
     let mut messages: Vec<Message> = Vec::new();
-    if let Some(sp) = &config.system_prompt {
-        messages.push(Message::system(sp.clone()));
-    }
+    let sp = config
+        .system_prompt
+        .clone()
+        .unwrap_or_else(|| grace::config::DEFAULT_SYSTEM_PROMPT.to_string());
+    messages.push(Message::system(sp));
 
     println!(
         "[grace] transport={} model={} tools={}",
@@ -120,7 +131,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     messages.push(Message::user(prompt.unwrap()));
     let answer = run_turn(transport.as_ref(), &tools, &mut messages, config.max_iterations)
         .map_err(|e| e.to_string())?;
-    println!("\n--- answer ---\n{answer}");
+    println!("\n--- answer ---\n{}", grace::markdown::render_terminal(&answer));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -151,7 +162,7 @@ fn run_chat(
         }
         messages.push(Message::user(text.to_string()));
         match run_turn(transport, tools, messages, max_iterations) {
-            Ok(answer) => println!("\ngrace: {answer}\n"),
+            Ok(answer) => println!("\ngrace: {}\n", grace::markdown::render_terminal(&answer)),
             Err(e) => {
                 eprintln!("error: {e}");
                 // Drop the last user message so a failed turn can be retried.
@@ -162,9 +173,24 @@ fn run_chat(
 }
 
 fn print_help() {
-    println!(
-        "grace — minimal vendor-neutral ReAct agent (std-only, zero deps)\n\n\
-Usage:\n  grace --mock --prompt \"run a terminal command\"\n  grace --mock --chat\n  grace --base-url http://127.0.0.1:8080/v1 --api-key KEY --model M --prompt \"...\"\n\n\
-Flags:\n  --prompt <text>        The user instruction (one-shot mode)\n  --chat                 Interactive REPL (state persists across turns)\n  --mock                Use the offline scripted model (no network)\n  --base-url <url>      OpenAI-compatible endpoint (http:// only)\n  --api-key <key>       Bearer token (default empty)\n  --model <name>        Model id (required for http mode)\n  --max-iterations <n>  Tool-call round cap (default 16)\n  --system <text>       Optional system prompt\n  -h, --help            Show this help"
-    );
+    let help = r#"grace — minimal vendor-neutral ReAct agent (std-only, zero deps)
+
+Usage:
+  grace --mock --prompt "run a terminal command"
+  grace --mock --chat
+  grace --base-url http://127.0.0.1:8080/v1 --api-key KEY --model M --prompt "..."
+  grace --openrouter --model tencent/hy3:free --prompt "..."   (key from --api-key or $OPENROUTER_API_KEY; free-only keys need a :free model)
+
+Flags:
+  --prompt <text>        The user instruction (one-shot mode)
+  --chat                 Interactive REPL (state persists across turns)
+  --mock                 Use the offline scripted model (no network)
+  --openrouter           Use OpenRouter (HTTPS; auto-spawns a python3 TLS proxy)
+  --base-url <url>       OpenAI-compatible endpoint (http:// only)
+  --api-key <key>        Bearer token (default empty; for OpenRouter uses $OPENROUTER_API_KEY)
+  --model <name>         Model id (required for http/openrouter mode)
+  --max-iterations <n>   Tool-call round cap (default 16)
+  --system <text>        Optional system prompt
+  -h, --help             Show this help"#;
+    println!("{help}");
 }

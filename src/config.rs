@@ -8,6 +8,15 @@ use crate::error::{AgentError, Result};
 use crate::tool::ToolRegistry;
 use crate::transport::ProviderTransport;
 
+/// Default system identity. Grace is a calm, composed, capable agent. This is
+/// seeded into every conversation unless the user overrides it with `--system`.
+/// Kept concise so it does not eat model context.
+pub const DEFAULT_SYSTEM_PROMPT: &str = "\
+You are Grace — a calm, composed, and capable AI agent. You address the user as \
+\"Sir\". You are precise, warm but restrained, and you do real work via your tools \
+(run_terminal, read_file, write_file, patch) rather than only talking about it. \
+When a task needs a tool, call it. Keep responses concise and purposeful.";
+
 /// How the agent reaches a model.
 #[derive(Debug, Clone)]
 pub enum TransportConfig {
@@ -19,6 +28,8 @@ pub enum TransportConfig {
         api_key: String,
         model: String,
     },
+    /// OpenRouter (HTTPS) via an auto-spawned python3 TLS proxy.
+    OpenRouter { api_key: String, model: String },
 }
 
 /// Full agent configuration.
@@ -45,6 +56,10 @@ impl Config {
                 base_url.clone(),
                 api_key.clone(),
             ))),
+            TransportConfig::OpenRouter { api_key, model } => {
+                crate::transport_openrouter::OpenRouterTransport::new(api_key.clone(), model.clone())
+                    .map(|t| Box::new(t) as Box<dyn ProviderTransport>)
+            }
         }
     }
 
@@ -53,6 +68,7 @@ impl Config {
         match &self.transport {
             TransportConfig::Mock { .. } => "mock",
             TransportConfig::Http { model, .. } => model,
+            TransportConfig::OpenRouter { model, .. } => model,
         }
     }
 
@@ -71,6 +87,7 @@ impl Config {
         api_key: Option<String>,
         model: Option<String>,
         mock: bool,
+        openrouter: bool,
         max_iterations: u32,
         system_prompt: Option<String>,
     ) -> Result<Config> {
@@ -78,6 +95,20 @@ impl Config {
             TransportConfig::Mock {
                 max_tool_rounds: 3,
             }
+        } else if openrouter {
+            let model = model.ok_or_else(|| {
+                AgentError::Config("missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into())
+            })?;
+            // Prefer explicit --api-key, else the OPENROUTER_API_KEY env var.
+            let api_key = api_key
+                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+                .filter(|k| !k.is_empty())
+                .ok_or_else(|| {
+                    AgentError::Config(
+                        "missing OpenRouter API key: pass --api-key or set OPENROUTER_API_KEY".into(),
+                    )
+                })?;
+            TransportConfig::OpenRouter { api_key, model }
         } else {
             let base_url =
                 base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;

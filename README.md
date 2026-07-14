@@ -31,6 +31,7 @@ That is the whole agent. Everything else is configuration.
 | `message` | The unified conversation record (the source of truth). |
 | `transport` | `ProviderTransport` trait + normalized `ModelResponse`/`FinishReason`. |
 | `transport_http` | OpenAI-compatible `/chat/completions` over plain `http://` (no TLS). |
+| `transport_openrouter` | OpenRouter (HTTPS) via an auto-spawned python3 TLS proxy. |
 | `transport_mock` | Scripted offline "model" — proves the loop with zero network. |
 | `tool` | `Tool` trait + `ToolRegistry` (name → handler dispatch). |
 | `tools` | Built-ins: `run_terminal`, `read_file`, `write_file`, `patch`. |
@@ -55,6 +56,21 @@ cargo test                 # unit + integration tests (no network)
   --base-url http://127.0.0.1:8080/v1 \
   --api-key "$KEY" --model grace-1 \
   --prompt "list the files in the current directory"
+
+# OpenRouter (HTTPS) — key from --api-key or $OPENROUTER_API_KEY.
+# Grace auto-spawns a tiny python3 TLS proxy and talks to it over
+# plaintext, so the crate stays std-only (see TLS note below).
+#
+# NOTE: OpenRouter keys are often restricted to FREE models only. Use a
+# ":free" model id — e.g. tencent/hy3:free (or the openrouter/free router).
+# Paid ids like openai/gpt-4o-mini return HTTP 403 "Key limit exceeded".
+export OPENROUTER_API_KEY=sk-or-...
+./target/release/grace \
+  --openrouter --model tencent/hy3:free \
+  --prompt "list the files in the current directory"
+
+# Interactive chat against OpenRouter (state persists across turns):
+./target/release/grace --openrouter --model tencent/hy3:free --chat
 ```
 
 ## Why std-only (and the TLS caveat)
@@ -64,6 +80,15 @@ TLS provider (OpenAI, Nous, etc.), front it with a local proxy
 (`nginx`/`mitmproxy`/a one-liner) and point `--base-url` at
 `http://127.0.0.1:PORT`. This is a deliberate, common production pattern and it
 keeps the crate **dependency-free and supply-chain-free**.
+
+**OpenRouter is wired this way by default.** `transport_openrouter` embeds a
+~40-line pure-stdlib `python3` proxy that terminates TLS to
+`https://openrouter.ai` and exposes `http://127.0.0.1:PORT/api/v1` to the
+plaintext `transport_http`. Grace spawns it as a child process, waits until it
+is listening, runs the whole conversation through it, and force-kills it on
+exit. No Rust TLS crate, no `crates.io` dependency, no build changes — a single
+`grace --openrouter --model ... --prompt ...` command works. The only external
+requirement is `python3 >= 3.7` on `PATH`.
 
 The `ProviderTransport` seam means you can add a real TLS transport (e.g. via
 `hyper`/`rustls`) without touching the loop.

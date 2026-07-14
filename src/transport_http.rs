@@ -17,15 +17,30 @@ use crate::transport::{parse_openai_message, tools_to_json, FinishReason, Provid
 pub struct HttpTransport {
     base_url: String,
     api_key: String,
+    /// Model id owned by the transport (the loop passes `""`; see `complete`).
+    model: String,
     /// Optional path override; defaults to `/chat/completions`.
     chat_path: String,
 }
 
 impl HttpTransport {
+    /// Generic OpenAI-compatible endpoint. `model` defaults to empty and must
+    /// be supplied by the caller via [`HttpTransport::with_model`] for real
+    /// use; the agent loop passes `""`, so the transport must own the model.
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self::with_model(base_url, api_key, "")
+    }
+
+    /// Construct with an explicit model id the transport keeps.
+    pub fn with_model(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
             api_key: api_key.into(),
+            model: model.into(),
             chat_path: String::from("/chat/completions"),
         }
     }
@@ -45,8 +60,14 @@ impl ProviderTransport for HttpTransport {
         &self,
         messages: &[Message],
         tools: &[ToolSpec],
-        model: &str,
+        _model: &str,
     ) -> Result<crate::transport::ModelResponse> {
+        // The model is owned by this transport (the agent loop passes "").
+        let model = if self.model.is_empty() {
+            "grace-1"
+        } else {
+            &self.model
+        };
         let msg_json: Vec<Json> = messages.iter().map(Message::to_json).collect();
         let mut body_pairs = vec![
             (String::from("model"), Json::String(model.to_string())),
@@ -66,6 +87,19 @@ impl ProviderTransport for HttpTransport {
             .map_err(AgentError::Transport)?;
 
         let parsed = json::parse(&response).map_err(AgentError::Json)?;
+
+        // Surface the upstream error object if the provider returned one
+        // (e.g. OpenRouter free-tier rate limit / 403 quota). Without this the
+        // caller only sees the generic "no choices" and the real cause is lost.
+        if let Json::Object(err) = parsed.get("error").unwrap_or(&Json::Null) {
+            let msg = err
+                .iter()
+                .find(|(k, _)| k.as_str() == "message")
+                .map(|(_, v)| v.as_str().unwrap_or_default().to_string())
+                .unwrap_or_else(|| "provider returned an error".into());
+            return Err(AgentError::Response(format!("provider error: {msg}")));
+        }
+
         let choice = parsed
             .get("choices")
             .and_then(Json::as_array)
