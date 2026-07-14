@@ -105,13 +105,22 @@ production agent; omitting them is the point of the minimal rewrite:
   command allow-list / sandbox and a path allow-list for file tools.
 - **Streaming, retries, `/steer`, skills** — out of scope by design.
 
+## Security & safety
+
+Grace executes model-requested shell commands and file writes with **no
+sandbox or allow-list**. It is safe to run against the offline `--mock` model
+or a trusted endpoint; do **not** point it at an untrusted model or expose it
+on a shared host without adding the guardrails above. The bundled tools are
+deliberately thin so you can harden them for your environment.
+
 ## Lines of code
 
-~1,770 lines of Rust across the modules above (including tests). The **agent
+~2,240 lines of Rust across the modules above (tests separate). The **agent
 loop itself is ~60 lines**; the bulk is the dependency-free JSON parser (with
-tests) and the HTTP transport. The point stands: the *core logic* is tiny; the
-volume is plumbing you can drop or swap.
+tests) and the HTTP/OpenRouter transports. The point stands: the *core logic*
+is tiny; the volume is plumbing you can drop or swap.
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of **MIT** or **Apache-2.0** at your option (see the
+`LICENSE` file). Written by Aman Garg.
