@@ -1,13 +1,10 @@
 //! Tools — the model's hands.
 //!
 //! A [`Tool`] is anything the loop can invoke. The registry maps a name
-//! (as emitted by the model) to a handler. This is the thin tool substrate
-//! Hermes isolates in `tool_executor.py` / `tool_dispatch_helpers.py`, minus
-//! the safety/guardrail layers (those are deliberate wrappers we omit in the
-//! minimal core — see README).
+//! (as emitted by the model) to a handler.
 
 use crate::error::Result;
-use crate::json::Json;
+use serde_json::Value;
 use std::collections::HashMap;
 
 /// A callable capability exposed to the model.
@@ -17,10 +14,10 @@ pub trait Tool {
     /// Human-readable description (sent to the model in the tool spec).
     fn description(&self) -> &str;
     /// JSON-schema `properties` object describing the arguments.
-    fn parameters(&self) -> Json;
+    fn parameters(&self) -> Value;
     /// Execute the tool with already-parsed arguments. The returned string is
     /// fed back to the model as the tool result.
-    fn run(&self, args: &Json) -> Result<String>;
+    fn run(&self, args: &Value) -> Result<String>;
 }
 
 /// Owns the set of available tools and dispatches by name.
@@ -36,9 +33,7 @@ impl Default for ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self {
-            tools: HashMap::new(),
-        }
+        Self { tools: HashMap::new() }
     }
 
     /// Register a tool. Later registrations with the same name replace earlier.
@@ -68,7 +63,7 @@ impl ToolRegistry {
         let tool = self
             .get(name)
             .ok_or_else(|| crate::error::AgentError::Tool(format!("unknown tool '{name}'")))?;
-        let parsed = crate::json::parse(arguments)
+        let parsed: Value = serde_json::from_str(arguments)
             .map_err(|e| crate::error::AgentError::Tool(format!("bad arguments json: {e}")))?;
         tool.run(&parsed)
     }

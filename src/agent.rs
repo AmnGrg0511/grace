@@ -1,7 +1,5 @@
 //! The agent — the ReAct loop.
 //!
-//! This is the irreducible spine we identified in the analysis:
-//!
 //! ```text
 //! loop (bounded by max_iterations):
 //!     resp = transport.complete(messages, tools, model)
@@ -12,10 +10,6 @@
 //!         append tool message (result)
 //! return final assistant content
 //! ```
-//!
-//! Everything Hermes adds on top (multi-provider fallback, context
-//! compression, tool-safety guardrails, /steer, iteration budget) is wrapper
-//! around this. We keep the loop honest and small.
 
 use crate::error::{AgentError, Result};
 use crate::message::{Message, Role};
@@ -23,10 +17,6 @@ use crate::tool::ToolRegistry;
 use crate::transport::{FinishReason, ProviderTransport};
 
 /// Run one conversation turn to completion and return the final answer.
-///
-/// `transport` and `tools` are injected so the loop stays pure logic. The
-/// `messages` vector is the source of truth; it is mutated in place as the
-/// conversation grows.
 pub fn run_turn(
     transport: &(dyn ProviderTransport + '_),
     tools: &ToolRegistry,
@@ -58,27 +48,19 @@ pub fn run_turn(
                 return Ok(resp.content);
             }
             FinishReason::Length => {
-                // Treat as "continue": emit an empty tool turn is nonsensical,
-                // so we just keep looping with the accumulated context.
                 continue;
             }
             FinishReason::ToolCalls => {
                 if resp.tool_calls.is_empty() {
-                    // Provider said tool_calls but sent none; stop defensively.
                     return Ok(resp.content);
                 }
                 for call in &resp.tool_calls {
-                    let result = match tools.execute(&call.name, &call.arguments) {
+                    let result = match tools.execute(call.name(), call.arguments()) {
                         Ok(out) => out,
                         Err(e) => format!("tool error: {e}"),
                     };
-                    messages.push(Message::tool(
-                        call.id.clone(),
-                        call.name.clone(),
-                        result,
-                    ));
+                    messages.push(Message::tool(call.id.clone(), call.name().to_string(), result));
                 }
-                // Loop again so the model sees the tool results.
             }
         }
     }
@@ -102,20 +84,15 @@ mod tests {
 
         let answer = run_turn(transport.as_ref(), &tools, &mut messages, 8).unwrap();
 
-        // We should have: user, assistant(call), tool(result), assistant(final).
         assert_eq!(messages.len(), 4, "expected user+assistant+tool+final");
         assert!(answer.contains("mock response"));
-        // The tool message should contain the echoed shell output.
-        let tool_msg = messages
-            .iter()
-            .find(|m| m.role == Role::Tool)
-            .expect("a tool message must exist");
+        let tool_msg = messages.iter().find(|m| m.role == Role::Tool).expect("a tool message must exist");
         assert!(tool_msg.content.contains("hello from tool"));
     }
 
     #[test]
     fn budget_exhaustion_is_an_error() {
-        let transport: Box<dyn ProviderTransport> = Box::new(MockTransport::new(100)); // insists on tools
+        let transport: Box<dyn ProviderTransport> = Box::new(MockTransport::new(100));
         let mut tools = ToolRegistry::new();
         crate::tools::register_builtins(&mut tools);
         let mut messages = base_messages();
@@ -126,11 +103,9 @@ mod tests {
     #[test]
     fn unknown_tool_recovers_gracefully() {
         let transport: Box<dyn ProviderTransport> = Box::new(MockTransport::new(1));
-        // Registry intentionally empty so the tool is "unknown".
         let tools = ToolRegistry::new();
         let mut messages = base_messages();
         let answer = run_turn(transport.as_ref(), &tools, &mut messages, 8).unwrap();
-        // The unknown tool error is fed back; the mock then answers.
         let tool_msg = messages.iter().find(|m| m.role == Role::Tool).unwrap();
         assert!(tool_msg.content.contains("unknown tool"));
         assert!(answer.contains("mock response"));

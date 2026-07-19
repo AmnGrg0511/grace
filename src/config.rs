@@ -10,7 +10,6 @@ use crate::transport::ProviderTransport;
 
 /// Default system identity. Grace is a calm, composed, capable agent. This is
 /// seeded into every conversation unless the user overrides it with `--system`.
-/// Kept concise so it does not eat model context.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "\
 You are Grace — a calm, composed, and capable AI agent. You address the user as \
 \"Sir\". You are precise, warm but restrained, and you do real work via your tools \
@@ -22,14 +21,12 @@ When a task needs a tool, call it. Keep responses concise and purposeful.";
 pub enum TransportConfig {
     /// Scripted, offline model (tests/demos). No network.
     Mock { max_tool_rounds: u32 },
-    /// Real OpenAI-compatible endpoint. `base_url` should be `http://`.
+    /// Real OpenAI-compatible endpoint (any base_url, including OpenRouter's).
     Http {
         base_url: String,
         api_key: String,
         model: String,
     },
-    /// OpenRouter (HTTPS) via an auto-spawned python3 TLS proxy.
-    OpenRouter { api_key: String, model: String },
 }
 
 /// Full agent configuration.
@@ -41,6 +38,9 @@ pub struct Config {
     pub system_prompt: Option<String>,
 }
 
+/// OpenRouter's OpenAI-compatible base URL preset.
+pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
 impl Config {
     /// Build the configured transport as a `dyn ProviderTransport`.
     pub fn build_transport(&self) -> Result<Box<dyn ProviderTransport>> {
@@ -48,18 +48,11 @@ impl Config {
             TransportConfig::Mock { max_tool_rounds } => {
                 Ok(Box::new(crate::transport_mock::MockTransport::new(*max_tool_rounds)))
             }
-            TransportConfig::Http {
-                base_url,
-                api_key,
-                model: _,
-            } => Ok(Box::new(crate::transport_http::HttpTransport::new(
+            TransportConfig::Http { base_url, api_key, model } => Ok(Box::new(crate::transport_http::HttpTransport::with_model(
                 base_url.clone(),
                 api_key.clone(),
+                model.clone(),
             ))),
-            TransportConfig::OpenRouter { api_key, model } => {
-                crate::transport_openrouter::OpenRouterTransport::new(api_key.clone(), model.clone())
-                    .map(|t| Box::new(t) as Box<dyn ProviderTransport>)
-            }
         }
     }
 
@@ -68,7 +61,6 @@ impl Config {
         match &self.transport {
             TransportConfig::Mock { .. } => "mock",
             TransportConfig::Http { model, .. } => model,
-            TransportConfig::OpenRouter { model, .. } => model,
         }
     }
 
@@ -78,10 +70,20 @@ impl Config {
         crate::tools::register_builtins(&mut reg);
         reg
     }
+
+    /// Tool set plus skill discovery/loading tools bound to `skills_root`.
+    pub fn build_registry_with_skills(skills_root: impl Into<std::path::PathBuf>) -> ToolRegistry {
+        let mut reg = Self::build_registry();
+        let store = std::sync::Arc::new(crate::skill::SkillStore::new(skills_root.into()));
+        reg.register(Box::new(crate::skill::ListSkillsTool { store: store.clone() }));
+        reg.register(Box::new(crate::skill::LoadSkillTool { store }));
+        reg
+    }
 }
 
 /// Helper so `main` can turn CLI flags into a [`Config`].
 impl Config {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_args(
         base_url: Option<String>,
         api_key: Option<String>,
@@ -92,33 +94,25 @@ impl Config {
         system_prompt: Option<String>,
     ) -> Result<Config> {
         let transport = if mock {
-            TransportConfig::Mock {
-                max_tool_rounds: 3,
-            }
+            TransportConfig::Mock { max_tool_rounds: 3 }
         } else if openrouter {
-            let model = model.ok_or_else(|| {
-                AgentError::Config("missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into())
-            })?;
+            let model = model
+                .ok_or_else(|| AgentError::Config("missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into()))?;
             // Prefer explicit --api-key, else the OPENROUTER_API_KEY env var.
             let api_key = api_key
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
                 .filter(|k| !k.is_empty())
-                .ok_or_else(|| {
-                    AgentError::Config(
-                        "missing OpenRouter API key: pass --api-key or set OPENROUTER_API_KEY".into(),
-                    )
-                })?;
-            TransportConfig::OpenRouter { api_key, model }
-        } else {
-            let base_url =
-                base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
-            let api_key = api_key.unwrap_or_default();
-            let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;
+                .ok_or_else(|| AgentError::Config("missing OpenRouter API key: pass --api-key or set OPENROUTER_API_KEY".into()))?;
             TransportConfig::Http {
-                base_url,
+                base_url: OPENROUTER_BASE_URL.to_string(),
                 api_key,
                 model,
             }
+        } else {
+            let base_url = base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
+            let api_key = api_key.unwrap_or_default();
+            let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;
+            TransportConfig::Http { base_url, api_key, model }
         };
         Ok(Config {
             transport,

@@ -7,8 +7,9 @@
 //! *tool registry*, and *message bookkeeping* without any provider.
 
 use crate::error::Result;
-use crate::message::Message;
+use crate::message::{Message, ToolCall};
 use crate::transport::{FinishReason, ModelResponse, ProviderTransport, ToolSpec};
+use serde_json::json;
 
 /// A deterministic scripted LLM. Useful for tests and offline demos.
 pub struct MockTransport {
@@ -42,12 +43,7 @@ impl ProviderTransport for MockTransport {
         "mock"
     }
 
-    fn complete(
-        &self,
-        messages: &[Message],
-        _tools: &[ToolSpec],
-        _model: &str,
-    ) -> Result<ModelResponse> {
+    fn complete(&self, messages: &[Message], _tools: &[ToolSpec], _model: &str) -> Result<ModelResponse> {
         // Match intent against the *original user prompt* (the first User
         // message), not the latest tool result — otherwise a tool's output
         // (e.g. "hello from tool") would be mistaken for the user's request.
@@ -59,37 +55,35 @@ impl ProviderTransport for MockTransport {
 
         let rounds = Self::tool_rounds_so_far(messages);
 
-        // If we've already done enough tool rounds, or the prompt has no
-        // "command"/"file" intent, answer directly.
         let wants_terminal = user_intent.to_lowercase().contains("run")
             || user_intent.to_lowercase().contains("command")
             || user_intent.to_lowercase().contains("terminal");
-        let wants_file = user_intent.to_lowercase().contains("write")
-            || user_intent.to_lowercase().contains("file");
+        let wants_file = user_intent.to_lowercase().contains("write") || user_intent.to_lowercase().contains("file");
 
         if rounds < self.max_tool_rounds {
             if wants_terminal {
                 return Ok(ModelResponse {
                     content: String::new(),
-                    tool_calls: vec![crate::message::ToolCall {
-                        id: format!("call_{rounds}"),
-                        name: String::from("run_terminal"),
-                        arguments: json_obj(&[("command", "echo 'hello from tool'")]),
-                    }],
+                    tool_calls: vec![ToolCall::new(
+                        format!("call_{rounds}"),
+                        "run_terminal",
+                        json!({"command": "echo 'hello from tool'"}).to_string(),
+                    )],
                     finish_reason: FinishReason::ToolCalls,
                 });
             }
             if wants_file {
                 return Ok(ModelResponse {
                     content: String::new(),
-                    tool_calls: vec![crate::message::ToolCall {
-                        id: format!("call_{rounds}"),
-                        name: String::from("write_file"),
-                        arguments: json_obj(&[
-                            ("path", "/tmp/grace_demo.txt"),
-                            ("content", "written by the minimal core"),
-                        ]),
-                    }],
+                    tool_calls: vec![ToolCall::new(
+                        format!("call_{rounds}"),
+                        "write_file",
+                        json!({
+                            "path": "/tmp/grace_demo.txt",
+                            "content": "written by the minimal core"
+                        })
+                        .to_string(),
+                    )],
                     finish_reason: FinishReason::ToolCalls,
                 });
             }
@@ -101,13 +95,4 @@ impl ProviderTransport for MockTransport {
             finish_reason: FinishReason::Stop,
         })
     }
-}
-
-/// Build a minimal `{"key":"value", ...}` JSON arguments string.
-fn json_obj(pairs: &[(&str, &str)]) -> String {
-    let obj: Vec<(String, crate::json::Json)> = pairs
-        .iter()
-        .map(|(k, v)| (String::from(*k), crate::json::Json::String(String::from(*v))))
-        .collect();
-    crate::json::Json::Object(obj).to_string_compact()
 }

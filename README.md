@@ -1,14 +1,31 @@
 # grace
 
 A **minimal, vendor-neutral ReAct agent core** — the irreducible spine of an
-agent (Hermes-inspired), written in Rust with best practices and **zero
-dependencies** (only `std`).
+agent (Hermes-inspired), written in Rust.
 
 This is the result of a careful analysis of the Hermes engine: we extracted
 what is *core tech* (a normalized LLM loop + a tool substrate) and dropped the
 *wrapper* (multi-provider fallback chains, context compression, tool-safety
-guardrails, `/steer`, skills/vault knowledge, the TUI). Those are real value in
-production; they are not the core.
+guardrails, `/steer`, the TUI) — while fixing the things that make Hermes feel
+unfinished: no durable memory, no real skill loading, brittle transports.
+
+## Dependency stance
+
+Grace prefers **official, maintained crates** over hand-rolled
+reimplementations of solved problems. Reinventing TCP/TLS framing, a JSON
+parser, or an HTTP client from `std` alone is not "minimal" — it's fragile and
+unmaintainable. So:
+
+- `reqwest` (rustls-tls, blocking) — real HTTPS, no proxy hacks.
+- `serde` / `serde_json` — real JSON, not a hand-rolled parser.
+- `rusqlite` (bundled) — real persistent memory, not a text file re-read on
+  every turn.
+
+What Grace still avoids: heavy async runtimes when a blocking CLI doesn't need
+one, ORMs, config-management frameworks, anything with a large transitive
+dependency tree relative to the value it adds. Every dependency has to earn
+its place; official/native and actively maintained is the bar, not "zero
+deps at all costs."
 
 ## What it is
 
@@ -22,7 +39,8 @@ Message list  ──►  ProviderTransport (normalized LLM call)
               loop until FinishReason::Stop (or budget exhausted)
 ```
 
-That is the whole agent. Everything else is configuration.
+That is the whole agent. Persistent memory and skills are additive state
+around it, not a rewrite of the loop.
 
 ## Modules
 
@@ -30,95 +48,85 @@ That is the whole agent. Everything else is configuration.
 |---|---|
 | `message` | The unified conversation record (the source of truth). |
 | `transport` | `ProviderTransport` trait + normalized `ModelResponse`/`FinishReason`. |
-| `transport_http` | OpenAI-compatible `/chat/completions` over plain `http://` (no TLS). |
-| `transport_openrouter` | OpenRouter (HTTPS) via an auto-spawned python3 TLS proxy. |
+| `transport_http` | OpenAI-compatible `/chat/completions` over real HTTPS via `reqwest`. Also serves OpenRouter (just a base-url preset). |
 | `transport_mock` | Scripted offline "model" — proves the loop with zero network. |
 | `tool` | `Tool` trait + `ToolRegistry` (name → handler dispatch). |
 | `tools` | Built-ins: `run_terminal`, `read_file`, `write_file`, `patch`. |
 | `agent` | The ReAct loop. |
 | `config` | Runtime wiring (which transport, which model, budget). |
-| `json` | A tiny dependency-free JSON value/parser/serializer. |
-| `error` | One flat error type. |
+| `memory` | SQLite-backed persistent facts, injected into every system prompt. |
+| `skill` | Filesystem-convention skill loading (`skills/<name>/SKILL.md`). |
+| `session` | SQLite-backed chat history with FTS search; `--chat` survives restarts. |
+| `markdown` | Zero-dep Markdown→ANSI renderer (TTY-gated; no crate needed for this scope). |
 
 ## Build & run
 
-Requires Rust ≥ 1.75 (no external crates — builds fully offline).
+Requires Rust ≥ 1.75 and network access to crates.io on first build (fetches
+`reqwest`/`serde`/`rusqlite` and their dependency trees; subsequent builds are
+offline/cached as usual).
 
 ```bash
 cargo build --release
-cargo test                 # unit + integration tests (no network)
+cargo test
 
 # Offline demo (scripted model drives the real tools):
 ./target/release/grace --mock --prompt "run a terminal command"
 
-# Real OpenAI-compatible endpoint (see TLS note below):
+# Real OpenAI-compatible endpoint:
 ./target/release/grace \
-  --base-url http://127.0.0.1:8080/v1 \
-  --api-key "$KEY" --model grace-1 \
+  --base-url https://api.openai.com/v1 \
+  --api-key "$OPENAI_API_KEY" --model gpt-4o-mini \
   --prompt "list the files in the current directory"
 
-# OpenRouter (HTTPS) — key from --api-key or $OPENROUTER_API_KEY.
-# Grace auto-spawns a tiny python3 TLS proxy and talks to it over
-# plaintext, so the crate stays std-only (see TLS note below).
-#
-# NOTE: OpenRouter keys are often restricted to FREE models only. Use a
-# ":free" model id — e.g. tencent/hy3:free (or the openrouter/free router).
-# Paid ids like openai/gpt-4o-mini return HTTP 403 "Key limit exceeded".
+# OpenRouter (key from --api-key or $OPENROUTER_API_KEY):
 export OPENROUTER_API_KEY=sk-or-...
 ./target/release/grace \
   --openrouter --model tencent/hy3:free \
   --prompt "list the files in the current directory"
 
-# Interactive chat against OpenRouter (state persists across turns):
+# Interactive chat (state persists across turns, and across restarts once
+# session persistence is wired to --chat):
 ./target/release/grace --openrouter --model tencent/hy3:free --chat
 ```
 
-## Why std-only (and the TLS caveat)
+## Memory & skills
 
-`std` has no TLS, so `transport_http` speaks **plaintext `http://`**. To reach a
-TLS provider (OpenAI, Nous, etc.), front it with a local proxy
-(`nginx`/`mitmproxy`/a one-liner) and point `--base-url` at
-`http://127.0.0.1:PORT`. This is a deliberate, common production pattern and it
-keeps the crate **dependency-free and supply-chain-free**.
+Grace remembers durable facts across process runs and can load reusable
+procedures on demand:
 
-**OpenRouter is wired this way by default.** `transport_openrouter` embeds a
-~40-line pure-stdlib `python3` proxy that terminates TLS to
-`https://openrouter.ai` and exposes `http://127.0.0.1:PORT/api/v1` to the
-plaintext `transport_http`. Grace spawns it as a child process, waits until it
-is listening, runs the whole conversation through it, and force-kills it on
-exit. No Rust TLS crate, no `crates.io` dependency, no build changes — a single
-`grace --openrouter --model ... --prompt ...` command works. The only external
-requirement is `python3 >= 3.7` on `PATH`.
+```bash
+# Persistent memory (SQLite at ~/.grace/memory.db by default)
+./target/release/grace --mock --remember "user prefers concise answers"
+./target/release/grace --mock --prompt "what do you know about me?"
 
-The `ProviderTransport` seam means you can add a real TLS transport (e.g. via
-`hyper`/`rustls`) without touching the loop.
+# Skills live as plain markdown under ./skills/<name>/SKILL.md and are
+# loaded on demand via the built-in `load_skill` tool — no vault required.
+```
 
-## What is intentionally NOT here
+This is deliberately simple compared to Hermes' skill/vault system: a flat
+filesystem convention plus one SQLite file. It is not feature-complete
+(no vault, no dreaming yet) — it is the smallest version of "the agent
+actually remembers you and can learn a procedure" that is real, not a stub.
 
-The analysis concluded these are *wrapper*, not core. They belong in a
-production agent; omitting them is the point of the minimal rewrite:
+## What is intentionally NOT here (yet)
 
-- **Multi-provider fallback** — `HttpTransport` is one provider. Chain several
-  behind a `ProviderTransport` if you need resilience.
+- **Obsidian vault integration** — deferred; the memory/skill primitives above
+  are the substrate it will build on later.
+- **Multi-provider fallback chains** — `HttpTransport` is one provider at a
+  time; chain several behind `ProviderTransport` if you need resilience.
 - **Context compression** — long sessions will hit the model's context limit.
-- **Tool-safety guardrails** — `run_terminal` is unguarded. In production, add a
-  command allow-list / sandbox and a path allow-list for file tools.
-- **Streaming, retries, `/steer`, skills** — out of scope by design.
+- **Tool-safety guardrails** — `run_terminal` is unguarded. Add a command
+  allow-list / sandbox before exposing this on a shared host.
+- **Streaming, `/steer`** — out of scope by design; the loop is intentionally
+  synchronous and easy to reason about.
 
 ## Security & safety
 
 Grace executes model-requested shell commands and file writes with **no
-sandbox or allow-list**. It is safe to run against the offline `--mock` model
-or a trusted endpoint; do **not** point it at an untrusted model or expose it
-on a shared host without adding the guardrails above. The bundled tools are
-deliberately thin so you can harden them for your environment.
-
-## Lines of code
-
-~2,240 lines of Rust across the modules above (tests separate). The **agent
-loop itself is ~60 lines**; the bulk is the dependency-free JSON parser (with
-tests) and the HTTP/OpenRouter transports. The point stands: the *core logic*
-is tiny; the volume is plumbing you can drop or swap.
+sandbox or allow-list**. Safe against the offline `--mock` model or a trusted
+endpoint; do **not** point it at an untrusted model or expose it on a shared
+host without adding guardrails. The bundled tools are deliberately thin so you
+can harden them for your environment.
 
 ## License
 

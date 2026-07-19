@@ -1,15 +1,14 @@
 //! The unified conversation message — the single source of truth for state.
 //!
 //! This mirrors the OpenAI `messages` schema, which is also what the
-//! `ProviderTransport` normalizes everything to. Keeping one message type
-//! (rather than per-provider shapes) is the key simplification that makes the
-//! core small: the transport converts *to* API format, the agent only ever
-//! sees this.
+//! `ProviderTransport` normalizes everything to. Backed by `serde` derives so
+//! (de)serialization is handled by `serde_json` rather than hand-rolled.
 
-use crate::json::Json;
+use serde::{Deserialize, Serialize};
 
 /// The role of a message in the conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     #[default]
     System,
@@ -35,25 +34,64 @@ impl Role {
 /// `content` is the visible text. `tool_calls` carries assistant-requested
 /// tool invocations. `tool_call_id` links a `Tool` message back to the call
 /// that produced it. `name` is the tool's name (set on `Tool` messages).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
     /// Present only on `Assistant` messages that request tool calls.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tool_calls: Vec<ToolCall>,
     /// Present only on `Tool` messages: the id of the call being answered.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool_call_id: Option<String>,
     /// Present only on `Tool` messages: the tool's name.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
 
-/// An assistant-requested tool invocation.
-#[derive(Debug, Clone)]
+/// An assistant-requested tool invocation, in the API wire shape
+/// (`{id, type: "function", function: {name, arguments}}`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
+    #[serde(rename = "type", default = "function_type", skip_serializing_if = "is_function_type")]
+    pub kind: String,
+    pub function: ToolCallFunction,
+}
+
+fn function_type() -> String {
+    "function".to_string()
+}
+fn is_function_type(s: &str) -> bool {
+    s == "function"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallFunction {
     pub name: String,
     /// Raw JSON arguments string, exactly as the model emitted them.
     pub arguments: String,
+}
+
+impl ToolCall {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            kind: function_type(),
+            function: ToolCallFunction {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.function.name
+    }
+
+    pub fn arguments(&self) -> &str {
+        &self.function.arguments
+    }
 }
 
 impl Message {
@@ -89,46 +127,5 @@ impl Message {
             name: Some(name.into()),
             ..Default::default()
         }
-    }
-
-    /// Serialize this message to the OpenAI `messages` JSON shape.
-    pub fn to_json(&self) -> Json {
-        let mut pairs = vec![
-            (String::from("role"), Json::String(self.role.as_str().to_string())),
-            (String::from("content"), Json::String(self.content.clone())),
-        ];
-        if !self.tool_calls.is_empty() {
-            let calls: Vec<Json> = self
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    Json::Object(vec![
-                        (String::from("id"), Json::String(tc.id.clone())),
-                        (
-                            String::from("type"),
-                            Json::String(String::from("function")),
-                        ),
-                        (
-                            String::from("function"),
-                            Json::Object(vec![
-                                (String::from("name"), Json::String(tc.name.clone())),
-                                (
-                                    String::from("arguments"),
-                                    Json::String(tc.arguments.clone()),
-                                ),
-                            ]),
-                        ),
-                    ])
-                })
-                .collect();
-            pairs.push((String::from("tool_calls"), Json::Array(calls)));
-        }
-        if let Some(id) = &self.tool_call_id {
-            pairs.push((String::from("tool_call_id"), Json::String(id.clone())));
-        }
-        if let Some(name) = &self.name {
-            pairs.push((String::from("name"), Json::String(name.clone())));
-        }
-        Json::Object(pairs)
     }
 }

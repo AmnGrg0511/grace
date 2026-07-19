@@ -1,14 +1,13 @@
 //! Provider transport — the vendor-neutral seam.
 //!
 //! [`ProviderTransport`] is the only thing the agent loop knows about "an LLM".
-//! Every provider (OpenAI, Anthropic, Ollama, a mock) implements these five
-//! methods. This is the seam Hermes isolates behind `transports/base.py`:
-//! `convert_messages / convert_tools / build_kwargs / normalize_response /
-//! map_finish_reason`. We collapse it into one normalized call.
+//! Every provider (OpenAI, Anthropic, Ollama, a mock) implements these two
+//! methods. This is the seam Hermes isolates behind `transports/base.py`.
 
 use crate::error::Result;
-use crate::json::Json;
 use crate::message::Message;
+use serde::Serialize;
+use serde_json::Value;
 
 /// The set of tools, in the OpenAI tool-spec shape, that the model may call.
 #[derive(Debug, Clone)]
@@ -16,8 +15,7 @@ pub struct ToolSpec {
     pub name: String,
     pub description: String,
     /// JSON schema fragment for the `properties` of the function.
-    /// Stored as a `Json` object so we never have to re-serialize by hand.
-    pub parameters: Json,
+    pub parameters: Value,
 }
 
 /// What a model returned for one turn.
@@ -62,82 +60,66 @@ pub trait ProviderTransport {
     fn name(&self) -> &str;
 
     /// Send the conversation and available tools; return the model's response.
-    fn complete(
-        &self,
-        messages: &[Message],
-        tools: &[ToolSpec],
-        model: &str,
-    ) -> Result<ModelResponse>;
+    fn complete(&self, messages: &[Message], tools: &[ToolSpec], model: &str) -> Result<ModelResponse>;
+}
+
+#[derive(Serialize)]
+struct ToolFunctionJson<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a Value,
+}
+
+#[derive(Serialize)]
+struct ToolJson<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: ToolFunctionJson<'a>,
 }
 
 /// Build the OpenAI-compatible `tools` payload from our specs.
-pub(crate) fn tools_to_json(tools: &[ToolSpec]) -> Json {
-    Json::Array(
-        tools
-            .iter()
-            .map(|t| {
-                Json::Object(vec![
-                    (String::from("type"), Json::String(String::from("function"))),
-                    (
-                        String::from("function"),
-                        Json::Object(vec![
-                            (String::from("name"), Json::String(t.name.clone())),
-                            (String::from("description"), Json::String(t.description.clone())),
-                            (
-                                String::from("parameters"),
-                                t.parameters.clone(),
-                            ),
-                        ]),
-                    ),
-                ])
-            })
-            .collect(),
-    )
+pub(crate) fn tools_to_json(tools: &[ToolSpec]) -> Value {
+    let items: Vec<ToolJson> = tools
+        .iter()
+        .map(|t| ToolJson {
+            kind: "function",
+            function: ToolFunctionJson {
+                name: &t.name,
+                description: &t.description,
+                parameters: &t.parameters,
+            },
+        })
+        .collect();
+    serde_json::to_value(items).unwrap_or(Value::Array(vec![]))
 }
 
 /// Parse an OpenAI-style `choices[0].message` JSON into our [`ModelResponse`].
-pub(crate) fn parse_openai_message(msg: &Json) -> Result<ModelResponse> {
+pub(crate) fn parse_openai_message(msg: &Value, finish_reason_str: Option<&str>) -> Result<ModelResponse> {
     let content = msg
         .get("content")
-        .and_then(Json::as_str)
+        .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
 
     let mut tool_calls = Vec::new();
-    if let Some(calls) = msg.get("tool_calls").and_then(Json::as_array) {
+    if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
         for call in calls {
-            let id = call
-                .get("id")
-                .and_then(Json::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let func = call.get("function").cloned().unwrap_or(Json::Null);
-            let name = func
-                .get("name")
-                .and_then(Json::as_str)
-                .unwrap_or_default()
-                .to_string();
+            let id = call.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+            let func = call.get("function").cloned().unwrap_or(Value::Null);
+            let name = func.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             let arguments = func
                 .get("arguments")
-                .and_then(Json::as_str)
+                .and_then(Value::as_str)
                 .unwrap_or("{}")
                 .to_string();
-            tool_calls.push(crate::message::ToolCall {
-                id,
-                name,
-                arguments,
-            });
+            tool_calls.push(crate::message::ToolCall::new(id, name, arguments));
         }
     }
 
-    let finish_reason = msg
-        .get("finish_reason")
-        .and_then(Json::as_str)
+    let finish_reason = finish_reason_str
         .map(FinishReason::from_api)
         .unwrap_or(FinishReason::Stop);
 
-    // If the API nests finish_reason at the choice level, the caller passes it
-    // via the message object already; here we fall back to Stop if absent.
     Ok(ModelResponse {
         content,
         tool_calls,

@@ -1,7 +1,8 @@
 //! `grace` — a minimal, vendor-neutral ReAct agent core.
 //!
 //! This is the irreducible spine of an agent (Hermes-inspired), written in
-//! Rust with best practices and **zero dependencies** (only `std`).
+//! Rust with best practices, preferring official/native crates (`reqwest`,
+//! `serde`/`serde_json`) over hand-rolled reimplementations of TCP/TLS/JSON.
 //!
 //! The architecture mirrors the engine we studied:
 //!
@@ -22,7 +23,6 @@
 //! - [`tools`] — the bundled built-in tools (terminal, file read/write, patch).
 //! - [`agent`] — the ReAct loop.
 //! - [`config`] — runtime configuration.
-//! - [`json`] — a tiny, dependency-free JSON value/parser/serializer.
 //! - [`error`] — the single error type.
 
 #![forbid(unsafe_code)]
@@ -31,12 +31,13 @@
 pub mod agent;
 pub mod config;
 pub mod error;
-pub mod json;
 pub mod markdown;
+pub mod memory;
 pub mod message;
+pub mod session;
+pub mod skill;
 pub mod tool;
 pub mod tools;
 pub mod transport;
 pub mod transport_http;
 pub mod transport_mock;
-pub mod transport_openrouter;

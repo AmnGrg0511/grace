@@ -4,22 +4,29 @@
 //!   # Offline demo (scripted model + real tools):
 //!   grace --mock --prompt "run a terminal command"
 //!
-//!   # Interactive chat (state persists across turns):
-//!   grace --mock --chat
+//!   # Interactive chat (state persists across turns, and across restarts
+//!   # via --session):
+//!   grace --mock --chat --session work
 //!
-//!   # Real OpenAI-compatible endpoint (plaintext http://, front TLS w/ proxy):
-//!   grace --base-url http://127.0.0.1:8080/v1 \
-//!                --api-key "$KEY" --model grace-1 --prompt "list files"
+//!   # Real OpenAI-compatible endpoint (HTTPS via reqwest/rustls):
+//!   grace --base-url https://api.openai.com/v1 \
+//!                --api-key "$KEY" --model gpt-4o-mini --prompt "list files"
 //!
-//!   # OpenRouter (HTTPS via auto-spawned python3 TLS proxy; key from env):
+//!   # OpenRouter (HTTPS via reqwest; key from env or --api-key):
 //!   export OPENROUTER_API_KEY=sk-or-...
-//!   grace --openrouter --model openai/gpt-4o-mini --prompt "list files"
+//!   grace --openrouter --model tencent/hy3:free --prompt "list files"
+//!
+//!   # Durable memory (survives process restarts, injected into every prompt):
+//!   grace --mock --remember "user prefers concise answers"
+//!   grace --mock --prompt "what do you know about me?"
 
 use std::process::ExitCode;
 
 use grace::agent::run_turn;
 use grace::config::Config;
+use grace::memory::Memory;
 use grace::message::Message;
+use grace::session::SessionStore;
 
 fn main() -> ExitCode {
     match run() {
@@ -31,6 +38,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut prompt: Option<String> = None;
@@ -42,6 +50,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut openrouter = false;
     let mut max_iterations: u32 = 16;
     let mut system_prompt: Option<String> = None;
+    let mut remember: Option<String> = None;
+    let mut session_id: Option<String> = None;
+    let mut skills_dir: Option<String> = None;
+    let mut memory_path: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -75,14 +87,27 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 i += 1;
             }
             "--max-iterations" => {
-                max_iterations = args
-                    .get(i + 1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(16);
+                max_iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(16);
                 i += 2;
             }
             "--system" => {
                 system_prompt = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--remember" => {
+                remember = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--session" => {
+                session_id = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--skills-dir" => {
+                skills_dir = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--memory-path" => {
+                memory_path = args.get(i + 1).cloned();
                 i += 2;
             }
             "--help" | "-h" => {
@@ -97,22 +122,50 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     }
 
+    // Open durable memory (always; it's a cheap local file, not a network dep).
+    let mem_path = memory_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(Memory::default_path);
+    let memory = Memory::open(&mem_path).map_err(|e| e.to_string())?;
+
+    // --remember is a standalone action: store the fact and exit.
+    if let Some(fact) = remember {
+        let id = memory.remember(&fact).map_err(|e| e.to_string())?;
+        println!("remembered (id {id}): {fact}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
     if !chat && prompt.is_none() {
-        eprintln!("error: --prompt is required unless --chat is given (or use --help)");
+        eprintln!("error: --prompt is required unless --chat or --remember is given (or use --help)");
         return Ok(ExitCode::FAILURE);
     }
 
-    let config = Config::from_args(base_url, api_key, model, mock, openrouter, max_iterations, system_prompt)
-        .map_err(|e| e.to_string())?;
+    let config = Config::from_args(
+        base_url,
+        api_key,
+        model,
+        mock,
+        openrouter,
+        max_iterations,
+        system_prompt,
+    )
+    .map_err(|e| e.to_string())?;
 
     let transport = config.build_transport().map_err(|e| e.to_string())?;
-    let tools = Config::build_registry();
+    let skills_root = skills_dir.unwrap_or_else(|| "skills".to_string());
+    let tools = Config::build_registry_with_skills(skills_root);
 
     let mut messages: Vec<Message> = Vec::new();
-    let sp = config
+    let mut sp = config
         .system_prompt
         .clone()
         .unwrap_or_else(|| grace::config::DEFAULT_SYSTEM_PROMPT.to_string());
+    // Ground the persona in durable facts instead of leaving it purely
+    // decorative text: whatever Grace has been told to remember is appended
+    // to every system prompt, every run.
+    if let Some(block) = memory.as_prompt_block().map_err(|e| e.to_string())? {
+        sp.push_str(&block);
+    }
     messages.push(Message::system(sp));
 
     println!(
@@ -122,26 +175,55 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         tools.specs().len()
     );
 
+    // Session persistence: if --session is given, resume prior history and
+    // persist new turns as they happen (survives process restarts).
+    let sessions = SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?;
+    if let Some(sid) = &session_id {
+        let prior = sessions.load(sid).map_err(|e| e.to_string())?;
+        if !prior.is_empty() {
+            println!("[grace] resumed session '{sid}' ({} prior turns)", prior.len());
+        }
+        messages.extend(prior);
+    }
+
     if chat {
-        run_chat(transport.as_ref(), &tools, &mut messages, config.max_iterations);
+        run_chat(
+            transport.as_ref(),
+            &tools,
+            &mut messages,
+            config.max_iterations,
+            &sessions,
+            session_id.as_deref(),
+        );
         return Ok(ExitCode::SUCCESS);
     }
 
     // One-shot mode.
-    messages.push(Message::user(prompt.unwrap()));
+    let user_text = prompt.unwrap();
+    messages.push(Message::user(user_text.clone()));
+    if let Some(sid) = &session_id {
+        let _ = sessions.append(sid, &Message::user(user_text));
+    }
     let answer = run_turn(transport.as_ref(), &tools, &mut messages, config.max_iterations)
         .map_err(|e| e.to_string())?;
+    if let Some(sid) = &session_id {
+        let _ = sessions.append(sid, &Message::assistant(answer.clone()));
+    }
     println!("\n--- answer ---\n{}", grace::markdown::render_terminal(&answer));
     Ok(ExitCode::SUCCESS)
 }
 
 /// Interactive REPL. Each line you type is appended as a user message and the
-/// conversation history (including tool calls) is preserved across turns.
+/// conversation history (including tool calls) is preserved across turns. If
+/// a session id was given, each turn is also persisted to disk immediately.
+#[allow(clippy::too_many_arguments)]
 fn run_chat(
     transport: &(dyn grace::transport::ProviderTransport + '_),
     tools: &grace::tool::ToolRegistry,
     messages: &mut Vec<Message>,
     max_iterations: u32,
+    sessions: &SessionStore,
+    session_id: Option<&str>,
 ) {
     use std::io::BufRead;
 
@@ -161,8 +243,16 @@ fn run_chat(
             break;
         }
         messages.push(Message::user(text.to_string()));
+        if let Some(sid) = session_id {
+            let _ = sessions.append(sid, &Message::user(text.to_string()));
+        }
         match run_turn(transport, tools, messages, max_iterations) {
-            Ok(answer) => println!("\ngrace: {}\n", grace::markdown::render_terminal(&answer)),
+            Ok(answer) => {
+                println!("\ngrace: {}\n", grace::markdown::render_terminal(&answer));
+                if let Some(sid) = session_id {
+                    let _ = sessions.append(sid, &Message::assistant(answer));
+                }
+            }
             Err(e) => {
                 eprintln!("error: {e}");
                 // Drop the last user message so a failed turn can be retried.
@@ -173,20 +263,25 @@ fn run_chat(
 }
 
 fn print_help() {
-    let help = r#"grace — minimal vendor-neutral ReAct agent (std-only, zero deps)
+    let help = r#"grace — minimal vendor-neutral ReAct agent
 
 Usage:
   grace --mock --prompt "run a terminal command"
-  grace --mock --chat
-  grace --base-url http://127.0.0.1:8080/v1 --api-key KEY --model M --prompt "..."
+  grace --mock --chat --session work
+  grace --base-url https://api.openai.com/v1 --api-key KEY --model M --prompt "..."
   grace --openrouter --model tencent/hy3:free --prompt "..."   (key from --api-key or $OPENROUTER_API_KEY; free-only keys need a :free model)
+  grace --mock --remember "user prefers concise answers"
 
 Flags:
   --prompt <text>        The user instruction (one-shot mode)
   --chat                 Interactive REPL (state persists across turns)
+  --session <id>         Persist/resume chat history across process restarts (SQLite)
+  --remember <fact>      Store a durable fact (SQLite memory) and exit
+  --memory-path <path>   Override memory DB path (default ~/.grace/memory.db)
+  --skills-dir <path>    Directory of skills/<name>/SKILL.md (default ./skills)
   --mock                 Use the offline scripted model (no network)
-  --openrouter           Use OpenRouter (HTTPS; auto-spawns a python3 TLS proxy)
-  --base-url <url>       OpenAI-compatible endpoint (http:// only)
+  --openrouter           Use OpenRouter (HTTPS via reqwest/rustls)
+  --base-url <url>       OpenAI-compatible endpoint (http:// or https://)
   --api-key <key>        Bearer token (default empty; for OpenRouter uses $OPENROUTER_API_KEY)
   --model <name>         Model id (required for http/openrouter mode)
   --max-iterations <n>   Tool-call round cap (default 16)

@@ -1,7 +1,6 @@
 //! Built-in tools: terminal, file read/write, and patch.
 //!
-//! These are intentionally thin wrappers over `std` I/O — the minimal core's
-//! "tool substrate". Each tool:
+//! These are intentionally thin wrappers over `std` I/O. Each tool:
 //!   1. declares its name/description/parameters,
 //!   2. pulls typed fields out of the JSON args,
 //!   3. performs the side effect,
@@ -12,26 +11,23 @@
 //! the minimal core unguarded but document the gap in the README.
 
 use crate::error::{AgentError, Result};
-use crate::json::Json;
 use crate::tool::Tool;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 // ---- helpers ---------------------------------------------------------------
 
-fn arg_str(args: &Json, key: &str) -> Result<String> {
+fn arg_str(args: &Value, key: &str) -> Result<String> {
     args.get(key)
-        .and_then(Json::as_str)
+        .and_then(Value::as_str)
         .map(|s| s.to_string())
         .ok_or_else(|| AgentError::Tool(format!("missing string argument '{key}'")))
 }
 
-fn str_prop(_name: &str, desc: &str) -> Json {
-    Json::Object(vec![
-        (String::from("type"), Json::String(String::from("string"))),
-        (String::from("description"), Json::String(desc.to_string())),
-    ])
+fn str_prop(desc: &str) -> Value {
+    json!({"type": "string", "description": desc})
 }
 
 // ---- run_terminal ----------------------------------------------------------
@@ -48,26 +44,17 @@ impl Tool for TerminalTool {
         "Run a shell command and return its combined stdout/stderr and exit code."
     }
 
-    fn parameters(&self) -> Json {
-        Json::Object(vec![
-            (
-                String::from("type"),
-                Json::String(String::from("object")),
-            ),
-            (
-                String::from("properties"),
-                Json::Object(vec![
-                    (String::from("command"), str_prop("command", "The shell command to execute.")),
-                ]),
-            ),
-            (
-                String::from("required"),
-                Json::Array(vec![Json::String(String::from("command"))]),
-            ),
-        ])
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "command": str_prop("The shell command to execute."),
+            },
+            "required": ["command"],
+        })
     }
 
-    fn run(&self, args: &Json) -> Result<String> {
+    fn run(&self, args: &Value) -> Result<String> {
         let command = arg_str(args, "command")?;
         let output = Command::new("sh")
             .arg("-c")
@@ -102,27 +89,19 @@ impl Tool for ReadFileTool {
         "Read a text file and return its contents."
     }
 
-    fn parameters(&self) -> Json {
-        Json::Object(vec![
-            (String::from("type"), Json::String(String::from("object"))),
-            (
-                String::from("properties"),
-                Json::Object(vec![(
-                    String::from("path"),
-                    str_prop("path", "Absolute or relative path to the file."),
-                )]),
-            ),
-            (
-                String::from("required"),
-                Json::Array(vec![Json::String(String::from("path"))]),
-            ),
-        ])
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": str_prop("Absolute or relative path to the file."),
+            },
+            "required": ["path"],
+        })
     }
 
-    fn run(&self, args: &Json) -> Result<String> {
+    fn run(&self, args: &Value) -> Result<String> {
         let path = arg_str(args, "path")?;
-        let content = fs::read_to_string(&path)
-            .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
+        let content = fs::read_to_string(&path).map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
         Ok(content)
     }
 }
@@ -141,34 +120,23 @@ impl Tool for WriteFileTool {
         "Write text content to a file, creating parent directories as needed. Overwrites."
     }
 
-    fn parameters(&self) -> Json {
-        Json::Object(vec![
-            (String::from("type"), Json::String(String::from("object"))),
-            (
-                String::from("properties"),
-                Json::Object(vec![
-                    (String::from("path"), str_prop("path", "Path to write.")),
-                    (String::from("content"), str_prop("content", "Text to write.")),
-                ]),
-            ),
-            (
-                String::from("required"),
-                Json::Array(vec![
-                    Json::String(String::from("path")),
-                    Json::String(String::from("content")),
-                ]),
-            ),
-        ])
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": str_prop("Path to write."),
+                "content": str_prop("Text to write."),
+            },
+            "required": ["path", "content"],
+        })
     }
 
-    fn run(&self, args: &Json) -> Result<String> {
+    fn run(&self, args: &Value) -> Result<String> {
         let path = arg_str(args, "path")?;
         let content = arg_str(args, "content")?;
         if let Some(parent) = Path::new(&path).parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    AgentError::Tool(format!("create dirs for {}: {e}", path))
-                })?;
+                fs::create_dir_all(parent).map_err(|e| AgentError::Tool(format!("create dirs for {}: {e}", path)))?;
             }
         }
         let nbytes = content.len();
@@ -193,50 +161,27 @@ impl Tool for PatchTool {
         "Replace the first occurrence of `old_string` with `new_string` in a file (case-sensitive, literal)."
     }
 
-    fn parameters(&self) -> Json {
-        Json::Object(vec![
-            (String::from("type"), Json::String(String::from("object"))),
-            (
-                String::from("properties"),
-                Json::Object(vec![
-                    (String::from("path"), str_prop("path", "File to edit.")),
-                    (
-                        String::from("old_string"),
-                        str_prop("old_string", "Exact text to find and replace."),
-                    ),
-                    (
-                        String::from("new_string"),
-                        str_prop("new_string", "Replacement text."),
-                    ),
-                ]),
-            ),
-            (
-                String::from("required"),
-                Json::Array(vec![
-                    Json::String(String::from("path")),
-                    Json::String(String::from("old_string")),
-                    Json::String(String::from("new_string")),
-                ]),
-            ),
-        ])
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": str_prop("File to edit."),
+                "old_string": str_prop("Exact text to find and replace."),
+                "new_string": str_prop("Replacement text."),
+            },
+            "required": ["path", "old_string", "new_string"],
+        })
     }
 
-    fn run(&self, args: &Json) -> Result<String> {
+    fn run(&self, args: &Value) -> Result<String> {
         let path = arg_str(args, "path")?;
         let old = arg_str(args, "old_string")?;
         let new = arg_str(args, "new_string")?;
-        let original = fs::read_to_string(&path)
-            .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
+        let original = fs::read_to_string(&path).map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
         match original.find(&old) {
             Some(idx) => {
-                let replaced = format!(
-                    "{}{}{}",
-                    &original[..idx],
-                    new,
-                    &original[idx + old.len()..]
-                );
-                fs::write(&path, &replaced)
-                    .map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
+                let replaced = format!("{}{}{}", &original[..idx], new, &original[idx + old.len()..]);
+                fs::write(&path, &replaced).map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
                 Ok(format!(
                     "patched {} (replaced {}-byte block with {}-byte block)",
                     path,

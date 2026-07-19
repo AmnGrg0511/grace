@@ -1,15 +1,11 @@
 //! The single error type for the whole crate.
-//!
-//! A flat `thiserror`-style enum without the dependency: we implement a small
-//! `Display` ourselves. Keeping one error type makes the agent loop and tool
-//! plumbing uniform.
 
 use std::fmt;
 
 /// Errors produced anywhere in the core.
 #[derive(Debug)]
 pub enum AgentError {
-    /// JSON parse failure.
+    /// JSON (de)serialization failure.
     Json(String),
     /// I/O error (file/terminal ops).
     Io(std::io::Error),
@@ -52,6 +48,18 @@ impl From<std::io::Error> for AgentError {
 impl From<String> for AgentError {
     fn from(s: String) -> Self {
         AgentError::Tool(s)
+    }
+}
+
+impl From<serde_json::Error> for AgentError {
+    fn from(e: serde_json::Error) -> Self {
+        AgentError::Json(e.to_string())
+    }
+}
+
+impl From<reqwest::Error> for AgentError {
+    fn from(e: reqwest::Error) -> Self {
+        AgentError::Transport(e.to_string())
     }
 }
 
