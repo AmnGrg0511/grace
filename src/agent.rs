@@ -86,12 +86,6 @@ pub fn run_turn_with_events(
 
         let resp = complete_with_response_retry(transport, messages, &specs)?;
 
-        if let Some(cb) = on_event.as_deref_mut() {
-            if !resp.content.is_empty() {
-                cb(AgentEvent::AssistantContent(&resp.content));
-            }
-        }
-
         // Record the assistant's turn.
         let assistant = Message {
             role: Role::Assistant,
@@ -103,14 +97,28 @@ pub fn run_turn_with_events(
 
         match resp.finish_reason {
             FinishReason::Stop => {
+                // This IS the final answer — the caller renders it once as
+                // the answer, so no "thinking" event fires here (avoids the
+                // final answer being printed twice: once as an intermediate
+                // AssistantContent event, once as the answer itself).
                 return Ok(resp.content);
             }
             FinishReason::Length => {
+                if let Some(cb) = on_event.as_deref_mut() {
+                    if !resp.content.is_empty() {
+                        cb(AgentEvent::AssistantContent(&resp.content));
+                    }
+                }
                 continue;
             }
             FinishReason::ToolCalls => {
                 if resp.tool_calls.is_empty() {
                     return Ok(resp.content);
+                }
+                if let Some(cb) = on_event.as_deref_mut() {
+                    if !resp.content.is_empty() {
+                        cb(AgentEvent::AssistantContent(&resp.content));
+                    }
                 }
                 for call in &resp.tool_calls {
                     if let Some(cb) = on_event.as_deref_mut() {

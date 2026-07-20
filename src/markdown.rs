@@ -17,7 +17,10 @@ const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const BOLD_CYAN: &str = "\x1b[1;36m";
 const BOLD_BLUE: &str = "\x1b[1;94m";
-const REVERSE: &str = "\x1b[7m";
+// Golden monospace — 24-bit ANSI (RGB 212,175,55, "old gold") for inline
+// code and fenced code blocks, so code visually reads as a distinct,
+// elegant register instead of the harsh reverse-video block it used to be.
+const GOLD: &str = "\x1b[38;2;212;175;55m";
 
 /// Render `md` to terminal-friendly ANSI text if stdout is a TTY; otherwise
 /// return it unchanged.
@@ -37,7 +40,7 @@ pub fn render_terminal(md: &str) -> String {
             continue;
         }
         if in_code {
-            out.push_str(DIM);
+            out.push_str(GOLD);
             out.push_str("│ ");
             out.push_str(line);
             out.push('\n');
@@ -127,7 +130,7 @@ fn style_inline(s: &str) -> String {
                     chars.next();
                 }
             }
-            out.push_str(REVERSE);
+            out.push_str(GOLD);
             out.push_str(&buf);
             out.push_str(RESET);
         } else {
@@ -153,7 +156,7 @@ mod tests {
         // Force styling by simulating a TTY is hard; just check the helper.
         let styled = style_inline("a **b** c `d`");
         assert!(styled.contains(BOLD));
-        assert!(styled.contains(REVERSE));
+        assert!(styled.contains(GOLD));
         assert!(styled.contains(RESET));
         assert!(styled.contains("b"));
         assert!(styled.contains("d"));

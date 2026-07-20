@@ -361,7 +361,7 @@ fn run_chat(
 
     if let Ok(mut rl) = rustyline::DefaultEditor::new() {
         let _ = rl.load_history(&history_path);
-        while let Ok(line) = rl.readline("you: ") {
+        while let Ok(line) = rl.readline(&prompt_label()) {
             let text = line.trim();
             if text.is_empty() {
                 continue;
@@ -429,7 +429,12 @@ fn run_one_chat_turn(
         Some(&mut |event| print_agent_event(event)),
     ) {
         Ok(answer) => {
-            println!("\ngrace: {}\n", grace::markdown::render_terminal(&answer));
+            use owo_colors::{OwoColorize, Stream::Stdout};
+            println!(
+                "\n{} {}\n",
+                "grace".if_supports_color(Stdout, |t| t.magenta()),
+                grace::markdown::render_terminal(&answer)
+            );
             if let Some(sid) = session_id {
                 let _ = sessions.append(sid, &Message::assistant(answer));
             }
@@ -537,8 +542,13 @@ fn print_agent_event(event: grace::agent::AgentEvent) {
 
     match event {
         grace::agent::AgentEvent::AssistantContent(text) => {
+            // Sub-level under a "thinking" header (dim italic-style label),
+            // each line of the model's intermediate content indented under
+            // it — the same visual nesting as tool-call results, so
+            // thinking reads as one collapsible branch, not top-level noise.
+            println!("{}", "thinking".if_supports_color(Stdout, |t| t.blue()));
             for line in text.lines() {
-                println!("{}", line.if_supports_color(Stdout, |t| t.cyan()));
+                println!("  {}", line.if_supports_color(Stdout, |t| t.blue()));
             }
         }
         grace::agent::AgentEvent::ToolCallStart { name, arguments } => {
@@ -555,7 +565,11 @@ fn print_agent_event(event: grace::agent::AgentEvent) {
             let suffix = if result.len() > preview.len() { "…" } else { "" };
             for (i, line) in preview.lines().enumerate() {
                 let prefix = if i == 0 { "  ⎿ " } else { "    " };
-                println!("{}{}", prefix.if_supports_color(Stdout, |t| t.dimmed()), line);
+                println!(
+                    "{}{}",
+                    prefix.if_supports_color(Stdout, |t| t.dimmed()),
+                    line.if_supports_color(Stdout, |t| t.truecolor(212, 175, 55)),
+                );
             }
             if !suffix.is_empty() {
                 println!("    {}", suffix.if_supports_color(Stdout, |t| t.dimmed()));
@@ -563,6 +577,14 @@ fn print_agent_event(event: grace::agent::AgentEvent) {
             let _ = name; // shown on the ToolCallStart line already
         }
     }
+}
+
+/// The interactive-chat input prompt — magenta "you" to match the "grace"
+/// answer label, so the transcript reads as two clearly distinct speakers
+/// instead of a flat `you:`/`grace:` log.
+fn prompt_label() -> String {
+    use owo_colors::{OwoColorize, Stream::Stdout};
+    format!("{} ", "you".if_supports_color(Stdout, |t| t.cyan()))
 }
 
 /// Shrink a JSON tool-arguments string to a single readable line for the
