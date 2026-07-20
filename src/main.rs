@@ -637,15 +637,22 @@ fn pick_skin_interactive(names: &[String]) -> Option<String> {
     println!("\navailable skins:\n");
     for (i, name) in names.iter().enumerate() {
         let s = grace::skin::by_name(Some(name));
+        // A real mini-transcript, not a flat swatch: prompt glyph, a dimmed
+        // tool-call header, and an answer with inline code — exercises
+        // every role color at once so the picker actually shows what the
+        // skin looks like in use.
         println!(
-            "  {}) {}{} {}{}  {}sample{}",
-            i + 1,
-            ansi(s.prompt),
-            s.prompt_glyph,
-            name,
-            RESET,
-            ansi(s.code),
-            RESET,
+            "  {i}) {name}\n     {p}{glyph} you{r}  {tb}⏺{r} {tn}search_files{r}(query)  {td}⎿ 3 matches{r}\n     {a}{ag}{r} {c}rg{r} is faster than `grep` here.",
+            i = i + 1,
+            p = ansi(s.prompt),
+            glyph = s.prompt_glyph,
+            r = RESET,
+            tb = ansi(s.tool_bullet),
+            tn = ansi(s.tool_name),
+            td = ansi(s.tool_dim),
+            a = ansi(s.answer),
+            ag = s.answer_glyph,
+            c = ansi(s.code),
         );
     }
     print!("\nselect a skin [number]: ");
