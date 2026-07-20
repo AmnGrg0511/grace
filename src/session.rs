@@ -126,6 +126,25 @@ impl SessionStore {
         }
         Ok(out)
     }
+    /// Distinct session ids that have at least one message, most recently
+    /// active first. Powers `grace --list-sessions`.
+    pub fn list_sessions(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session_id, MAX(created_at) AS last_at FROM messages \
+                 GROUP BY session_id ORDER BY last_at DESC",
+            )
+            .map_err(|e| AgentError::Tool(format!("prepare: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| AgentError::Tool(format!("query: {e}")))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| AgentError::Tool(format!("row: {e}")))?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +197,24 @@ mod tests {
         let hits = store.search("France", 10).unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|(sid, _)| sid == "s1"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn list_sessions_returns_distinct_ids_most_recent_first() {
+        let path = scratch_db("list");
+        let _ = std::fs::remove_file(&path);
+        let store = SessionStore::open(&path).unwrap();
+
+        store.append("alpha", &Message::user("hi")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store.append("beta", &Message::user("hi")).unwrap();
+
+        let ids = store.list_sessions().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], "beta"); // most recently active
+        assert!(ids.contains(&"alpha".to_string()));
 
         let _ = std::fs::remove_file(&path);
     }

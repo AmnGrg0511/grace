@@ -137,6 +137,41 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 session_id = args.get(i + 1).cloned();
                 i += 2;
             }
+            "--list-sessions" => {
+                let sessions =
+                    SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?;
+                let ids = sessions.list_sessions().map_err(|e| e.to_string())?;
+                if ids.is_empty() {
+                    println!("no sessions yet — use --session <id> --chat to start one.");
+                } else {
+                    println!("sessions (most recently active first):");
+                    for id in ids {
+                        println!("  {id}");
+                    }
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            "--search-sessions" => {
+                let query = args.get(i + 1).cloned().unwrap_or_default();
+                if query.is_empty() {
+                    eprintln!(
+                        "--search-sessions requires a query, e.g. --search-sessions \"powerpro\""
+                    );
+                    return Ok(ExitCode::FAILURE);
+                }
+                let sessions =
+                    SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?;
+                let hits = sessions.search(&query, 20).map_err(|e| e.to_string())?;
+                if hits.is_empty() {
+                    println!("no matches for {query:?}.");
+                } else {
+                    for (session_id, content) in hits {
+                        let preview: String = content.chars().take(200).collect();
+                        println!("[{session_id}] {preview}");
+                    }
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
             "--skills-dir" => {
                 skills_dir = args.get(i + 1).cloned();
                 i += 2;
@@ -696,6 +731,8 @@ Flags:
   --prompt <text>        The user instruction (one-shot mode)
   --chat                 Interactive REPL (state persists across turns)
   --session <id>         Persist/resume chat history across process restarts (SQLite)
+  --list-sessions        List saved session ids, most recently active first, and exit
+  --search-sessions <q>  Full-text search past session turns (SQLite FTS5) and exit
   --remember <fact>      Store a durable fact (SQLite memory) and exit
   --memory-path <path>   Override memory DB path (default ~/.grace/memory.db)
   --skills-dir <path>    Directory of skills/<name>/SKILL.md (default ./skills)
