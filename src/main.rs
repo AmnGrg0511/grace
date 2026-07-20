@@ -525,19 +525,56 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
 /// Render an [`grace::agent::AgentEvent`] to stdout — the shared formatting
 /// used by both one-shot and chat mode so tool calls and intermediate model
 /// content are visible as they happen, not just the final answer.
+///
+/// Layout mirrors the tree-hierarchy style used by Claude Code / Codex CLI:
+/// thinking in dim italic-ish cyan, tool calls as a `⏺`-prefixed line with an
+/// indented `⎿` result underneath (so a run of many tool calls reads as a
+/// visual tree, not a wall of flat log lines). Colors auto-disable when
+/// stdout isn't a real terminal (owo-colors' `if_supports_color` — respects
+/// NO_COLOR/CLICOLOR).
 fn print_agent_event(event: grace::agent::AgentEvent) {
+    use owo_colors::{OwoColorize, Stream::Stdout};
+
     match event {
         grace::agent::AgentEvent::AssistantContent(text) => {
-            println!("[grace:thinking] {text}");
+            for line in text.lines() {
+                println!("{}", line.if_supports_color(Stdout, |t| t.cyan()));
+            }
         }
         grace::agent::AgentEvent::ToolCallStart { name, arguments } => {
-            println!("[grace:tool] -> {name}({arguments})");
+            let compact = compact_args(arguments);
+            println!(
+                "{} {}({})",
+                "⏺".if_supports_color(Stdout, |t| t.yellow()),
+                name.if_supports_color(Stdout, |t| t.bold()),
+                compact.if_supports_color(Stdout, |t| t.dimmed()),
+            );
         }
         grace::agent::AgentEvent::ToolCallEnd { name, result } => {
-            let preview: String = result.chars().take(200).collect();
-            let suffix = if result.len() > preview.len() { "..." } else { "" };
-            println!("[grace:tool] <- {name}: {preview}{suffix}");
+            let preview: String = result.chars().take(240).collect();
+            let suffix = if result.len() > preview.len() { "…" } else { "" };
+            for (i, line) in preview.lines().enumerate() {
+                let prefix = if i == 0 { "  ⎿ " } else { "    " };
+                println!("{}{}", prefix.if_supports_color(Stdout, |t| t.dimmed()), line);
+            }
+            if !suffix.is_empty() {
+                println!("    {}", suffix.if_supports_color(Stdout, |t| t.dimmed()));
+            }
+            let _ = name; // shown on the ToolCallStart line already
         }
+    }
+}
+
+/// Shrink a JSON tool-arguments string to a single readable line for the
+/// `⏺ name(args)` header — full args already appear in the tool's own
+/// output/logs, this is just the at-a-glance summary.
+fn compact_args(arguments: &str) -> String {
+    let one_line: String = arguments.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX: usize = 100;
+    if one_line.chars().count() > MAX {
+        format!("{}…", one_line.chars().take(MAX).collect::<String>())
+    } else {
+        one_line
     }
 }
 

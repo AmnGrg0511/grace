@@ -31,6 +31,7 @@
 pub mod agent;
 pub mod config;
 pub mod delegate_tool;
+pub mod diff;
 pub mod error;
 pub mod markdown;
 pub mod memory;

@@ -213,12 +213,8 @@ impl Tool for PatchTool {
             Some(idx) => {
                 let replaced = format!("{}{}{}", &original[..idx], new, &original[idx + old.len()..]);
                 fs::write(&path, &replaced).map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
-                Ok(format!(
-                    "patched {} (replaced {}-byte block with {}-byte block)",
-                    path,
-                    old.len(),
-                    new.len()
-                ))
+                let diff = crate::diff::unified_snippet(&old, &new, 3);
+                Ok(format!("patched {path}\n{diff}"))
             }
             None => Err(AgentError::Tool(format!(
                 "old_string not found in {} (exact, case-sensitive match required)",
