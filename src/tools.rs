@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -28,6 +29,57 @@ fn arg_str(args: &Value, key: &str) -> Result<String> {
 
 fn str_prop(desc: &str) -> Value {
     json!({"type": "string", "description": desc})
+}
+
+// ---- session_search ---------------------------------------------------------
+
+/// Lets the model search past conversation history on its own initiative —
+/// e.g. "what did we decide about X last time" — instead of that only
+/// happening as an invisible pre-flight recall pass (see `recall.rs`). Backed
+/// by the same `SessionStore` FTS5 index `--search-sessions` uses.
+pub struct SessionSearchTool {
+    store: Arc<crate::session::SessionStore>,
+}
+
+impl SessionSearchTool {
+    pub fn new(store: Arc<crate::session::SessionStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl Tool for SessionSearchTool {
+    fn name(&self) -> &str {
+        "session_search"
+    }
+
+    fn description(&self) -> &str {
+        "Full-text search past chat sessions (persisted across restarts) for prior turns matching a query. Use this when the user references something from an earlier conversation."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "query": str_prop("Search terms (FTS5 syntax: AND/OR/quoted phrases supported)."),
+            "limit": {"type": "integer", "description": "Max results (default 10)."}
+        })
+    }
+
+    fn run(&self, args: &Value) -> Result<String> {
+        let query = arg_str(args, "query")?;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10) as u32;
+        let hits = self
+            .store
+            .search(&query, limit)
+            .map_err(|e| AgentError::Tool(format!("session search failed: {e}")))?;
+        if hits.is_empty() {
+            return Ok(format!("no session history matches {query:?}."));
+        }
+        let mut out = String::new();
+        for (session_id, content) in hits {
+            let preview: String = content.chars().take(200).collect();
+            out.push_str(&format!("[{session_id}] {preview}\n"));
+        }
+        Ok(out)
+    }
 }
 
 // ---- run_terminal ----------------------------------------------------------

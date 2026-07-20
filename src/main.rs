@@ -269,10 +269,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let skills_root = skills_dir.unwrap_or_else(|| "skills".to_string());
     let tools_root = tools_dir.unwrap_or_else(|| "tools".to_string());
     let skills = grace::skill::SkillStore::new(&skills_root);
-    let sessions = SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?;
+    // Shared, not `Sync` (SQLite `Connection` isn't) — fine since Grace is
+    // single-threaded; Arc here is just for cheap ownership sharing between
+    // the direct session-store call sites and the session_search tool.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let sessions = std::sync::Arc::new(
+        SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?,
+    );
     let mut tools = Config::build_registry_with_plugins(skills_root, tools_root);
     tools.register(Box::new(grace::delegate_tool::DelegateTool::for_transport(
         &config.transport,
+    )));
+    tools.register(Box::new(grace::tools::SessionSearchTool::new(
+        std::sync::Arc::clone(&sessions),
     )));
 
     let mut messages: Vec<Message> = Vec::new();
@@ -408,6 +417,7 @@ fn run_chat(
     skin: &Skin,
 ) {
     use std::io::BufRead;
+    use std::io::Write;
 
     println!("chat mode — type a message, or 'exit'/'quit' to leave.\n");
 
@@ -449,8 +459,13 @@ fn run_chat(
         return;
     }
 
-    // Fallback: plain stdin, no history (piped input / non-TTY).
+    // Fallback: plain stdin, no history (piped input / non-TTY, or a
+    // terminal rustyline couldn't initialize against). Must still print the
+    // prompt glyph explicitly — rustyline normally owns that via its
+    // `readline(prompt)` argument, but this path bypasses rustyline entirely.
     let stdin = std::io::stdin();
+    print!("{}", prompt_label(skin));
+    let _ = std::io::stdout().flush();
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
@@ -458,6 +473,8 @@ fn run_chat(
         };
         let text = line.trim();
         if text.is_empty() {
+            print!("{}", prompt_label(skin));
+            let _ = std::io::stdout().flush();
             continue;
         }
         if matches!(text, "exit" | "quit" | "/exit" | "/quit") {
@@ -474,6 +491,8 @@ fn run_chat(
             text,
             skin,
         );
+        print!("{}", prompt_label(skin));
+        let _ = std::io::stdout().flush();
     }
 }
 
@@ -660,26 +679,23 @@ fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
             );
         }
         grace::agent::AgentEvent::ToolCallEnd { name, result } => {
-            let preview: String = result.chars().take(240).collect();
-            let suffix = if result.len() > preview.len() {
-                "…"
-            } else {
-                ""
-            };
-            for (i, line) in preview.lines().enumerate() {
+            // Render markdown (tables, code fences, etc.) in tool output too
+            // — previously this printed raw lines, so a table in a tool's
+            // stdout (e.g. read_file on a .md file) never got box-drawing
+            // and, worse, a flat 240-char truncation could cut a table row
+            // mid-line and break alignment. Truncate by LINE count instead
+            // of char count so a table/code block never gets sliced open.
+            let rendered = grace::markdown::render_terminal(result, skin);
+            const MAX_LINES: usize = 20;
+            let all_lines: Vec<&str> = rendered.lines().collect();
+            let truncated = all_lines.len() > MAX_LINES;
+            let preview_lines = &all_lines[..all_lines.len().min(MAX_LINES)];
+            for (i, line) in preview_lines.iter().enumerate() {
                 let prefix = if i == 0 { "  ⎿ " } else { "    " };
-                println!(
-                    "{}{}{}{}{}{}",
-                    color(skin.tool_dim),
-                    prefix,
-                    reset(),
-                    color(skin.code),
-                    line,
-                    reset(),
-                );
+                println!("{}{}{}{}", color(skin.tool_dim), prefix, reset(), line);
             }
-            if !suffix.is_empty() {
-                println!("    {}{}{}", color(skin.tool_dim), suffix, reset());
+            if truncated {
+                println!("    {}…{}", color(skin.tool_dim), reset());
             }
             let _ = name; // shown on the ToolCallStart line already
         }
