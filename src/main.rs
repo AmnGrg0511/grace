@@ -655,6 +655,7 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
 fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
     let color = |rgb: owo_colors::Rgb| if no_color() { String::new() } else { ansi(rgb) };
     let reset = || if no_color() { "" } else { RESET };
+    let dim = || if no_color() { "" } else { "\x1b[2m" };
 
     match event {
         grace::agent::AgentEvent::AssistantContent(text) => {
@@ -669,10 +670,14 @@ fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
         }
         grace::agent::AgentEvent::ToolCallStart { name, arguments } => {
             let compact = compact_args(arguments);
+            // Tool-call header dimmed as a whole — it's plumbing/traceability,
+            // not the conversation itself, so it should recede visually
+            // behind thinking/answer text rather than print at full brightness.
             println!(
-                "{}⏺{} {}({}){}",
+                "{}⏺{} {}{}({}){}",
                 color(skin.tool_bullet),
                 reset(),
+                dim(),
                 name,
                 compact,
                 reset(),

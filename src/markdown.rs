@@ -12,6 +12,7 @@
 
 use crate::skin::Skin;
 use std::io::IsTerminal;
+use unicode_width::UnicodeWidthStr;
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -153,14 +154,23 @@ fn split_row(row: &str) -> Vec<String> {
 /// box-drawing visually (the terminal itself wraps mid-row).
 const MAX_CELL_WIDTH: usize = 40;
 
-/// Visible length of `s` after inline markdown (`**bold**`, `` `code` ``) is
-/// stripped — i.e. what the reader actually sees once rendered. Column-width
-/// math MUST use this, not raw `.chars().count()`: `style_inline` drops the
-/// `**`/backtick delimiter characters when rendering, so counting them in
-/// the width calc pads every cell containing inline markup a few chars too
-/// wide, desyncing the whole column from that row on.
+/// Visible *terminal column* width of `s` after inline markdown
+/// (`**bold**`, `` `code` ``) is stripped — what the reader actually sees
+/// once rendered. Column-width math MUST use this, not `.chars().count()`:
+/// (1) `style_inline` drops the `**`/backtick delimiter chars, so counting
+/// them pads a cell too wide; (2) CJK/emoji occupy 2 terminal columns per
+/// char while combining marks occupy 0 — `chars().count()` treats every
+/// char as width 1, which is exactly the second breakage reported (wide
+/// Unicode desyncing tables again after the markup fix). `unicode-width`
+/// (used by rustc/ripgrep for this exact problem) gives the real column
+/// count instead of us hand-rolling an East-Asian-width table.
 fn visible_width(s: &str) -> usize {
-    let mut n = 0usize;
+    strip_inline_markup(s).width()
+}
+
+/// Strip `**bold**`/`` `code` `` delimiters, keeping only what prints.
+fn strip_inline_markup(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '*' && chars.peek() == Some(&'*') {
@@ -172,9 +182,9 @@ fn visible_width(s: &str) -> usize {
                         chars.next();
                         break;
                     }
-                    n += 1;
+                    out.push('*');
                 } else {
-                    n += 1;
+                    out.push(x);
                     chars.next();
                 }
             }
@@ -184,14 +194,14 @@ fn visible_width(s: &str) -> usize {
                     chars.next();
                     break;
                 }
-                n += 1;
+                out.push(x);
                 chars.next();
             }
         } else {
-            n += 1;
+            out.push(c);
         }
     }
-    n
+    out
 }
 
 /// Wrap `s` into lines of at most `width` chars, breaking on word
