@@ -89,6 +89,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut memory_path: Option<String> = None;
     let mut tools_dir: Option<String> = None;
     let mut stream = false;
+    let mut skin_override: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -176,6 +177,21 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 skills_dir = args.get(i + 1).cloned();
                 i += 2;
             }
+            "--skin" => {
+                skin_override = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--list-skins" => {
+                println!("available skins:");
+                for name in grace::skin::all_names() {
+                    println!("  {name}");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            "--select-skin" => {
+                run_skin_picker()?;
+                return Ok(ExitCode::SUCCESS);
+            }
             "--memory-path" => {
                 memory_path = args.get(i + 1).cloned();
                 i += 2;
@@ -202,7 +218,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     // Layered settings: defaults -> ~/.grace/config.toml -> CLI flags (CLI wins).
     let settings = grace::settings::Settings::load();
-    let skin = grace::skin::by_name(settings.skin.as_deref());
+    let skin = grace::skin::by_name(skin_override.as_deref().or(settings.skin.as_deref()));
     let mut max_iterations_opt: Option<u32> = None;
     settings.merge_into_args(
         &mut base_url,
@@ -640,6 +656,53 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
     Ok((model, base_url, api_key))
 }
 
+/// Interactive skin picker: lists every skin (7 built-ins + any custom ones
+/// under `~/.grace/skins/*.toml`) and previews each with its own colors, then
+/// persists the choice to `~/.grace/config.toml` — same "choose once,
+/// remembered forever" pattern as [`run_onboarding_wizard`]'s provider pick.
+fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let names = grace::skin::all_names();
+    if names.is_empty() {
+        println!("no skins available.");
+        return Ok(());
+    }
+    println!("\navailable skins:\n");
+    for (i, name) in names.iter().enumerate() {
+        let s = grace::skin::by_name(Some(name));
+        println!(
+            "  {}) {}{} {}{}  {}sample{}",
+            i + 1,
+            ansi(s.prompt),
+            s.prompt_glyph,
+            name,
+            RESET,
+            ansi(s.code),
+            RESET,
+        );
+    }
+    let mut stdin_lines = std::io::stdin().lines();
+    let choice: usize = loop {
+        print!("\nselect a skin [number]: ");
+        let _ = std::io::stdout().flush();
+        let raw = stdin_lines.next().and_then(|l| l.ok()).unwrap_or_default();
+        match raw.trim().parse::<usize>() {
+            Ok(n) if n >= 1 && n <= names.len() => break n - 1,
+            _ => println!("enter a number between 1 and {}", names.len()),
+        }
+    };
+    let picked = &names[choice];
+
+    let mut settings = grace::settings::Settings::load();
+    settings.skin = Some(picked.clone());
+    if let Err(e) = settings.save() {
+        eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
+    } else {
+        println!("\nskin set to \"{picked}\" — saved to ~/.grace/config.toml.\n");
+    }
+    Ok(())
+}
+
 /// Render an [`grace::agent::AgentEvent`] to stdout — the shared formatting
 /// used by both one-shot and chat mode so tool calls and intermediate model
 /// content are visible as they happen, not just the final answer.
@@ -754,6 +817,9 @@ Flags:
   --session <id>         Persist/resume chat history across process restarts (SQLite)
   --list-sessions        List saved session ids, most recently active first, and exit
   --search-sessions <q>  Full-text search past session turns (SQLite FTS5) and exit
+  --skin <name>          Use a named skin for this run (gilded/royal/ocean/sakura/forest/solaris/midnight, or a custom one)
+  --list-skins           List every available skin name and exit
+  --select-skin          Interactive skin picker with color previews; saves the choice to ~/.grace/config.toml
   --remember <fact>      Store a durable fact (SQLite memory) and exit
   --memory-path <path>   Override memory DB path (default ~/.grace/memory.db)
   --skills-dir <path>    Directory of skills/<name>/SKILL.md (default ./skills)
