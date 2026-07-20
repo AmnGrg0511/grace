@@ -39,11 +39,41 @@ fn complete_with_response_retry(
 }
 
 /// Run one conversation turn to completion and return the final answer.
+///
+/// `on_event`, if given, is called for every model reply and every tool
+/// call/result — the hook that gives a caller (the CLI, a TUI, a test)
+/// visibility into what the agent is actually doing turn by turn, instead
+/// of only seeing the final answer after the loop finishes silently.
 pub fn run_turn(
     transport: &(dyn ProviderTransport + '_),
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
     max_iterations: u32,
+) -> Result<String> {
+    run_turn_with_events(transport, tools, messages, max_iterations, None)
+}
+
+/// Agent lifecycle events, for surfacing progress to a human (or a log).
+pub enum AgentEvent<'a> {
+    /// The model produced assistant content this round (may be empty if it
+    /// only emitted tool calls).
+    AssistantContent(&'a str),
+    /// The model asked to call a tool.
+    ToolCallStart { name: &'a str, arguments: &'a str },
+    /// A tool call finished (ok or error, both surfaced — errors are fed
+    /// back to the model as a tool message, not fatal to the turn).
+    ToolCallEnd { name: &'a str, result: &'a str },
+}
+
+/// Same as [`run_turn`] but takes an optional event callback so the caller
+/// can render tool calls / intermediate content as they happen rather than
+/// only receiving the final answer string.
+pub fn run_turn_with_events(
+    transport: &(dyn ProviderTransport + '_),
+    tools: &ToolRegistry,
+    messages: &mut Vec<Message>,
+    max_iterations: u32,
+    mut on_event: Option<&mut dyn FnMut(AgentEvent)>,
 ) -> Result<String> {
     let specs = tools.specs();
 
@@ -55,6 +85,12 @@ pub fn run_turn(
         }
 
         let resp = complete_with_response_retry(transport, messages, &specs)?;
+
+        if let Some(cb) = on_event.as_deref_mut() {
+            if !resp.content.is_empty() {
+                cb(AgentEvent::AssistantContent(&resp.content));
+            }
+        }
 
         // Record the assistant's turn.
         let assistant = Message {
@@ -77,10 +113,16 @@ pub fn run_turn(
                     return Ok(resp.content);
                 }
                 for call in &resp.tool_calls {
+                    if let Some(cb) = on_event.as_deref_mut() {
+                        cb(AgentEvent::ToolCallStart { name: call.name(), arguments: call.arguments() });
+                    }
                     let result = match tools.execute(call.name(), call.arguments()) {
                         Ok(out) => out,
                         Err(e) => format!("tool error: {e}"),
                     };
+                    if let Some(cb) = on_event.as_deref_mut() {
+                        cb(AgentEvent::ToolCallEnd { name: call.name(), result: &result });
+                    }
                     messages.push(Message::tool(call.id.clone(), call.name().to_string(), result));
                 }
             }

@@ -29,6 +29,25 @@ pub enum TransportConfig {
     },
 }
 
+impl TransportConfig {
+    /// Re-derive the CLI flags that would reproduce this transport, so a
+    /// delegated subagent subprocess inherits the *real* configured
+    /// provider/model instead of silently falling back to `--mock`.
+    pub fn to_cli_args(&self) -> Vec<String> {
+        match self {
+            TransportConfig::Mock { .. } => vec!["--mock".to_string()],
+            TransportConfig::Http { base_url, api_key, model } => vec![
+                "--base-url".to_string(),
+                base_url.clone(),
+                "--api-key".to_string(),
+                api_key.clone(),
+                "--model".to_string(),
+                model.clone(),
+            ],
+        }
+    }
+}
+
 /// Full agent configuration.
 pub struct Config {
     pub transport: TransportConfig,

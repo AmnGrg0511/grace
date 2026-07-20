@@ -22,7 +22,6 @@
 
 use std::process::ExitCode;
 
-use grace::agent::run_turn;
 use grace::config::Config;
 use grace::memory::Memory;
 use grace::message::Message;
@@ -226,7 +225,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let skills = grace::skill::SkillStore::new(&skills_root);
     let sessions = SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?;
     let mut tools = Config::build_registry_with_plugins(skills_root, tools_root);
-    tools.register(Box::new(grace::delegate_tool::DelegateTool::mock()));
+    tools.register(Box::new(grace::delegate_tool::DelegateTool::for_transport(&config.transport)));
 
     let mut messages: Vec<Message> = Vec::new();
     let mut sp = config
@@ -318,8 +317,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         println!("[grace] --stream requested but no HTTP transport configured (mock mode); falling back to non-streaming.");
     }
 
-    let answer = run_turn(transport.as_ref(), &tools, &mut messages, config.max_iterations)
-        .map_err(|e| e.to_string())?;
+    let answer = grace::agent::run_turn_with_events(
+        transport.as_ref(),
+        &tools,
+        &mut messages,
+        config.max_iterations,
+        Some(&mut |event| print_agent_event(event)),
+    )
+    .map_err(|e| e.to_string())?;
     if let Some(sid) = &session_id {
         let _ = sessions.append(sid, &Message::assistant(answer.clone()));
     }
@@ -360,7 +365,13 @@ fn run_chat(
         if let Some(sid) = session_id {
             let _ = sessions.append(sid, &Message::user(text.to_string()));
         }
-        match run_turn(transport, tools, messages, max_iterations) {
+        match grace::agent::run_turn_with_events(
+            transport,
+            tools,
+            messages,
+            max_iterations,
+            Some(&mut |event| print_agent_event(event)),
+        ) {
             Ok(answer) => {
                 println!("\ngrace: {}\n", grace::markdown::render_terminal(&answer));
                 if let Some(sid) = session_id {
@@ -454,6 +465,25 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
     println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");
 
     Ok((model, base_url, api_key))
+}
+
+/// Render an [`grace::agent::AgentEvent`] to stdout — the shared formatting
+/// used by both one-shot and chat mode so tool calls and intermediate model
+/// content are visible as they happen, not just the final answer.
+fn print_agent_event(event: grace::agent::AgentEvent) {
+    match event {
+        grace::agent::AgentEvent::AssistantContent(text) => {
+            println!("[grace:thinking] {text}");
+        }
+        grace::agent::AgentEvent::ToolCallStart { name, arguments } => {
+            println!("[grace:tool] -> {name}({arguments})");
+        }
+        grace::agent::AgentEvent::ToolCallEnd { name, result } => {
+            let preview: String = result.chars().take(200).collect();
+            let suffix = if result.len() > preview.len() { "..." } else { "" };
+            println!("[grace:tool] <- {name}: {preview}{suffix}");
+        }
+    }
 }
 
 fn print_help() {

@@ -25,6 +25,16 @@ impl DelegateTool {
         }
     }
 
+    /// Build a delegate tool whose children inherit the parent's real,
+    /// currently-configured transport (base-url/api-key/model, or --mock)
+    /// instead of guessing — this is what makes `delegate` actually usable
+    /// against a live provider rather than silently downgrading to mock.
+    pub fn for_transport(transport: &crate::config::TransportConfig) -> Self {
+        Self {
+            transport_args: transport.to_cli_args(),
+        }
+    }
+
     /// Strip the `[grace] transport=...` banner line and the
     /// `--- answer ---` marker from a child's stdout, leaving just the answer
     /// text.
