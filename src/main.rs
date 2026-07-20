@@ -536,47 +536,119 @@ fn run_chat(
     }
 }
 
-/// `/model` (show current) or `/model <name>` (switch) mid-chat. Only takes
-/// effect on transports that own a swappable model (`HttpTransport`); mock
-/// has nothing to switch, so it just reports that.
+/// `/model` (interactive picker, same list as onboarding) or `/model <name>`
+/// (direct switch) mid-chat. Only takes effect on transports that own a
+/// swappable model (`HttpTransport`); mock has nothing to switch.
 fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '_), arg: &str) {
-    if arg.is_empty() {
-        match transport.current_model() {
-            Some(m) => println!("current model: {m}"),
-            None => println!(
-                "this transport ({}) has no switchable model.",
-                transport.name()
-            ),
-        }
-        return;
-    }
-    transport.set_model(arg);
-    match transport.current_model() {
-        Some(m) => println!("model switched to \"{m}\" for this session (not saved to config)."),
-        None => println!(
-            "this transport ({}) has no switchable model — nothing changed.",
-            transport.name()
-        ),
-    }
-}
-
-/// `/skin` (show current) or `/skin <name>` (switch) mid-chat. Session-only —
-/// use `--select-skin` to persist a default across runs.
-fn handle_skin_command(arg: &str, skin: &mut Skin) {
-    if arg.is_empty() {
+    if transport.current_model().is_none() {
         println!(
-            "available skins: {}\n(current skin has no stored name at runtime — use --select-skin to persist a default)",
-            grace::skin::all_names().join(", ")
+            "this transport ({}) has no switchable model.",
+            transport.name()
         );
         return;
     }
+    let picked = if arg.is_empty() {
+        match pick_model_interactive() {
+            Some(m) => m,
+            None => return,
+        }
+    } else {
+        arg.to_string()
+    };
+    transport.set_model(&picked);
+    if let Some(m) = transport.current_model() {
+        println!("model switched to \"{m}\" for this session (not saved to config).");
+    }
+}
+
+/// Shared model list+select flow: every model across every provider preset,
+/// flattened and numbered, plus a free-text "other" escape hatch. Used by
+/// both `/model` mid-chat and (via the same list) the first-run wizard's
+/// per-provider slice. Returns `None` on unparsable/EOF input (no-op).
+fn pick_model_interactive() -> Option<String> {
+    use std::io::Write;
+    let mut entries: Vec<(&str, &str)> = Vec::new();
+    for preset in PROVIDER_PRESETS {
+        for m in preset.models {
+            entries.push((preset.label, m.id));
+        }
+    }
+    println!("\navailable models:\n");
+    for (i, (provider, id)) in entries.iter().enumerate() {
+        println!("  {}) {id}  ({provider})", i + 1);
+    }
+    println!("  {}) other (type a model id)", entries.len() + 1);
+    print!("\nselect a model [number]: ");
+    let _ = std::io::stdout().flush();
+    let raw = std::io::stdin().lines().next()?.ok()?;
+    let raw = raw.trim();
+    if let Ok(n) = raw.parse::<usize>() {
+        if n >= 1 && n <= entries.len() {
+            return Some(entries[n - 1].1.to_string());
+        }
+        if n == entries.len() + 1 {
+            print!("model id: ");
+            let _ = std::io::stdout().flush();
+            return std::io::stdin()
+                .lines()
+                .next()?
+                .ok()
+                .map(|s| s.trim().to_string());
+        }
+    }
+    println!("not a valid choice — leaving model unchanged.");
+    None
+}
+
+/// `/skin` (interactive picker, same as `--select-skin`) or `/skin <name>`
+/// (direct switch) mid-chat. Session-only — use `--select-skin` to persist
+/// a default across runs.
+fn handle_skin_command(arg: &str, skin: &mut Skin) {
     let names = grace::skin::all_names();
-    if !names.iter().any(|n| n == arg) {
+    let picked = if arg.is_empty() {
+        match pick_skin_interactive(&names) {
+            Some(n) => n,
+            None => return,
+        }
+    } else if names.iter().any(|n| n == arg) {
+        arg.to_string()
+    } else {
         println!("unknown skin \"{arg}\" — available: {}", names.join(", "));
         return;
+    };
+    *skin = grace::skin::by_name(Some(&picked));
+    println!("skin switched to \"{picked}\" for this session (not saved to config).");
+}
+
+/// Shared skin list+preview+select flow, identical presentation to
+/// `--select-skin` so muscle memory carries over between startup and
+/// mid-chat. Returns `None` on unparsable/EOF input (no-op).
+fn pick_skin_interactive(names: &[String]) -> Option<String> {
+    use std::io::Write;
+    println!("\navailable skins:\n");
+    for (i, name) in names.iter().enumerate() {
+        let s = grace::skin::by_name(Some(name));
+        println!(
+            "  {}) {}{} {}{}  {}sample{}",
+            i + 1,
+            ansi(s.prompt),
+            s.prompt_glyph,
+            name,
+            RESET,
+            ansi(s.code),
+            RESET,
+        );
     }
-    *skin = grace::skin::by_name(Some(arg));
-    println!("skin switched to \"{arg}\" for this session (not saved to config).");
+    print!("\nselect a skin [number]: ");
+    let _ = std::io::stdout().flush();
+    let raw = std::io::stdin().lines().next()?.ok()?;
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n >= 1 && n <= names.len() => Some(names[n - 1].clone()),
+        _ => {
+            println!("not a valid choice — leaving skin unchanged.");
+            None
+        }
+    }
 }
 
 /// One user turn: append the user message, run it, print/persist the
@@ -723,42 +795,19 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
     Ok((model, base_url, api_key))
 }
 
-/// Interactive skin picker: lists every skin (7 built-ins + any custom ones
-/// under `~/.grace/skins/*.toml`) and previews each with its own colors, then
-/// persists the choice to `~/.grace/config.toml` — same "choose once,
-/// remembered forever" pattern as [`run_onboarding_wizard`]'s provider pick.
+/// Interactive skin picker: same list+preview flow as `/skin` mid-chat
+/// ([`pick_skin_interactive`]), but persists the choice to
+/// `~/.grace/config.toml` — same "choose once, remembered forever" pattern
+/// as [`run_onboarding_wizard`]'s provider pick.
 fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write;
     let names = grace::skin::all_names();
     if names.is_empty() {
         println!("no skins available.");
         return Ok(());
     }
-    println!("\navailable skins:\n");
-    for (i, name) in names.iter().enumerate() {
-        let s = grace::skin::by_name(Some(name));
-        println!(
-            "  {}) {}{} {}{}  {}sample{}",
-            i + 1,
-            ansi(s.prompt),
-            s.prompt_glyph,
-            name,
-            RESET,
-            ansi(s.code),
-            RESET,
-        );
-    }
-    let mut stdin_lines = std::io::stdin().lines();
-    let choice: usize = loop {
-        print!("\nselect a skin [number]: ");
-        let _ = std::io::stdout().flush();
-        let raw = stdin_lines.next().and_then(|l| l.ok()).unwrap_or_default();
-        match raw.trim().parse::<usize>() {
-            Ok(n) if n >= 1 && n <= names.len() => break n - 1,
-            _ => println!("enter a number between 1 and {}", names.len()),
-        }
+    let Some(picked) = pick_skin_interactive(&names) else {
+        return Ok(());
     };
-    let picked = &names[choice];
 
     let mut settings = grace::settings::Settings::load();
     settings.skin = Some(picked.clone());
