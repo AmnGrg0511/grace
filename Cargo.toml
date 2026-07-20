@@ -39,6 +39,7 @@ owo-colors = { version = "4", features = ["supports-colors"] }
 # hand-rolling LCS/Myers diff.
 similar = "2"
 unicode-width = "0.2.2"
+ctrlc = "3.5.2"
 
 [profile.release]
 opt-level = 3

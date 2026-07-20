@@ -50,7 +50,7 @@ pub fn run_turn(
     messages: &mut Vec<Message>,
     max_iterations: u32,
 ) -> Result<String> {
-    run_turn_with_events(transport, tools, messages, max_iterations, None)
+    run_turn_with_events(transport, tools, messages, max_iterations, None, None)
 }
 
 /// Agent lifecycle events, for surfacing progress to a human (or a log).
@@ -67,24 +67,37 @@ pub enum AgentEvent<'a> {
 
 /// Same as [`run_turn`] but takes an optional event callback so the caller
 /// can render tool calls / intermediate content as they happen rather than
-/// only receiving the final answer string.
+/// only receiving the final answer string. `interrupted`, if given, is
+/// polled between iterations and after every tool call — set it (e.g. from
+/// a Ctrl-C handler) to unwind the turn early with `AgentError::Interrupted`
+/// instead of running to completion.
 pub fn run_turn_with_events(
     transport: &(dyn ProviderTransport + '_),
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
     max_iterations: u32,
     mut on_event: Option<&mut dyn FnMut(AgentEvent)>,
+    interrupted: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<String> {
     let specs = tools.specs();
+    let is_interrupted =
+        || interrupted.is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst));
 
     let mut iterations = 0u32;
     loop {
+        if is_interrupted() {
+            return Err(AgentError::Interrupted);
+        }
         iterations += 1;
         if iterations > max_iterations {
             return Err(AgentError::BudgetExhausted { iterations });
         }
 
         let resp = complete_with_response_retry(transport, messages, &specs)?;
+
+        if is_interrupted() {
+            return Err(AgentError::Interrupted);
+        }
 
         // Record the assistant's turn.
         let assistant = Message {
@@ -121,6 +134,9 @@ pub fn run_turn_with_events(
                     }
                 }
                 for call in &resp.tool_calls {
+                    if is_interrupted() {
+                        return Err(AgentError::Interrupted);
+                    }
                     if let Some(cb) = on_event.as_deref_mut() {
                         cb(AgentEvent::ToolCallStart {
                             name: call.name(),
@@ -194,5 +210,27 @@ mod tests {
         let tool_msg = messages.iter().find(|m| m.role == Role::Tool).unwrap();
         assert!(tool_msg.content.contains("unknown tool"));
         assert!(answer.contains("mock response"));
+    }
+
+    #[test]
+    fn pre_set_interrupt_flag_aborts_before_any_completion() {
+        let transport: Box<dyn ProviderTransport> = Box::new(MockTransport::new(1));
+        let mut tools = ToolRegistry::new();
+        crate::tools::register_builtins(&mut tools);
+        let mut messages = base_messages();
+        let flag = std::sync::atomic::AtomicBool::new(true);
+
+        let res = run_turn_with_events(
+            transport.as_ref(),
+            &tools,
+            &mut messages,
+            8,
+            None,
+            Some(&flag),
+        );
+
+        assert!(matches!(res, Err(AgentError::Interrupted)));
+        // Nothing ran — the flag was already set before the first iteration.
+        assert_eq!(messages.len(), 1, "only the original user message");
     }
 }

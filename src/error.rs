@@ -19,6 +19,9 @@ pub enum AgentError {
     Config(String),
     /// The iteration/budget limit was reached before the model stopped.
     BudgetExhausted { iterations: u32 },
+    /// The user hit Ctrl-C mid-turn — not a real failure, just "stop now
+    /// and give me the prompt back".
+    Interrupted,
 }
 
 impl fmt::Display for AgentError {
@@ -36,6 +39,7 @@ impl fmt::Display for AgentError {
                     "iteration budget exhausted after {iterations} iterations"
                 )
             }
+            AgentError::Interrupted => write!(f, "interrupted"),
         }
     }
 }

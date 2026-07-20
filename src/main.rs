@@ -410,12 +410,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         println!("[grace] --stream requested but no HTTP transport configured (mock mode); falling back to non-streaming.");
     }
 
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let answer = grace::agent::run_turn_with_events(
         transport.as_ref(),
         &tools,
         &mut messages,
         config.max_iterations,
         Some(&mut |event| print_agent_event(event, &skin)),
+        Some(interrupted.as_ref()),
     )
     .map_err(|e| e.to_string())?;
     if let Some(sid) = &session_id {
@@ -448,7 +450,21 @@ fn run_chat(
     // the transport's own interior model instead (see `set_model`).
     let mut skin = *skin;
 
-    println!("chat mode — type a message, 'exit'/'quit' to leave, '/model [name]' or '/skin [name]' to switch mid-chat.\n");
+    // Ctrl-C mid-turn cancels the current turn (tool calls already run stay
+    // recorded) and returns to the prompt, instead of killing the whole
+    // process — installed once for the process, the flag is what the agent
+    // loop polls between steps. rustyline handles Ctrl-C at the idle prompt
+    // itself (returns `ReadlineError::Interrupted`, handled below to exit
+    // cleanly) independent of this signal handler.
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let flag = interrupted.clone();
+        let _ = ctrlc::set_handler(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
+    println!("chat mode — type a message, '/exit' to leave, '/model [name]' or '/skin [name]' to switch mid-chat.\n");
 
     // Prefer rustyline for arrow-key history/editing; if stdin isn't a real
     // TTY (piped input, tests) it errors on creation, so fall back to plain
@@ -463,14 +479,24 @@ fn run_chat(
 
     if let Ok(mut rl) = rustyline::DefaultEditor::new() {
         let _ = rl.load_history(&history_path);
-        while let Ok(line) = rl.readline(&prompt_label(&skin)) {
+        loop {
+            let readline = rl.readline(&prompt_label(&skin));
+            let line = match readline {
+                Ok(l) => l,
+                // Ctrl-C at an idle prompt: rustyline itself catches it (the
+                // ctrlc handler above only fires while a turn is running, since
+                // this readline() call blocks outside that code path). Just
+                // redraw the prompt instead of exiting the whole session.
+                Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                Err(_) => break,
+            };
             let text = line.trim();
             if text.is_empty() {
                 continue;
             }
             let _ = rl.add_history_entry(text);
             let _ = rl.save_history(&history_path);
-            if matches!(text, "exit" | "quit" | "/exit" | "/quit") {
+            if matches!(text, "/exit" | "/quit") {
                 println!("goodbye.");
                 break;
             }
@@ -491,6 +517,7 @@ fn run_chat(
                 session_id,
                 text,
                 &skin,
+                &interrupted,
             );
         }
         return;
@@ -514,7 +541,7 @@ fn run_chat(
             let _ = std::io::stdout().flush();
             continue;
         }
-        if matches!(text, "exit" | "quit" | "/exit" | "/quit") {
+        if matches!(text, "/exit" | "/quit") {
             println!("goodbye.");
             break;
         }
@@ -539,6 +566,7 @@ fn run_chat(
             session_id,
             text,
             &skin,
+            &interrupted,
         );
         print!("{}", prompt_label(&skin));
         let _ = std::io::stdout().flush();
@@ -680,17 +708,22 @@ fn run_one_chat_turn(
     session_id: Option<&str>,
     text: &str,
     skin: &Skin,
+    interrupted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     messages.push(Message::user(text.to_string()));
     if let Some(sid) = session_id {
         let _ = sessions.append(sid, &Message::user(text.to_string()));
     }
+    // Clear any interrupt latched from a previous turn before starting a new
+    // one — otherwise a stale Ctrl-C would abort every turn from here on.
+    interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
     match grace::agent::run_turn_with_events(
         transport,
         tools,
         messages,
         max_iterations,
         Some(&mut |event| print_agent_event(event, skin)),
+        Some(interrupted.as_ref()),
     ) {
         Ok(answer) => {
             println!(
@@ -703,6 +736,13 @@ fn run_one_chat_turn(
             if let Some(sid) = session_id {
                 let _ = sessions.append(sid, &Message::assistant(answer));
             }
+        }
+        Err(grace::error::AgentError::Interrupted) => {
+            // Tool calls up to this point already ran and are recorded in
+            // `messages`/the session — only the final answer is missing.
+            // Don't pop the user message: unlike a hard error, there's real
+            // partial progress worth keeping in context for the next turn.
+            println!("\n(interrupted — back to prompt)\n");
         }
         Err(e) => {
             eprintln!("error: {e}");
