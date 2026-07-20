@@ -147,6 +147,39 @@ fn split_row(row: &str) -> Vec<String> {
     inner.split('|').map(|c| c.trim().to_string()).collect()
 }
 
+/// Max characters for any single table cell before we wrap it onto extra
+/// lines within the same row. Keeps wide description columns from making
+/// the whole table wider than a normal terminal, which is what breaks the
+/// box-drawing visually (the terminal itself wraps mid-row).
+const MAX_CELL_WIDTH: usize = 40;
+
+/// Wrap `s` into lines of at most `width` chars, breaking on word
+/// boundaries where possible.
+fn wrap_cell(s: &str, width: usize) -> Vec<String> {
+    if s.chars().count() <= width {
+        return vec![s.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        let extra = if cur.is_empty() { 0 } else { 1 };
+        if cur.chars().count() + extra + word.chars().count() > width && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// Render a header row + body rows (separator already excluded) as an
 /// aligned box-drawing table, column widths computed on visible chars.
 fn render_table(rows: &[&str], gold: &str) -> String {
@@ -155,30 +188,41 @@ fn render_table(rows: &[&str], gold: &str) -> String {
     let mut widths = vec![0usize; ncols];
     for row in &parsed {
         for (c, cell) in row.iter().enumerate() {
-            widths[c] = widths[c].max(cell.chars().count());
+            widths[c] = widths[c].max(cell.chars().count().min(MAX_CELL_WIDTH));
         }
     }
     let mut out = String::new();
     for (r, row) in parsed.iter().enumerate() {
-        out.push_str(DIM);
-        out.push_str("│ ");
-        out.push_str(RESET);
-        for (c, w) in widths.iter().enumerate().take(ncols) {
-            let cell = row.get(c).map(|s| s.as_str()).unwrap_or("");
-            let pad = w.saturating_sub(cell.chars().count());
-            if r == 0 {
-                out.push_str(BOLD);
-                out.push_str(cell);
-                out.push_str(RESET);
-            } else {
-                out.push_str(&style_inline(cell, gold));
-            }
-            out.push_str(&" ".repeat(pad));
+        // Wrap each cell in this row to its column width, then print as
+        // many sub-lines as the tallest cell needs.
+        let wrapped: Vec<Vec<String>> = (0..ncols)
+            .map(|c| {
+                let cell = row.get(c).map(|s| s.as_str()).unwrap_or("");
+                wrap_cell(cell, widths[c])
+            })
+            .collect();
+        let sub_rows = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
+        for sub in 0..sub_rows {
             out.push_str(DIM);
-            out.push_str(" │ ");
+            out.push_str("│ ");
             out.push_str(RESET);
+            for (c, w) in widths.iter().enumerate().take(ncols) {
+                let cell = wrapped[c].get(sub).map(|s| s.as_str()).unwrap_or("");
+                let pad = w.saturating_sub(cell.chars().count());
+                if r == 0 {
+                    out.push_str(BOLD);
+                    out.push_str(cell);
+                    out.push_str(RESET);
+                } else {
+                    out.push_str(&style_inline(cell, gold));
+                }
+                out.push_str(&" ".repeat(pad));
+                out.push_str(DIM);
+                out.push_str(" │ ");
+                out.push_str(RESET);
+            }
+            out.push('\n');
         }
-        out.push('\n');
         if r == 0 {
             out.push_str(DIM);
             out.push('├');
