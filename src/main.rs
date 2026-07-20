@@ -254,6 +254,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         chat = true;
     }
 
+    // Every chat gets a session id so history/session_search actually has
+    // something to find — without this, plain `grace --chat` (no explicit
+    // `--session`) persisted nothing at all, and every `--search-sessions`/
+    // `session_search` call legitimately came back empty. `--session <id>`
+    // still overrides for named/multiple sessions.
+    if chat && session_id.is_none() {
+        session_id = Some("default".to_string());
+    }
+
     // Onboarding: if we're headed for a real network transport but have no
     // model and no resolvable API key anywhere (config, CLI, known env
     // vars), stop and run the interactive picker instead of failing with a

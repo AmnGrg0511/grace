@@ -106,7 +106,29 @@ impl SessionStore {
     }
 
     /// Full-text search across all sessions. Returns (session_id, snippet).
+    /// A bare `*` (or empty query) means "everything" — FTS5 rejects `*` as
+    /// invalid MATCH syntax, so that case is special-cased to a plain scan
+    /// instead of surfacing a raw SQL error to the caller.
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<(String, String)>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() || trimmed == "*" {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT session_id, content FROM messages ORDER BY id DESC LIMIT ?1")
+                .map_err(|e| AgentError::Tool(format!("prepare search: {e}")))?;
+            let rows = stmt
+                .query_map([limit], |row| {
+                    let sid: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    Ok((sid, content))
+                })
+                .map_err(|e| AgentError::Tool(format!("search query: {e}")))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| AgentError::Tool(format!("row: {e}")))?);
+            }
+            return Ok(out);
+        }
         let mut stmt = self
             .conn
             .prepare(
@@ -114,7 +136,7 @@ impl SessionStore {
             )
             .map_err(|e| AgentError::Tool(format!("prepare search: {e}")))?;
         let rows = stmt
-            .query_map((query, limit), |row| {
+            .query_map((trimmed, limit), |row| {
                 let sid: String = row.get(0)?;
                 let content: String = row.get(1)?;
                 Ok((sid, content))
@@ -215,6 +237,24 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert_eq!(ids[0], "beta"); // most recently active
         assert!(ids.contains(&"alpha".to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn wildcard_search_returns_everything_without_fts_syntax_error() {
+        let path = scratch_db("wildcard");
+        let _ = std::fs::remove_file(&path);
+        let store = SessionStore::open(&path).unwrap();
+
+        store.append("s1", &Message::user("hello there")).unwrap();
+        store.append("s2", &Message::user("goodbye now")).unwrap();
+
+        // Previously `messages_fts MATCH "*"` was invalid FTS5 syntax and
+        // errored; both "*" and "" must now return everything instead.
+        let star = store.search("*", 10).unwrap();
+        assert_eq!(star.len(), 2);
+        let empty = store.search("", 10).unwrap();
+        assert_eq!(empty.len(), 2);
 
         let _ = std::fs::remove_file(&path);
     }
