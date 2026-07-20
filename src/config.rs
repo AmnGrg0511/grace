@@ -145,7 +145,13 @@ impl Config {
             }
         } else {
             let base_url = base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
-            let api_key = api_key.unwrap_or_default();
+            // Fall back to OPENROUTER_API_KEY (or any generic key already in
+            // the environment via ~/.grace/.env) — not just the
+            // --openrouter preset branch. Without this, config.toml-driven
+            // custom base URLs silently send an empty bearer token.
+            let api_key = api_key
+                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+                .unwrap_or_default();
             let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;
             TransportConfig::Http { base_url, api_key, model }
         };
