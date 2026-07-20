@@ -181,6 +181,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let transport = config.build_transport().map_err(|e| e.to_string())?;
     let skills_root = skills_dir.unwrap_or_else(|| "skills".to_string());
     let tools_root = tools_dir.unwrap_or_else(|| "tools".to_string());
+    let skills = grace::skill::SkillStore::new(&skills_root);
+    let sessions = SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?;
     let mut tools = Config::build_registry_with_plugins(skills_root, tools_root);
     tools.register(Box::new(grace::delegate_tool::DelegateTool::mock()));
 
@@ -195,6 +197,17 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if let Some(block) = memory.as_prompt_block().map_err(|e| e.to_string())? {
         sp.push_str(&block);
     }
+
+    // Pre-flight recall: surface facts/skills/sessions that overlap with
+    // this prompt's keywords, without requiring the user to say "look at
+    // this file/skill" explicitly. Deterministic, free, FTS-first — no
+    // embedding call unless --semantic is later added on top.
+    if let Some(user_prompt) = prompt.as_deref() {
+        let hits = grace::recall::recall(user_prompt, &memory, &skills, Some(&sessions), 5);
+        if let Some(block) = grace::recall::as_prompt_block(&hits) {
+            sp.push_str(&block);
+        }
+    }
     messages.push(Message::system(sp));
 
     println!(
@@ -206,7 +219,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     // Session persistence: if --session is given, resume prior history and
     // persist new turns as they happen (survives process restarts).
-    let sessions = SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?;
     if let Some(sid) = &session_id {
         let prior = sessions.load(sid).map_err(|e| e.to_string())?;
         if !prior.is_empty() {

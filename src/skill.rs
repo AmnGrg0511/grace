@@ -8,6 +8,38 @@
 use crate::error::{AgentError, Result};
 use std::path::{Path, PathBuf};
 
+/// A skill's metadata: name plus an optional one-line description parsed
+/// from an optional frontmatter block at the top of SKILL.md:
+/// ```md
+/// ---
+/// description: Reviews a pending Perforce changelist for correctness.
+/// ---
+/// # Perforce CL Review
+/// ...
+/// ```
+/// Skills without frontmatter still work (description falls back to the
+/// name) — this is additive, not a breaking convention change.
+#[derive(Debug, Clone)]
+pub struct SkillMeta {
+    pub name: String,
+    pub description: String,
+}
+
+/// Parse an optional `---\nkey: value\n---` frontmatter block from the top
+/// of a SKILL.md body. Returns the `description` field if present.
+fn parse_description(content: &str) -> Option<String> {
+    let content = content.trim_start();
+    let rest = content.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    let frontmatter = &rest[..end];
+    for line in frontmatter.lines() {
+        if let Some(v) = line.strip_prefix("description:") {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
 /// Where skills are read from.
 pub struct SkillStore {
     root: PathBuf,
@@ -27,20 +59,34 @@ impl SkillStore {
     /// List available skill names (directories under root containing a
     /// SKILL.md), sorted alphabetically.
     pub fn list(&self) -> Vec<String> {
-        let mut names = Vec::new();
+        self.list_meta().into_iter().map(|m| m.name).collect()
+    }
+
+    /// List available skills with their descriptions (frontmatter
+    /// `description:` if present, else the skill name), sorted by name.
+    /// This is what recall matches against — the thing that fixes "it
+    /// didn't know what skill to look for" without requiring the model to
+    /// load every SKILL.md speculatively.
+    pub fn list_meta(&self) -> Vec<SkillMeta> {
+        let mut out = Vec::new();
         let Ok(entries) = std::fs::read_dir(&self.root) else {
-            return names;
+            return out;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && path.join("SKILL.md").is_file() {
+            let skill_md = path.join("SKILL.md");
+            if path.is_dir() && skill_md.is_file() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    names.push(name.to_string());
+                    let description = std::fs::read_to_string(&skill_md)
+                        .ok()
+                        .and_then(|c| parse_description(&c))
+                        .unwrap_or_else(|| name.to_string());
+                    out.push(SkillMeta { name: name.to_string(), description });
                 }
             }
         }
-        names.sort();
-        names
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
     }
 
     /// Load a skill's SKILL.md content by name.

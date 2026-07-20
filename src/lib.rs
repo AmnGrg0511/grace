@@ -36,6 +36,7 @@ pub mod markdown;
 pub mod memory;
 pub mod message;
 pub mod plugin_tool;
+pub mod recall;
 pub mod session;
 pub mod settings;
 pub mod skill;
