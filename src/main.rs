@@ -642,7 +642,7 @@ fn pick_skin_interactive(names: &[String]) -> Option<String> {
         // every role color at once so the picker actually shows what the
         // skin looks like in use.
         println!(
-            "  {i}) {name}\n     {p}{glyph} you{r}  {tb}⏺{r} {tn}search_files{r}(query)  {td}⎿ 3 matches{r}\n     {a}{ag}{r} {c}rg{r} is faster than `grep` here.",
+            "  {i}) {name}\n     {p}{glyph} you{r}  {tb}⏺{r} {tn}search_files{r}(query)  {td}⎿ 3 matches{r}\n     {a}{ag}{r} {c}rg{r} is faster than {c}grep{r} here.",
             i = i + 1,
             p = ansi(s.prompt),
             glyph = s.prompt_glyph,
