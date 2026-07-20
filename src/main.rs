@@ -347,6 +347,45 @@ fn run_chat(
     use std::io::BufRead;
 
     println!("chat mode — type a message, or 'exit'/'quit' to leave.\n");
+
+    // Prefer rustyline for arrow-key history/editing; if stdin isn't a real
+    // TTY (piped input, tests) it errors on creation, so fall back to plain
+    // line reading — same behavior as before, just no history in that case.
+    let history_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".grace")
+        .join("history.txt");
+    if let Some(parent) = history_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    if let Ok(mut rl) = rustyline::DefaultEditor::new() {
+        let _ = rl.load_history(&history_path);
+        while let Ok(line) = rl.readline("you: ") {
+            let text = line.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let _ = rl.add_history_entry(text);
+            let _ = rl.save_history(&history_path);
+            if matches!(text, "exit" | "quit" | "/exit" | "/quit") {
+                println!("goodbye.");
+                break;
+            }
+            run_one_chat_turn(
+                transport,
+                tools,
+                messages,
+                max_iterations,
+                sessions,
+                session_id,
+                text,
+            );
+        }
+        return;
+    }
+
+    // Fallback: plain stdin, no history (piped input / non-TTY).
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let line = match line {
@@ -361,28 +400,44 @@ fn run_chat(
             println!("goodbye.");
             break;
         }
-        messages.push(Message::user(text.to_string()));
-        if let Some(sid) = session_id {
-            let _ = sessions.append(sid, &Message::user(text.to_string()));
+        run_one_chat_turn(transport, tools, messages, max_iterations, sessions, session_id, text);
+    }
+}
+
+/// One user turn: append the user message, run it, print/persist the
+/// answer. Shared by both the rustyline and plain-stdin chat loops so the
+/// turn logic isn't duplicated.
+#[allow(clippy::too_many_arguments)]
+fn run_one_chat_turn(
+    transport: &(dyn grace::transport::ProviderTransport + '_),
+    tools: &grace::tool::ToolRegistry,
+    messages: &mut Vec<Message>,
+    max_iterations: u32,
+    sessions: &SessionStore,
+    session_id: Option<&str>,
+    text: &str,
+) {
+    messages.push(Message::user(text.to_string()));
+    if let Some(sid) = session_id {
+        let _ = sessions.append(sid, &Message::user(text.to_string()));
+    }
+    match grace::agent::run_turn_with_events(
+        transport,
+        tools,
+        messages,
+        max_iterations,
+        Some(&mut |event| print_agent_event(event)),
+    ) {
+        Ok(answer) => {
+            println!("\ngrace: {}\n", grace::markdown::render_terminal(&answer));
+            if let Some(sid) = session_id {
+                let _ = sessions.append(sid, &Message::assistant(answer));
+            }
         }
-        match grace::agent::run_turn_with_events(
-            transport,
-            tools,
-            messages,
-            max_iterations,
-            Some(&mut |event| print_agent_event(event)),
-        ) {
-            Ok(answer) => {
-                println!("\ngrace: {}\n", grace::markdown::render_terminal(&answer));
-                if let Some(sid) = session_id {
-                    let _ = sessions.append(sid, &Message::assistant(answer));
-                }
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                // Drop the last user message so a failed turn can be retried.
-                messages.pop();
-            }
+        Err(e) => {
+            eprintln!("error: {e}");
+            // Drop the last user message so a failed turn can be retried.
+            messages.pop();
         }
     }
 }
