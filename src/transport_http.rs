@@ -18,7 +18,9 @@ pub struct HttpTransport {
     base_url: String,
     api_key: String,
     /// Model id owned by the transport (the loop passes `""`; see `complete`).
-    model: String,
+    /// `RefCell` so `/model` can hot-swap it mid-chat via `&self` — Grace is
+    /// single-threaded, so no `Sync` requirement, `RefCell` is enough.
+    model: std::cell::RefCell<String>,
     /// Optional path override; defaults to `/chat/completions`.
     chat_path: String,
 }
@@ -46,7 +48,7 @@ impl HttpTransport {
             client,
             base_url: base_url.into(),
             api_key: api_key.into(),
-            model: model.into(),
+            model: std::cell::RefCell::new(model.into()),
             chat_path: String::from("/chat/completions"),
         }
     }
@@ -113,10 +115,11 @@ impl ProviderTransport for HttpTransport {
         _model: &str,
     ) -> Result<crate::transport::ModelResponse> {
         // The model is owned by this transport (the agent loop passes "").
-        let model = if self.model.is_empty() {
+        let model_owned = self.model.borrow().clone();
+        let model = if model_owned.is_empty() {
             "grace-1"
         } else {
-            self.model.as_str()
+            model_owned.as_str()
         };
 
         let msg_json: Vec<Value> = messages
@@ -163,5 +166,18 @@ impl ProviderTransport for HttpTransport {
             resp.finish_reason = FinishReason::ToolCalls;
         }
         Ok(resp)
+    }
+
+    fn set_model(&self, model: &str) {
+        *self.model.borrow_mut() = model.to_string();
+    }
+
+    fn current_model(&self) -> Option<String> {
+        let m = self.model.borrow();
+        if m.is_empty() {
+            None
+        } else {
+            Some(m.clone())
+        }
     }
 }

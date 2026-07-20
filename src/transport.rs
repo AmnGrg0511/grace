@@ -66,6 +66,17 @@ pub trait ProviderTransport {
         tools: &[ToolSpec],
         model: &str,
     ) -> Result<ModelResponse>;
+
+    /// Switch the model this transport talks to, for `/model` mid-chat.
+    /// Default no-op (e.g. `MockTransport` has no real model to switch);
+    /// `HttpTransport` overrides this to actually change what it sends.
+    fn set_model(&self, _model: &str) {}
+
+    /// Current model name, if this transport has one to report (used by
+    /// `/model` with no argument to show what's active).
+    fn current_model(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Serialize)]

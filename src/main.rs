@@ -435,7 +435,11 @@ fn run_chat(
     use std::io::BufRead;
     use std::io::Write;
 
-    println!("chat mode — type a message, or 'exit'/'quit' to leave.\n");
+    // Owned+mutable so `/skin <name>` can swap it live; `/model <name>` swaps
+    // the transport's own interior model instead (see `set_model`).
+    let mut skin = *skin;
+
+    println!("chat mode — type a message, 'exit'/'quit' to leave, '/model [name]' or '/skin [name]' to switch mid-chat.\n");
 
     // Prefer rustyline for arrow-key history/editing; if stdin isn't a real
     // TTY (piped input, tests) it errors on creation, so fall back to plain
@@ -450,7 +454,7 @@ fn run_chat(
 
     if let Ok(mut rl) = rustyline::DefaultEditor::new() {
         let _ = rl.load_history(&history_path);
-        while let Ok(line) = rl.readline(&prompt_label(skin)) {
+        while let Ok(line) = rl.readline(&prompt_label(&skin)) {
             let text = line.trim();
             if text.is_empty() {
                 continue;
@@ -461,6 +465,14 @@ fn run_chat(
                 println!("goodbye.");
                 break;
             }
+            if let Some(rest) = text.strip_prefix("/model") {
+                handle_model_command(transport, rest.trim());
+                continue;
+            }
+            if let Some(rest) = text.strip_prefix("/skin") {
+                handle_skin_command(rest.trim(), &mut skin);
+                continue;
+            }
             run_one_chat_turn(
                 transport,
                 tools,
@@ -469,7 +481,7 @@ fn run_chat(
                 sessions,
                 session_id,
                 text,
-                skin,
+                &skin,
             );
         }
         return;
@@ -480,7 +492,7 @@ fn run_chat(
     // prompt glyph explicitly — rustyline normally owns that via its
     // `readline(prompt)` argument, but this path bypasses rustyline entirely.
     let stdin = std::io::stdin();
-    print!("{}", prompt_label(skin));
+    print!("{}", prompt_label(&skin));
     let _ = std::io::stdout().flush();
     for line in stdin.lock().lines() {
         let line = match line {
@@ -489,13 +501,25 @@ fn run_chat(
         };
         let text = line.trim();
         if text.is_empty() {
-            print!("{}", prompt_label(skin));
+            print!("{}", prompt_label(&skin));
             let _ = std::io::stdout().flush();
             continue;
         }
         if matches!(text, "exit" | "quit" | "/exit" | "/quit") {
             println!("goodbye.");
             break;
+        }
+        if let Some(rest) = text.strip_prefix("/model") {
+            handle_model_command(transport, rest.trim());
+            print!("{}", prompt_label(&skin));
+            let _ = std::io::stdout().flush();
+            continue;
+        }
+        if let Some(rest) = text.strip_prefix("/skin") {
+            handle_skin_command(rest.trim(), &mut skin);
+            print!("{}", prompt_label(&skin));
+            let _ = std::io::stdout().flush();
+            continue;
         }
         run_one_chat_turn(
             transport,
@@ -505,11 +529,54 @@ fn run_chat(
             sessions,
             session_id,
             text,
-            skin,
+            &skin,
         );
-        print!("{}", prompt_label(skin));
+        print!("{}", prompt_label(&skin));
         let _ = std::io::stdout().flush();
     }
+}
+
+/// `/model` (show current) or `/model <name>` (switch) mid-chat. Only takes
+/// effect on transports that own a swappable model (`HttpTransport`); mock
+/// has nothing to switch, so it just reports that.
+fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '_), arg: &str) {
+    if arg.is_empty() {
+        match transport.current_model() {
+            Some(m) => println!("current model: {m}"),
+            None => println!(
+                "this transport ({}) has no switchable model.",
+                transport.name()
+            ),
+        }
+        return;
+    }
+    transport.set_model(arg);
+    match transport.current_model() {
+        Some(m) => println!("model switched to \"{m}\" for this session (not saved to config)."),
+        None => println!(
+            "this transport ({}) has no switchable model — nothing changed.",
+            transport.name()
+        ),
+    }
+}
+
+/// `/skin` (show current) or `/skin <name>` (switch) mid-chat. Session-only —
+/// use `--select-skin` to persist a default across runs.
+fn handle_skin_command(arg: &str, skin: &mut Skin) {
+    if arg.is_empty() {
+        println!(
+            "available skins: {}\n(current skin has no stored name at runtime — use --select-skin to persist a default)",
+            grace::skin::all_names().join(", ")
+        );
+        return;
+    }
+    let names = grace::skin::all_names();
+    if !names.iter().any(|n| n == arg) {
+        println!("unknown skin \"{arg}\" — available: {}", names.join(", "));
+        return;
+    }
+    *skin = grace::skin::by_name(Some(arg));
+    println!("skin switched to \"{arg}\" for this session (not saved to config).");
 }
 
 /// One user turn: append the user message, run it, print/persist the
