@@ -53,7 +53,7 @@ pub const GILDED: Skin = Skin {
     tool_bullet: rgb!(210, 170, 60),
     tool_name: rgb!(230, 230, 230),
     tool_dim: rgb!(120, 120, 120),
-    code: rgb!(212, 175, 55),
+    code: rgb!(248, 163, 0), // #F8A300
 };
 
 /// "royal" — deep violet/indigo with a brighter gold, more formal.

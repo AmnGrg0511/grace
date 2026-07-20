@@ -153,17 +153,58 @@ fn split_row(row: &str) -> Vec<String> {
 /// box-drawing visually (the terminal itself wraps mid-row).
 const MAX_CELL_WIDTH: usize = 40;
 
+/// Visible length of `s` after inline markdown (`**bold**`, `` `code` ``) is
+/// stripped — i.e. what the reader actually sees once rendered. Column-width
+/// math MUST use this, not raw `.chars().count()`: `style_inline` drops the
+/// `**`/backtick delimiter characters when rendering, so counting them in
+/// the width calc pads every cell containing inline markup a few chars too
+/// wide, desyncing the whole column from that row on.
+fn visible_width(s: &str) -> usize {
+    let mut n = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '*' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(&x) = chars.peek() {
+                if x == '*' {
+                    chars.next();
+                    if chars.peek() == Some(&'*') {
+                        chars.next();
+                        break;
+                    }
+                    n += 1;
+                } else {
+                    n += 1;
+                    chars.next();
+                }
+            }
+        } else if c == '`' {
+            while let Some(&x) = chars.peek() {
+                if x == '`' {
+                    chars.next();
+                    break;
+                }
+                n += 1;
+                chars.next();
+            }
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Wrap `s` into lines of at most `width` chars, breaking on word
 /// boundaries where possible.
 fn wrap_cell(s: &str, width: usize) -> Vec<String> {
-    if s.chars().count() <= width {
+    if visible_width(s) <= width {
         return vec![s.to_string()];
     }
     let mut lines = Vec::new();
     let mut cur = String::new();
     for word in s.split_whitespace() {
         let extra = if cur.is_empty() { 0 } else { 1 };
-        if cur.chars().count() + extra + word.chars().count() > width && !cur.is_empty() {
+        if visible_width(&cur) + extra + visible_width(word) > width && !cur.is_empty() {
             lines.push(std::mem::take(&mut cur));
         }
         if !cur.is_empty() {
@@ -188,7 +229,7 @@ fn render_table(rows: &[&str], gold: &str) -> String {
     let mut widths = vec![0usize; ncols];
     for row in &parsed {
         for (c, cell) in row.iter().enumerate() {
-            widths[c] = widths[c].max(cell.chars().count().min(MAX_CELL_WIDTH));
+            widths[c] = widths[c].max(visible_width(cell).min(MAX_CELL_WIDTH));
         }
     }
     let mut out = String::new();
@@ -208,7 +249,7 @@ fn render_table(rows: &[&str], gold: &str) -> String {
             out.push_str(RESET);
             for (c, w) in widths.iter().enumerate().take(ncols) {
                 let cell = wrapped[c].get(sub).map(|s| s.as_str()).unwrap_or("");
-                let pad = w.saturating_sub(cell.chars().count());
+                let pad = w.saturating_sub(visible_width(cell));
                 if r == 0 {
                     out.push_str(BOLD);
                     out.push_str(cell);
