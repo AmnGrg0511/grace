@@ -27,13 +27,37 @@ use grace::config::Config;
 use grace::memory::Memory;
 use grace::message::Message;
 use grace::session::SessionStore;
+use grace::settings::PROVIDER_PRESETS;
 
 fn main() -> ExitCode {
+    load_dotenv();
     match run() {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Load `KEY=value` lines from `~/.grace/.env` into the process environment
+/// (only if not already set — real env always wins). This is where the
+/// onboarding wizard persists API keys so they survive across invocations
+/// without ever touching shell rc files.
+fn load_dotenv() {
+    let path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join(".grace").join(".env");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if std::env::var(key).is_err() {
+                std::env::set_var(key, value);
+            }
         }
     }
 }
@@ -167,6 +191,22 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(ExitCode::FAILURE);
     }
 
+    // Onboarding: if we're headed for a real network transport but have no
+    // model and no resolvable API key anywhere (config, CLI, known env
+    // vars), stop and run the interactive picker instead of failing with a
+    // terse "missing --model" error. Runs once; picks are persisted to
+    // ~/.grace/config.toml and the key to ~/.grace/.env so this never asks
+    // twice. Skipped entirely for --mock (no network needed).
+    if !mock && model.is_none() {
+        let (picked_model, picked_base_url, picked_key) = run_onboarding_wizard()?;
+        model = Some(picked_model);
+        base_url = Some(picked_base_url);
+        if api_key.is_none() {
+            api_key = Some(picked_key);
+        }
+        openrouter = false; // base_url is now explicit, no preset needed
+    }
+
     let config = Config::from_args(
         base_url,
         api_key,
@@ -211,9 +251,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     messages.push(Message::system(sp));
 
     println!(
-        "[grace] transport={} model={} tools={}",
+        "[grace] transport={} model={} ctx={} tools={}",
         transport.name(),
         config.model(),
+        grace::settings::context_window_for(config.model()).map(|n| n.to_string()).unwrap_or_else(|| "?".to_string()),
         tools.specs().len()
     );
 
@@ -331,6 +372,86 @@ fn run_chat(
             }
         }
     }
+}
+
+/// Interactive first-run picker: provider -> API key -> model. Persists the
+/// choice to `~/.grace/config.toml` (model/base_url) and `~/.grace/.env`
+/// (the key, so it's never asked twice and never lives in shell history).
+/// Returns (model, base_url, api_key) to use for *this* invocation.
+fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut stdin_lines = std::io::stdin().lines();
+    let mut prompt_read = |label: &str| -> String {
+        print!("{label}");
+        let _ = std::io::stdout().flush();
+        stdin_lines.next().and_then(|l| l.ok()).unwrap_or_default().trim().to_string()
+    };
+
+    println!("\ngrace needs a model provider — this only runs once, choices are saved to ~/.grace/\n");
+    for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
+        println!("  {}) {}", i + 1, p.label);
+    }
+    let choice: usize = loop {
+        let raw = prompt_read("\nselect a provider [number]: ");
+        match raw.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= PROVIDER_PRESETS.len() => break n - 1,
+            _ => println!("enter a number between 1 and {}", PROVIDER_PRESETS.len()),
+        }
+    };
+    let preset = &PROVIDER_PRESETS[choice];
+
+    let base_url = if preset.base_url.is_empty() {
+        prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
+    } else {
+        preset.base_url.to_string()
+    };
+
+    // Prefer an already-set env var (e.g. exported this shell session) so we
+    // don't re-ask for a key the user already has available.
+    let api_key = std::env::var(preset.env_var).ok().filter(|k| !k.is_empty()).unwrap_or_else(|| {
+        prompt_read(&format!("API key for {} (or set ${} and re-run): ", preset.label, preset.env_var))
+    });
+
+    let model = if preset.models.is_empty() {
+        prompt_read("model id: ")
+    } else {
+        println!();
+        for (i, m) in preset.models.iter().enumerate() {
+            println!("  {}) {} (context: {})", i + 1, m.id, m.context_window);
+        }
+        println!("  {}) other (type a model id)", preset.models.len() + 1);
+        loop {
+            let raw = prompt_read("\nselect a model [number]: ");
+            if let Ok(n) = raw.parse::<usize>() {
+                if n >= 1 && n <= preset.models.len() {
+                    break preset.models[n - 1].id.to_string();
+                }
+                if n == preset.models.len() + 1 {
+                    break prompt_read("model id: ");
+                }
+            }
+            println!("enter a valid number");
+        }
+    };
+
+    // Persist: model + base_url go to config.toml; the key goes to .env
+    // (kept separate so config.toml can be safely shared/committed).
+    let mut settings = grace::settings::Settings::load();
+    settings.default_model = Some(model.clone());
+    settings.default_base_url = Some(base_url.clone());
+    if let Err(e) = settings.save() {
+        eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
+    }
+    let env_path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join(".grace").join(".env");
+    if let Some(parent) = env_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&env_path, format!("{}={}\n", preset.env_var, api_key)) {
+        eprintln!("[grace] warning: could not save {}: {e}", env_path.display());
+    }
+    println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");
+
+    Ok((model, base_url, api_key))
 }
 
 fn print_help() {
