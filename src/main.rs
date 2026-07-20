@@ -187,8 +187,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     if !chat && prompt.is_none() {
-        eprintln!("error: --prompt is required unless --chat or --remember is given (or use --help)");
-        return Ok(ExitCode::FAILURE);
+        // Bare `grace` with no --prompt/--chat/--remember: default to chat
+        // mode (matches the "just run it" expectation from other CLI
+        // agents) instead of a hard error.
+        chat = true;
     }
 
     // Onboarding: if we're headed for a real network transport but have no
