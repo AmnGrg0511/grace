@@ -79,6 +79,22 @@ impl Config {
         reg.register(Box::new(crate::skill::LoadSkillTool { store }));
         reg
     }
+
+    /// Tool set plus skill tools plus any plugin tools discovered under
+    /// `tools_root` (see [`crate::plugin_tool::PluginToolStore`]). Additive
+    /// on top of [`Config::build_registry_with_skills`] so callers can opt in
+    /// without changing existing wiring.
+    pub fn build_registry_with_plugins(
+        skills_root: impl Into<std::path::PathBuf>,
+        tools_root: impl Into<std::path::PathBuf>,
+    ) -> ToolRegistry {
+        let mut reg = Self::build_registry_with_skills(skills_root);
+        let store = crate::plugin_tool::PluginToolStore::new(tools_root.into());
+        for tool in store.load() {
+            reg.register(tool);
+        }
+        reg
+    }
 }
 
 /// Helper so `main` can turn CLI flags into a [`Config`].

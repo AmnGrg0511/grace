@@ -30,14 +30,18 @@
 
 pub mod agent;
 pub mod config;
+pub mod delegate_tool;
 pub mod error;
 pub mod markdown;
 pub mod memory;
 pub mod message;
+pub mod plugin_tool;
 pub mod session;
+pub mod settings;
 pub mod skill;
 pub mod tool;
 pub mod tools;
 pub mod transport;
 pub mod transport_http;
 pub mod transport_mock;
+pub mod transport_stream;

@@ -54,6 +54,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut session_id: Option<String> = None;
     let mut skills_dir: Option<String> = None;
     let mut memory_path: Option<String> = None;
+    let mut tools_dir: Option<String> = None;
+    let mut stream = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -110,6 +112,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 memory_path = args.get(i + 1).cloned();
                 i += 2;
             }
+            "--tools-dir" => {
+                tools_dir = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--stream" => {
+                stream = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(ExitCode::SUCCESS);
@@ -119,6 +129,23 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 print_help();
                 return Ok(ExitCode::FAILURE);
             }
+        }
+    }
+
+    // Layered settings: defaults -> ~/.grace/config.toml -> CLI flags (CLI wins).
+    let settings = grace::settings::Settings::load();
+    let mut max_iterations_opt: Option<u32> = None;
+    settings.merge_into_args(
+        &mut base_url,
+        &mut model,
+        &mut memory_path,
+        &mut skills_dir,
+        &mut tools_dir,
+        &mut max_iterations_opt,
+    );
+    if max_iterations == 16 {
+        if let Some(mi) = max_iterations_opt {
+            max_iterations = mi;
         }
     }
 
@@ -153,7 +180,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     let transport = config.build_transport().map_err(|e| e.to_string())?;
     let skills_root = skills_dir.unwrap_or_else(|| "skills".to_string());
-    let tools = Config::build_registry_with_skills(skills_root);
+    let tools_root = tools_dir.unwrap_or_else(|| "tools".to_string());
+    let mut tools = Config::build_registry_with_plugins(skills_root, tools_root);
+    tools.register(Box::new(grace::delegate_tool::DelegateTool::mock()));
 
     let mut messages: Vec<Message> = Vec::new();
     let mut sp = config
@@ -204,6 +233,36 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if let Some(sid) = &session_id {
         let _ = sessions.append(sid, &Message::user(user_text));
     }
+
+    // --stream only applies to one-shot mode against a real HTTP endpoint; it
+    // falls back to the normal (non-streaming) path for --mock or when tool
+    // calls are needed, since streaming here is a single direct completion
+    // call (no tool-loop), matching the task's scope.
+    if stream {
+        if let grace::config::TransportConfig::Http { base_url, api_key, model } = &config.transport {
+            print!("\n--- answer (streaming) ---\n");
+            use std::io::Write;
+            let response = grace::transport_stream::stream_complete(
+                base_url,
+                api_key,
+                model,
+                &messages,
+                &tools.specs(),
+                |frag| {
+                    print!("{frag}");
+                    let _ = std::io::stdout().flush();
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            println!();
+            if let Some(sid) = &session_id {
+                let _ = sessions.append(sid, &Message::assistant(response.content.clone()));
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        println!("[grace] --stream requested but no HTTP transport configured (mock mode); falling back to non-streaming.");
+    }
+
     let answer = run_turn(transport.as_ref(), &tools, &mut messages, config.max_iterations)
         .map_err(|e| e.to_string())?;
     if let Some(sid) = &session_id {
@@ -286,6 +345,13 @@ Flags:
   --model <name>         Model id (required for http/openrouter mode)
   --max-iterations <n>   Tool-call round cap (default 16)
   --system <text>        Optional system prompt
-  -h, --help             Show this help"#;
+  --tools-dir <path>     Directory of tools/<name>/manifest.json plugins (default ./tools)
+  --stream               Stream tokens as they arrive (one-shot HTTP mode only; falls back to
+                         non-streaming under --mock)
+  -h, --help             Show this help
+
+Config file (optional, CLI flags always win):
+  ~/.grace/config.toml   default_model, default_base_url, memory_path, skills_dir,
+                         tools_dir, max_iterations, request_timeout_secs"#;
     println!("{help}");
 }

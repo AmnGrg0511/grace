@@ -27,6 +27,7 @@ serde_json = "1"
 # FTS5 for session search. Backs both durable memory and chat history.
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
+toml = "0.8"
 
 [profile.release]
 opt-level = 3
