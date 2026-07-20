@@ -33,7 +33,29 @@ fn str_prop(desc: &str) -> Value {
 // ---- run_terminal ----------------------------------------------------------
 
 /// Executes a shell command and returns its stdout (or stderr + exit code).
+///
+/// Optional guardrails, opt-in via environment variables (default: no
+/// restrictions, matching the pre-hardening behavior):
+///   - `GRACE_TERMINAL_DENY`: comma-separated substrings; a command containing
+///     any of them is refused before spawning.
+///   - `GRACE_TERMINAL_ALLOW_DIR`: if set, commands run with this directory as
+///     their cwd (a simple jail, not a full sandbox).
 pub struct TerminalTool;
+
+impl TerminalTool {
+    fn deny_list() -> Vec<String> {
+        std::env::var("GRACE_TERMINAL_DENY")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    fn allow_dir() -> Option<String> {
+        std::env::var("GRACE_TERMINAL_ALLOW_DIR").ok().filter(|s| !s.is_empty())
+    }
+}
 
 impl Tool for TerminalTool {
     fn name(&self) -> &str {
@@ -56,9 +78,18 @@ impl Tool for TerminalTool {
 
     fn run(&self, args: &Value) -> Result<String> {
         let command = arg_str(args, "command")?;
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(&command)
+        let deny = Self::deny_list();
+        if let Some(hit) = deny.iter().find(|d| command.contains(d.as_str())) {
+            return Err(AgentError::Tool(format!(
+                "command refused: contains denied pattern '{hit}'"
+            )));
+        }
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&command);
+        if let Some(dir) = Self::allow_dir() {
+            cmd.current_dir(dir);
+        }
+        let output = cmd
             .output()
             .map_err(|e| AgentError::Tool(format!("failed to spawn 'sh': {e}")))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -203,4 +234,32 @@ pub fn register_builtins(registry: &mut crate::tool::ToolRegistry) {
     registry.register(Box::new(ReadFileTool));
     registry.register(Box::new(WriteFileTool));
     registry.register(Box::new(PatchTool));
+}
+
+#[cfg(test)]
+mod tools_hardening_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_deny_list_rejects_matching_command() {
+        std::env::set_var("GRACE_TERMINAL_DENY", "rm -rf,shutdown");
+        let tool = TerminalTool;
+        let err = tool.run(&json!({"command": "rm -rf /"})).unwrap_err();
+        assert!(err.to_string().contains("denied"));
+        std::env::remove_var("GRACE_TERMINAL_DENY");
+    }
+
+    #[test]
+    fn terminal_allow_dir_jails_cwd() {
+        let dir = std::env::temp_dir().join(format!("grace_terminal_jail_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("GRACE_TERMINAL_ALLOW_DIR", dir.to_str().unwrap());
+        let tool = TerminalTool;
+        let out = tool.run(&json!({"command": "pwd"})).unwrap();
+        // Canonicalize both sides: /tmp is often a symlink (e.g. to /private/tmp).
+        let canon_dir = std::fs::canonicalize(&dir).unwrap();
+        assert!(out.contains(canon_dir.to_str().unwrap()) || out.contains(dir.to_str().unwrap()));
+        std::env::remove_var("GRACE_TERMINAL_ALLOW_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -26,7 +26,9 @@ impl SessionStore {
         let conn = Connection::open(path)
             .map_err(|e| AgentError::Tool(format!("open session db {}: {e}", path.display())))?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS messages (
+            "PRAGMA journal_mode=WAL;
+            PRAGMA busy_timeout=5000;
+            CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,

@@ -31,8 +31,13 @@ impl HttpTransport {
 
     /// Construct with an explicit model id the transport keeps.
     pub fn with_model(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
         Self {
-            client: reqwest::blocking::Client::new(),
+            client,
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
@@ -49,6 +54,43 @@ impl HttpTransport {
     fn endpoint(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         format!("{base}{}", self.chat_path)
+    }
+
+    /// POST `body`, retrying transport-level failures and 429/5xx responses
+    /// up to 3 attempts total with exponential backoff (500ms, 1s). Manually
+    /// verified against a flaky endpoint; not covered by an automated timing
+    /// test (those are flaky by nature — the logic itself stays simple and
+    /// readable instead).
+    fn send_with_retry(&self, body: &Value) -> Result<Value> {
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut backoff = std::time::Duration::from_millis(500);
+        let mut last_err = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let mut req = self.client.post(self.endpoint()).json(body);
+            if !self.api_key.is_empty() {
+                req = req.bearer_auth(&self.api_key);
+            }
+            match req.send() {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_server_error() || status.as_u16() == 429 {
+                        last_err = Some(AgentError::Transport(format!("retryable status {status}")));
+                    } else {
+                        return resp
+                            .json()
+                            .map_err(|e| AgentError::Transport(format!("invalid JSON response: {e}")));
+                    }
+                }
+                Err(e) => {
+                    last_err = Some(AgentError::Transport(format!("request failed: {e}")));
+                }
+            }
+            if attempt < MAX_ATTEMPTS {
+                std::thread::sleep(backoff);
+                backoff *= 2;
+            }
+        }
+        Err(last_err.unwrap_or_else(|| AgentError::Transport("request failed".into())))
     }
 }
 
@@ -76,15 +118,7 @@ impl ProviderTransport for HttpTransport {
             body["tool_choice"] = Value::String("auto".to_string());
         }
 
-        let mut req = self.client.post(self.endpoint()).json(&body);
-        if !self.api_key.is_empty() {
-            req = req.bearer_auth(&self.api_key);
-        }
-
-        let resp = req.send().map_err(|e| AgentError::Transport(format!("request failed: {e}")))?;
-        let parsed: Value = resp
-            .json()
-            .map_err(|e| AgentError::Transport(format!("invalid JSON response: {e}")))?;
+        let parsed = self.send_with_retry(&body)?;
 
         // Surface the upstream error object if the provider returned one
         // (e.g. OpenRouter free-tier rate limit / 403 quota). Without this the

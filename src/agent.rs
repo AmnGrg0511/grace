@@ -16,6 +16,28 @@ use crate::message::{Message, Role};
 use crate::tool::ToolRegistry;
 use crate::transport::{FinishReason, ProviderTransport};
 
+/// Calls `transport.complete`, retrying up to 2 additional times within the
+/// same iteration (not counted against `max_iterations`) if the provider
+/// returns a malformed/garbage response (`AgentError::Response`). Transport
+/// errors and other error kinds propagate immediately — only a bad response
+/// shape is treated as transiently recoverable.
+fn complete_with_response_retry(
+    transport: &(dyn ProviderTransport + '_),
+    messages: &[Message],
+    specs: &[crate::transport::ToolSpec],
+) -> Result<crate::transport::ModelResponse> {
+    const MAX_RETRIES: u32 = 2;
+    let mut last_err = None;
+    for _ in 0..=MAX_RETRIES {
+        match transport.complete(messages, specs, "") {
+            Ok(resp) => return Ok(resp),
+            Err(e @ AgentError::Response(_)) => last_err = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("loop runs at least once"))
+}
+
 /// Run one conversation turn to completion and return the final answer.
 pub fn run_turn(
     transport: &(dyn ProviderTransport + '_),
@@ -32,7 +54,7 @@ pub fn run_turn(
             return Err(AgentError::BudgetExhausted { iterations });
         }
 
-        let resp = transport.complete(messages, &specs, "")?;
+        let resp = complete_with_response_retry(transport, messages, &specs)?;
 
         // Record the assistant's turn.
         let assistant = Message {

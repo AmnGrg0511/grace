@@ -37,7 +37,9 @@ impl Memory {
         let conn = Connection::open(path)
             .map_err(|e| AgentError::Tool(format!("open memory db {}: {e}", path.display())))?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS facts (
+            "PRAGMA journal_mode=WAL;
+            PRAGMA busy_timeout=5000;
+            CREATE TABLE IF NOT EXISTS facts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL,
                 created_at INTEGER NOT NULL
@@ -145,6 +147,19 @@ mod tests {
         assert!(mem.all().unwrap().is_empty());
         assert!(mem.as_prompt_block().unwrap().is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wal_mode_is_actually_set() {
+        let dir = std::env::temp_dir().join(format!("grace_mem_test_wal_{}", std::process::id()));
+        let db_path = dir.join("memory.db");
+        let mem = Memory::open(&db_path).unwrap();
+        let mode: String = mem
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
