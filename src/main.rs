@@ -881,25 +881,47 @@ fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
         grace::agent::AgentEvent::ToolCallEnd { name, result } => {
             // Render markdown (tables, code fences, etc.) in tool output too
             // — previously this printed raw lines, so a table in a tool's
-            // stdout (e.g. read_file on a .md file) never got box-drawing
-            // and, worse, a flat 240-char truncation could cut a table row
-            // mid-line and break alignment. Truncate by LINE count instead
-            // of char count so a table/code block never gets sliced open.
+            // stdout (e.g. read_file on a .md file) never got box-drawing.
+            // No truncation: the full result is shown, matching the header
+            // (also untruncated — see `compact_args`). Output is dimmed
+            // *more* than the header (ANSI dim stacked on top of its own
+            // muted color) so it visually reads as a rung below the
+            // `⏺ name(args)` line that produced it.
             let rendered = grace::markdown::render_terminal(result, skin);
-            const MAX_LINES: usize = 20;
-            let all_lines: Vec<&str> = rendered.lines().collect();
-            let truncated = all_lines.len() > MAX_LINES;
-            let preview_lines = &all_lines[..all_lines.len().min(MAX_LINES)];
-            for (i, line) in preview_lines.iter().enumerate() {
+            for (i, line) in rendered.lines().enumerate() {
                 let prefix = if i == 0 { "  ⎿ " } else { "    " };
-                println!("{}{}{}{}", color(skin.tool_dim), prefix, reset(), line);
+                println!(
+                    "{}{}{}{}{}",
+                    dim(),
+                    color(skin.tool_dim),
+                    prefix,
+                    line,
+                    reset()
+                );
             }
-            if truncated {
-                println!("    {}…{}", color(skin.tool_dim), reset());
-            }
+            // Σ — a cheap, tokenizer-free estimate (~4 chars/token, the
+            // common rule of thumb) of how much this one result adds to
+            // every future request in the session, since the full history
+            // is resent each turn. Not exact, but close enough to flag a
+            // tool call that's quietly bloating context.
+            let tokens = estimate_tokens(result);
+            println!(
+                "    {}{}Σ ~{tokens} tok{}",
+                dim(),
+                color(skin.tool_dim),
+                reset()
+            );
             let _ = name; // shown on the ToolCallStart line already
         }
     }
+}
+
+/// Rough token-count estimate with no tokenizer dependency: ~4 chars/token
+/// is the standard rule-of-thumb for English/code mixed text. Good enough
+/// to flag "this tool call is bloating the session", not meant to match a
+/// provider's exact billed count.
+fn estimate_tokens(text: &str) -> usize {
+    (text.chars().count() / 4).max(1)
 }
 
 /// Whether ANSI color should be suppressed: not a TTY, or `NO_COLOR`/`CLICOLOR=0` set.
@@ -921,16 +943,10 @@ fn prompt_label(skin: &Skin) -> String {
 }
 
 /// Shrink a JSON tool-arguments string to a single readable line for the
-/// `⏺ name(args)` header — full args already appear in the tool's own
-/// output/logs, this is just the at-a-glance summary.
+/// `⏺ name(args)` header — whitespace-collapsed only, never truncated (the
+/// user wants the full call visible; length isn't cause to hide content).
 fn compact_args(arguments: &str) -> String {
-    let one_line: String = arguments.split_whitespace().collect::<Vec<_>>().join(" ");
-    const MAX: usize = 100;
-    if one_line.chars().count() > MAX {
-        format!("{}…", one_line.chars().take(MAX).collect::<String>())
-    } else {
-        one_line
-    }
+    arguments.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn print_help() {
