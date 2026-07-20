@@ -60,7 +60,12 @@ pub trait ProviderTransport {
     fn name(&self) -> &str;
 
     /// Send the conversation and available tools; return the model's response.
-    fn complete(&self, messages: &[Message], tools: &[ToolSpec], model: &str) -> Result<ModelResponse>;
+    fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        model: &str,
+    ) -> Result<ModelResponse>;
 }
 
 #[derive(Serialize)]
@@ -94,7 +99,10 @@ pub(crate) fn tools_to_json(tools: &[ToolSpec]) -> Value {
 }
 
 /// Parse an OpenAI-style `choices[0].message` JSON into our [`ModelResponse`].
-pub(crate) fn parse_openai_message(msg: &Value, finish_reason_str: Option<&str>) -> Result<ModelResponse> {
+pub(crate) fn parse_openai_message(
+    msg: &Value,
+    finish_reason_str: Option<&str>,
+) -> Result<ModelResponse> {
     let content = msg
         .get("content")
         .and_then(Value::as_str)
@@ -104,9 +112,17 @@ pub(crate) fn parse_openai_message(msg: &Value, finish_reason_str: Option<&str>)
     let mut tool_calls = Vec::new();
     if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
         for call in calls {
-            let id = call.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+            let id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             let func = call.get("function").cloned().unwrap_or(Value::Null);
-            let name = func.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+            let name = func
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             let arguments = func
                 .get("arguments")
                 .and_then(Value::as_str)

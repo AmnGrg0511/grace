@@ -28,9 +28,15 @@ pub fn unified_snippet(old: &str, new: &str, context: usize) -> String {
                 let line = line.trim_end_matches('\n');
                 if color {
                     match change.tag() {
-                        ChangeTag::Delete => out.push_str(&format!("{}\n", format!("-{line}").red())),
-                        ChangeTag::Insert => out.push_str(&format!("{}\n", format!("+{line}").green())),
-                        ChangeTag::Equal => out.push_str(&format!("{}\n", format!(" {line}").dimmed())),
+                        ChangeTag::Delete => {
+                            out.push_str(&format!("{}\n", format!("-{line}").red()))
+                        }
+                        ChangeTag::Insert => {
+                            out.push_str(&format!("{}\n", format!("+{line}").green()))
+                        }
+                        ChangeTag::Equal => {
+                            out.push_str(&format!("{}\n", format!(" {line}").dimmed()))
+                        }
                     }
                 } else {
                     out.push_str(&format!("{sign}{line}\n"));

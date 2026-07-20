@@ -94,7 +94,11 @@ impl SessionStore {
             let msg = match role.as_str() {
                 "user" => Message::user(content),
                 "assistant" => Message::assistant(content),
-                _ => Message { role: Role::System, content, ..Default::default() },
+                _ => Message {
+                    role: Role::System,
+                    content,
+                    ..Default::default()
+                },
             };
             out.push(msg);
         }
@@ -129,7 +133,10 @@ mod tests {
     use super::*;
 
     fn scratch_db(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("grace_session_test_{}_{tag}.db", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "grace_session_test_{}_{tag}.db",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -158,9 +165,15 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store = SessionStore::open(&path).unwrap();
 
-        store.append("s1", &Message::user("what is the capital of France")).unwrap();
-        store.append("s1", &Message::assistant("Paris is the capital of France")).unwrap();
-        store.append("s2", &Message::user("unrelated question about rust")).unwrap();
+        store
+            .append("s1", &Message::user("what is the capital of France"))
+            .unwrap();
+        store
+            .append("s1", &Message::assistant("Paris is the capital of France"))
+            .unwrap();
+        store
+            .append("s2", &Message::user("unrelated question about rust"))
+            .unwrap();
 
         let hits = store.search("France", 10).unwrap();
         assert_eq!(hits.len(), 2);

@@ -120,9 +120,13 @@ mod tests {
     /// built yet at test time.
     #[test]
     fn delegate_spawns_real_mock_subprocess_if_binary_present() {
-        let release_bin = std::path::PathBuf::from("/calypto/scratch/amagar24/grace-target/release/grace");
+        let release_bin =
+            std::path::PathBuf::from("/calypto/scratch/amagar24/grace-target/release/grace");
         if !release_bin.exists() {
-            eprintln!("skipping: release binary not built at {}", release_bin.display());
+            eprintln!(
+                "skipping: release binary not built at {}",
+                release_bin.display()
+            );
             return;
         }
 
@@ -135,6 +139,9 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         let cleaned = DelegateTool::clean_output(&stdout);
-        assert!(cleaned.contains("Understood."), "unexpected output: {cleaned}");
+        assert!(
+            cleaned.contains("Understood."),
+            "unexpected output: {cleaned}"
+        );
     }
 }

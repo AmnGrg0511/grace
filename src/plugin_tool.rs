@@ -57,8 +57,9 @@ impl Tool for PluginTool {
     }
 
     fn run(&self, args: &Value) -> Result<String> {
-        let arg_json = serde_json::to_string(args)
-            .map_err(|e| AgentError::Tool(format!("serialize args for '{}': {e}", self.manifest.name)))?;
+        let arg_json = serde_json::to_string(args).map_err(|e| {
+            AgentError::Tool(format!("serialize args for '{}': {e}", self.manifest.name))
+        })?;
         let command = self.resolved_command();
         let output = Command::new(&command)
             .arg(&arg_json)
@@ -84,7 +85,10 @@ impl Tool for PluginTool {
             result.push_str(&format!("[stderr] {}", stderr.trim_end()));
         }
         if !output.status.success() {
-            result.push_str(&format!("\n[exit code {}]", output.status.code().unwrap_or(-1)));
+            result.push_str(&format!(
+                "\n[exit code {}]",
+                output.status.code().unwrap_or(-1)
+            ));
         }
         Ok(result)
     }
@@ -126,7 +130,10 @@ impl PluginToolStore {
             let Ok(manifest) = serde_json::from_str::<Manifest>(&text) else {
                 continue;
             };
-            tools.push(Box::new(PluginTool { manifest, tool_dir: path }));
+            tools.push(Box::new(PluginTool {
+                manifest,
+                tool_dir: path,
+            }));
         }
         tools
     }
@@ -138,7 +145,8 @@ mod tests {
 
     #[test]
     fn loads_and_executes_a_plugin_tool() {
-        let dir = std::env::temp_dir().join(format!("grace_plugin_tool_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("grace_plugin_tool_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let tool_dir = dir.join("echoer");
         std::fs::create_dir_all(&tool_dir).unwrap();

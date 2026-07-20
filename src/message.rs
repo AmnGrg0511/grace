@@ -54,7 +54,11 @@ pub struct Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
-    #[serde(rename = "type", default = "function_type", skip_serializing_if = "is_function_type")]
+    #[serde(
+        rename = "type",
+        default = "function_type",
+        skip_serializing_if = "is_function_type"
+    )]
     pub kind: String,
     pub function: ToolCallFunction,
 }
@@ -74,7 +78,11 @@ pub struct ToolCallFunction {
 }
 
 impl ToolCall {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             kind: function_type(),
@@ -119,7 +127,11 @@ impl Message {
         }
     }
 
-    pub fn tool(tool_call_id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn tool(
+        tool_call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             role: Role::Tool,
             content: content.into(),

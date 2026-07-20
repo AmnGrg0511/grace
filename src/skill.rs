@@ -81,7 +81,10 @@ impl SkillStore {
                         .ok()
                         .and_then(|c| parse_description(&c))
                         .unwrap_or_else(|| name.to_string());
-                    out.push(SkillMeta { name: name.to_string(), description });
+                    out.push(SkillMeta {
+                        name: name.to_string(),
+                        description,
+                    });
                 }
             }
         }
@@ -161,7 +164,8 @@ mod tests {
     use crate::tool::Tool;
 
     fn scratch_skills_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("grace_skill_test_{}_{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("grace_skill_test_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("greet")).unwrap();
         std::fs::write(dir.join("greet").join("SKILL.md"), "# Greet\nSay hello.").unwrap();
@@ -177,8 +181,12 @@ mod tests {
         let content = store.load("greet").unwrap();
         assert!(content.contains("Say hello."));
 
-        let load_tool = LoadSkillTool { store: store.clone() };
-        let out = load_tool.run(&serde_json::json!({"name": "greet"})).unwrap();
+        let load_tool = LoadSkillTool {
+            store: store.clone(),
+        };
+        let out = load_tool
+            .run(&serde_json::json!({"name": "greet"}))
+            .unwrap();
         assert!(out.contains("Say hello."));
 
         let list_tool = ListSkillsTool { store };

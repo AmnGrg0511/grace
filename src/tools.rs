@@ -53,7 +53,9 @@ impl TerminalTool {
     }
 
     fn allow_dir() -> Option<String> {
-        std::env::var("GRACE_TERMINAL_ALLOW_DIR").ok().filter(|s| !s.is_empty())
+        std::env::var("GRACE_TERMINAL_ALLOW_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -101,7 +103,10 @@ impl Tool for TerminalTool {
         if !stderr.is_empty() {
             result.push_str(&format!("\n[stderr] {}", stderr.trim_end()));
         }
-        result.push_str(&format!("\n[exit code {}]", output.status.code().unwrap_or(-1)));
+        result.push_str(&format!(
+            "\n[exit code {}]",
+            output.status.code().unwrap_or(-1)
+        ));
         Ok(result)
     }
 }
@@ -132,7 +137,8 @@ impl Tool for ReadFileTool {
 
     fn run(&self, args: &Value) -> Result<String> {
         let path = arg_str(args, "path")?;
-        let content = fs::read_to_string(&path).map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
+        let content = fs::read_to_string(&path)
+            .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
         Ok(content)
     }
 }
@@ -167,7 +173,8 @@ impl Tool for WriteFileTool {
         let content = arg_str(args, "content")?;
         if let Some(parent) = Path::new(&path).parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|e| AgentError::Tool(format!("create dirs for {}: {e}", path)))?;
+                fs::create_dir_all(parent)
+                    .map_err(|e| AgentError::Tool(format!("create dirs for {}: {e}", path)))?;
             }
         }
         let nbytes = content.len();
@@ -208,11 +215,18 @@ impl Tool for PatchTool {
         let path = arg_str(args, "path")?;
         let old = arg_str(args, "old_string")?;
         let new = arg_str(args, "new_string")?;
-        let original = fs::read_to_string(&path).map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
+        let original = fs::read_to_string(&path)
+            .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
         match original.find(&old) {
             Some(idx) => {
-                let replaced = format!("{}{}{}", &original[..idx], new, &original[idx + old.len()..]);
-                fs::write(&path, &replaced).map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
+                let replaced = format!(
+                    "{}{}{}",
+                    &original[..idx],
+                    new,
+                    &original[idx + old.len()..]
+                );
+                fs::write(&path, &replaced)
+                    .map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
                 let diff = crate::diff::unified_snippet(&old, &new, 3);
                 Ok(format!("patched {path}\n{diff}"))
             }

@@ -18,6 +18,9 @@ pub struct Settings {
     pub tools_dir: Option<String>,
     pub max_iterations: Option<u32>,
     pub request_timeout_secs: Option<u64>,
+    /// Name of the color skin to use (see [`crate::skin`]). `None` (or an
+    /// unrecognized name) falls back to the default "gilded" skin.
+    pub skin: Option<String>,
 }
 
 /// A model Grace can suggest during onboarding, with its context window (for
@@ -41,10 +44,22 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url: crate::config::OPENROUTER_BASE_URL,
         env_var: "OPENROUTER_API_KEY",
         models: &[
-            KnownModel { id: "anthropic/claude-sonnet-4", context_window: 200_000 },
-            KnownModel { id: "openai/gpt-4o-mini", context_window: 128_000 },
-            KnownModel { id: "google/gemini-2.5-flash", context_window: 1_000_000 },
-            KnownModel { id: "deepseek/deepseek-chat", context_window: 64_000 },
+            KnownModel {
+                id: "anthropic/claude-sonnet-4",
+                context_window: 200_000,
+            },
+            KnownModel {
+                id: "openai/gpt-4o-mini",
+                context_window: 128_000,
+            },
+            KnownModel {
+                id: "google/gemini-2.5-flash",
+                context_window: 1_000_000,
+            },
+            KnownModel {
+                id: "deepseek/deepseek-chat",
+                context_window: 64_000,
+            },
         ],
     },
     ProviderPreset {
@@ -52,9 +67,18 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url: "https://api.openai.com/v1",
         env_var: "OPENAI_API_KEY",
         models: &[
-            KnownModel { id: "gpt-4o", context_window: 128_000 },
-            KnownModel { id: "gpt-4o-mini", context_window: 128_000 },
-            KnownModel { id: "o1", context_window: 200_000 },
+            KnownModel {
+                id: "gpt-4o",
+                context_window: 128_000,
+            },
+            KnownModel {
+                id: "gpt-4o-mini",
+                context_window: 128_000,
+            },
+            KnownModel {
+                id: "o1",
+                context_window: 200_000,
+            },
         ],
     },
     ProviderPreset {
@@ -84,7 +108,10 @@ pub fn context_window_for(model: &str) -> Option<u32> {
         ("llama-3", 128_000),
         ("mistral", 32_000),
     ];
-    table.iter().find(|(needle, _)| model.contains(needle)).map(|(_, ctx)| *ctx)
+    table
+        .iter()
+        .find(|(needle, _)| model.contains(needle))
+        .map(|(_, ctx)| *ctx)
 }
 
 impl Settings {
@@ -184,7 +211,10 @@ request_timeout_secs = 30
 
         let settings = Settings::load_from(&path);
         assert_eq!(settings.default_model.as_deref(), Some("gpt-4o-mini"));
-        assert_eq!(settings.default_base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(
+            settings.default_base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
         assert_eq!(settings.memory_path.as_deref(), Some("/tmp/mem.db"));
         assert_eq!(settings.skills_dir.as_deref(), Some("myskills"));
         assert_eq!(settings.tools_dir.as_deref(), Some("mytools"));

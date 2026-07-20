@@ -43,7 +43,12 @@ impl ProviderTransport for MockTransport {
         "mock"
     }
 
-    fn complete(&self, messages: &[Message], _tools: &[ToolSpec], _model: &str) -> Result<ModelResponse> {
+    fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolSpec],
+        _model: &str,
+    ) -> Result<ModelResponse> {
         // Match intent against the *original user prompt* (the first User
         // message), not the latest tool result — otherwise a tool's output
         // (e.g. "hello from tool") would be mistaken for the user's request.
@@ -58,7 +63,8 @@ impl ProviderTransport for MockTransport {
         let wants_terminal = user_intent.to_lowercase().contains("run")
             || user_intent.to_lowercase().contains("command")
             || user_intent.to_lowercase().contains("terminal");
-        let wants_file = user_intent.to_lowercase().contains("write") || user_intent.to_lowercase().contains("file");
+        let wants_file = user_intent.to_lowercase().contains("write")
+            || user_intent.to_lowercase().contains("file");
 
         if rounds < self.max_tool_rounds {
             if wants_terminal {

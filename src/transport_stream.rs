@@ -122,7 +122,10 @@ impl SseAccumulator {
 /// This function does no I/O beyond reading from `body` — network fetching
 /// is the caller's job — which keeps it trivially testable with an in-memory
 /// byte slice.
-pub fn parse_sse_stream(body: impl Read, mut on_fragment: impl FnMut(&str)) -> Result<ModelResponse> {
+pub fn parse_sse_stream(
+    body: impl Read,
+    mut on_fragment: impl FnMut(&str),
+) -> Result<ModelResponse> {
     use std::io::BufRead;
     let reader = std::io::BufReader::new(body);
     let mut acc = SseAccumulator::new();

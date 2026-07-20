@@ -10,6 +10,7 @@
 //! piped (non-TTY), [`render_terminal`] returns the input unchanged so logs
 //! and scripts stay clean.
 
+use crate::skin::Skin;
 use std::io::IsTerminal;
 
 const RESET: &str = "\x1b[0m";
@@ -17,17 +18,20 @@ const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const BOLD_CYAN: &str = "\x1b[1;36m";
 const BOLD_BLUE: &str = "\x1b[1;94m";
-// Golden monospace — 24-bit ANSI (RGB 212,175,55, "old gold") for inline
-// code and fenced code blocks, so code visually reads as a distinct,
-// elegant register instead of the harsh reverse-video block it used to be.
-const GOLD: &str = "\x1b[38;2;212;175;55m";
+
+/// Build the 24-bit ANSI escape for `skin`'s code color.
+fn code_color(skin: &Skin) -> String {
+    let owo_colors::Rgb(r, g, b) = skin.code;
+    format!("\x1b[38;2;{r};{g};{b}m")
+}
 
 /// Render `md` to terminal-friendly ANSI text if stdout is a TTY; otherwise
 /// return it unchanged.
-pub fn render_terminal(md: &str) -> String {
+pub fn render_terminal(md: &str, skin: &Skin) -> String {
     if !std::io::stdout().is_terminal() {
         return md.to_string();
     }
+    let gold = code_color(skin);
     let mut out = String::with_capacity(md.len() + md.len() / 4);
     let mut in_code = false;
     for line in md.lines() {
@@ -40,7 +44,7 @@ pub fn render_terminal(md: &str) -> String {
             continue;
         }
         if in_code {
-            out.push_str(GOLD);
+            out.push_str(&gold);
             out.push_str("│ ");
             out.push_str(line);
             out.push('\n');
@@ -51,7 +55,7 @@ pub fn render_terminal(md: &str) -> String {
         if let Some(rest) = trimmed.strip_prefix("> ") {
             out.push_str(DIM);
             out.push_str("▏ ");
-            out.push_str(&style_inline(rest));
+            out.push_str(&style_inline(rest, &gold));
             out.push('\n');
             out.push_str(RESET);
             continue;
@@ -83,19 +87,19 @@ pub fn render_terminal(md: &str) -> String {
             out.push_str(BOLD_CYAN);
             out.push_str("• ");
             out.push_str(RESET);
-            out.push_str(&style_inline(rest));
+            out.push_str(&style_inline(rest, &gold));
             out.push('\n');
             continue;
         }
         // Plain paragraph (may contain inline markup).
-        out.push_str(&style_inline(line));
+        out.push_str(&style_inline(line, &gold));
         out.push('\n');
     }
     out
 }
 
 /// Apply inline styling: `**bold**` and `` `code` ``.
-fn style_inline(s: &str) -> String {
+fn style_inline(s: &str, gold: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -130,7 +134,7 @@ fn style_inline(s: &str) -> String {
                     chars.next();
                 }
             }
-            out.push_str(GOLD);
+            out.push_str(gold);
             out.push_str(&buf);
             out.push_str(RESET);
         } else {
@@ -148,15 +152,16 @@ mod tests {
     fn passthrough_when_not_a_tty() {
         // In test harness stdout is piped, so rendering must be a no-op.
         let md = "# Title\n**bold** and `code`";
-        assert_eq!(render_terminal(md), md);
+        assert_eq!(render_terminal(md, &crate::skin::GILDED), md);
     }
 
     #[test]
     fn inline_styling_contains_escapes() {
         // Force styling by simulating a TTY is hard; just check the helper.
-        let styled = style_inline("a **b** c `d`");
+        let gold = code_color(&crate::skin::GILDED);
+        let styled = style_inline("a **b** c `d`", &gold);
         assert!(styled.contains(BOLD));
-        assert!(styled.contains(GOLD));
+        assert!(styled.contains(&gold));
         assert!(styled.contains(RESET));
         assert!(styled.contains("b"));
         assert!(styled.contains("d"));

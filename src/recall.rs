@@ -45,7 +45,10 @@ fn overlap_score(query_tokens: &[String], candidate: &str) -> f32 {
         return 0.0;
     }
     let candidate_lower = candidate.to_lowercase();
-    let hits = query_tokens.iter().filter(|t| candidate_lower.contains(t.as_str())).count();
+    let hits = query_tokens
+        .iter()
+        .filter(|t| candidate_lower.contains(t.as_str()))
+        .count();
     hits as f32 / query_tokens.len() as f32
 }
 
@@ -72,14 +75,19 @@ pub fn recall(
             if score > 0.0 {
                 scored.push((
                     score,
-                    RecallHit { kind: "fact", label: format!("fact#{}", f.id), snippet: f.content },
+                    RecallHit {
+                        kind: "fact",
+                        label: format!("fact#{}", f.id),
+                        snippet: f.content,
+                    },
                 ));
             }
         }
     }
 
     for meta in skills.list_meta() {
-        let score = overlap_score(&tokens, &meta.description).max(overlap_score(&tokens, &meta.name));
+        let score =
+            overlap_score(&tokens, &meta.description).max(overlap_score(&tokens, &meta.name));
         if score > 0.0 {
             scored.push((
                 score,
@@ -103,7 +111,11 @@ pub fn recall(
                     if score > 0.0 {
                         scored.push((
                             score,
-                            RecallHit { kind: "session", label: session_id, snippet: content },
+                            RecallHit {
+                                kind: "session",
+                                label: session_id,
+                                snippet: content,
+                            },
                         ));
                     }
                 }
@@ -133,17 +145,24 @@ mod tests {
     use super::*;
 
     fn scratch_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-        let base = std::env::temp_dir().join(format!("grace_recall_test_{}_{tag}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("grace_recall_test_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        (base.join("memory.db"), base.join("skills"), base.join("sessions.db"))
+        (
+            base.join("memory.db"),
+            base.join("skills"),
+            base.join("sessions.db"),
+        )
     }
 
     #[test]
     fn recalls_matching_fact_and_skill_but_not_unrelated_ones() {
         let (mem_path, skills_dir, _) = scratch_paths("basic");
         let memory = Memory::open(&mem_path).unwrap();
-        memory.remember("user works on PowerPro QoR regression triage").unwrap();
+        memory
+            .remember("user works on PowerPro QoR regression triage")
+            .unwrap();
         memory.remember("user prefers concise answers").unwrap();
 
         std::fs::create_dir_all(skills_dir.join("powerpro-regold")).unwrap();
@@ -160,10 +179,20 @@ mod tests {
         .unwrap();
         let skills = SkillStore::new(&skills_dir);
 
-        let hits = recall("help me triage a PowerPro QoR regression failure", &memory, &skills, None, 10);
+        let hits = recall(
+            "help me triage a PowerPro QoR regression failure",
+            &memory,
+            &skills,
+            None,
+            10,
+        );
 
-        assert!(hits.iter().any(|h| h.kind == "fact" && h.snippet.contains("QoR regression")));
-        assert!(hits.iter().any(|h| h.kind == "skill" && h.label == "powerpro-regold"));
+        assert!(hits
+            .iter()
+            .any(|h| h.kind == "fact" && h.snippet.contains("QoR regression")));
+        assert!(hits
+            .iter()
+            .any(|h| h.kind == "skill" && h.label == "powerpro-regold"));
         assert!(!hits.iter().any(|h| h.label == "unrelated"));
         assert!(!hits.iter().any(|h| h.snippet.contains("concise answers")));
 

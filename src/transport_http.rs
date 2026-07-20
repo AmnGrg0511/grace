@@ -7,7 +7,9 @@
 
 use crate::error::{AgentError, Result};
 use crate::message::Message;
-use crate::transport::{parse_openai_message, tools_to_json, FinishReason, ProviderTransport, ToolSpec};
+use crate::transport::{
+    parse_openai_message, tools_to_json, FinishReason, ProviderTransport, ToolSpec,
+};
 use serde_json::{json, Value};
 
 /// A transport that POSTs to an OpenAI-compatible `/chat/completions`.
@@ -30,7 +32,11 @@ impl HttpTransport {
     }
 
     /// Construct with an explicit model id the transport keeps.
-    pub fn with_model(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn with_model(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(60))
@@ -74,11 +80,12 @@ impl HttpTransport {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_server_error() || status.as_u16() == 429 {
-                        last_err = Some(AgentError::Transport(format!("retryable status {status}")));
+                        last_err =
+                            Some(AgentError::Transport(format!("retryable status {status}")));
                     } else {
-                        return resp
-                            .json()
-                            .map_err(|e| AgentError::Transport(format!("invalid JSON response: {e}")));
+                        return resp.json().map_err(|e| {
+                            AgentError::Transport(format!("invalid JSON response: {e}"))
+                        });
                     }
                 }
                 Err(e) => {
@@ -99,9 +106,18 @@ impl ProviderTransport for HttpTransport {
         "openai-http"
     }
 
-    fn complete(&self, messages: &[Message], tools: &[ToolSpec], _model: &str) -> Result<crate::transport::ModelResponse> {
+    fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        _model: &str,
+    ) -> Result<crate::transport::ModelResponse> {
         // The model is owned by this transport (the agent loop passes "").
-        let model = if self.model.is_empty() { "grace-1" } else { self.model.as_str() };
+        let model = if self.model.is_empty() {
+            "grace-1"
+        } else {
+            self.model.as_str()
+        };
 
         let msg_json: Vec<Value> = messages
             .iter()

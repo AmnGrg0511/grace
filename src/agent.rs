@@ -122,16 +122,26 @@ pub fn run_turn_with_events(
                 }
                 for call in &resp.tool_calls {
                     if let Some(cb) = on_event.as_deref_mut() {
-                        cb(AgentEvent::ToolCallStart { name: call.name(), arguments: call.arguments() });
+                        cb(AgentEvent::ToolCallStart {
+                            name: call.name(),
+                            arguments: call.arguments(),
+                        });
                     }
                     let result = match tools.execute(call.name(), call.arguments()) {
                         Ok(out) => out,
                         Err(e) => format!("tool error: {e}"),
                     };
                     if let Some(cb) = on_event.as_deref_mut() {
-                        cb(AgentEvent::ToolCallEnd { name: call.name(), result: &result });
+                        cb(AgentEvent::ToolCallEnd {
+                            name: call.name(),
+                            result: &result,
+                        });
                     }
-                    messages.push(Message::tool(call.id.clone(), call.name().to_string(), result));
+                    messages.push(Message::tool(
+                        call.id.clone(),
+                        call.name().to_string(),
+                        result,
+                    ));
                 }
             }
         }
@@ -158,7 +168,10 @@ mod tests {
 
         assert_eq!(messages.len(), 4, "expected user+assistant+tool+final");
         assert!(answer.contains("mock response"));
-        let tool_msg = messages.iter().find(|m| m.role == Role::Tool).expect("a tool message must exist");
+        let tool_msg = messages
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("a tool message must exist");
         assert!(tool_msg.content.contains("hello from tool"));
     }
 

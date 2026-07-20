@@ -27,6 +27,13 @@ use grace::memory::Memory;
 use grace::message::Message;
 use grace::session::SessionStore;
 use grace::settings::PROVIDER_PRESETS;
+use grace::skin::Skin;
+
+/// Render `skin`'s Rgb color as a 24-bit ANSI escape sequence.
+fn ansi(c: owo_colors::Rgb) -> String {
+    format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+}
+const RESET: &str = "\x1b[0m";
 
 fn main() -> ExitCode {
     load_dotenv();
@@ -44,7 +51,10 @@ fn main() -> ExitCode {
 /// onboarding wizard persists API keys so they survive across invocations
 /// without ever touching shell rc files.
 fn load_dotenv() {
-    let path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join(".grace").join(".env");
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".grace")
+        .join(".env");
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
@@ -157,6 +167,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     // Layered settings: defaults -> ~/.grace/config.toml -> CLI flags (CLI wins).
     let settings = grace::settings::Settings::load();
+    let skin = grace::skin::by_name(settings.skin.as_deref());
     let mut max_iterations_opt: Option<u32> = None;
     settings.merge_into_args(
         &mut base_url,
@@ -225,7 +236,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let skills = grace::skill::SkillStore::new(&skills_root);
     let sessions = SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?;
     let mut tools = Config::build_registry_with_plugins(skills_root, tools_root);
-    tools.register(Box::new(grace::delegate_tool::DelegateTool::for_transport(&config.transport)));
+    tools.register(Box::new(grace::delegate_tool::DelegateTool::for_transport(
+        &config.transport,
+    )));
 
     let mut messages: Vec<Message> = Vec::new();
     let mut sp = config
@@ -255,7 +268,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         "[grace] transport={} model={} ctx={} tools={}",
         transport.name(),
         config.model(),
-        grace::settings::context_window_for(config.model()).map(|n| n.to_string()).unwrap_or_else(|| "?".to_string()),
+        grace::settings::context_window_for(config.model())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".to_string()),
         tools.specs().len()
     );
 
@@ -264,7 +279,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if let Some(sid) = &session_id {
         let prior = sessions.load(sid).map_err(|e| e.to_string())?;
         if !prior.is_empty() {
-            println!("[grace] resumed session '{sid}' ({} prior turns)", prior.len());
+            println!(
+                "[grace] resumed session '{sid}' ({} prior turns)",
+                prior.len()
+            );
         }
         messages.extend(prior);
     }
@@ -277,6 +295,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             config.max_iterations,
             &sessions,
             session_id.as_deref(),
+            &skin,
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -293,7 +312,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // calls are needed, since streaming here is a single direct completion
     // call (no tool-loop), matching the task's scope.
     if stream {
-        if let grace::config::TransportConfig::Http { base_url, api_key, model } = &config.transport {
+        if let grace::config::TransportConfig::Http {
+            base_url,
+            api_key,
+            model,
+        } = &config.transport
+        {
             print!("\n--- answer (streaming) ---\n");
             use std::io::Write;
             let response = grace::transport_stream::stream_complete(
@@ -322,13 +346,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         &tools,
         &mut messages,
         config.max_iterations,
-        Some(&mut |event| print_agent_event(event)),
+        Some(&mut |event| print_agent_event(event, &skin)),
     )
     .map_err(|e| e.to_string())?;
     if let Some(sid) = &session_id {
         let _ = sessions.append(sid, &Message::assistant(answer.clone()));
     }
-    println!("\n--- answer ---\n{}", grace::markdown::render_terminal(&answer));
+    println!(
+        "\n--- answer ---\n{}",
+        grace::markdown::render_terminal(&answer, &skin)
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -343,6 +370,7 @@ fn run_chat(
     max_iterations: u32,
     sessions: &SessionStore,
     session_id: Option<&str>,
+    skin: &Skin,
 ) {
     use std::io::BufRead;
 
@@ -361,7 +389,7 @@ fn run_chat(
 
     if let Ok(mut rl) = rustyline::DefaultEditor::new() {
         let _ = rl.load_history(&history_path);
-        while let Ok(line) = rl.readline(&prompt_label()) {
+        while let Ok(line) = rl.readline(&prompt_label(skin)) {
             let text = line.trim();
             if text.is_empty() {
                 continue;
@@ -380,6 +408,7 @@ fn run_chat(
                 sessions,
                 session_id,
                 text,
+                skin,
             );
         }
         return;
@@ -400,7 +429,16 @@ fn run_chat(
             println!("goodbye.");
             break;
         }
-        run_one_chat_turn(transport, tools, messages, max_iterations, sessions, session_id, text);
+        run_one_chat_turn(
+            transport,
+            tools,
+            messages,
+            max_iterations,
+            sessions,
+            session_id,
+            text,
+            skin,
+        );
     }
 }
 
@@ -416,6 +454,7 @@ fn run_one_chat_turn(
     sessions: &SessionStore,
     session_id: Option<&str>,
     text: &str,
+    skin: &Skin,
 ) {
     messages.push(Message::user(text.to_string()));
     if let Some(sid) = session_id {
@@ -426,14 +465,15 @@ fn run_one_chat_turn(
         tools,
         messages,
         max_iterations,
-        Some(&mut |event| print_agent_event(event)),
+        Some(&mut |event| print_agent_event(event, skin)),
     ) {
         Ok(answer) => {
-            use owo_colors::{OwoColorize, Stream::Stdout};
             println!(
-                "\n{} {}\n",
-                "grace".if_supports_color(Stdout, |t| t.magenta()),
-                grace::markdown::render_terminal(&answer)
+                "\n{}{}{} {}\n",
+                ansi(skin.answer),
+                skin.answer_glyph,
+                RESET,
+                grace::markdown::render_terminal(&answer, skin)
             );
             if let Some(sid) = session_id {
                 let _ = sessions.append(sid, &Message::assistant(answer));
@@ -457,10 +497,17 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
     let mut prompt_read = |label: &str| -> String {
         print!("{label}");
         let _ = std::io::stdout().flush();
-        stdin_lines.next().and_then(|l| l.ok()).unwrap_or_default().trim().to_string()
+        stdin_lines
+            .next()
+            .and_then(|l| l.ok())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
     };
 
-    println!("\ngrace needs a model provider — this only runs once, choices are saved to ~/.grace/\n");
+    println!(
+        "\ngrace needs a model provider — this only runs once, choices are saved to ~/.grace/\n"
+    );
     for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
         println!("  {}) {}", i + 1, p.label);
     }
@@ -481,9 +528,15 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
 
     // Prefer an already-set env var (e.g. exported this shell session) so we
     // don't re-ask for a key the user already has available.
-    let api_key = std::env::var(preset.env_var).ok().filter(|k| !k.is_empty()).unwrap_or_else(|| {
-        prompt_read(&format!("API key for {} (or set ${} and re-run): ", preset.label, preset.env_var))
-    });
+    let api_key = std::env::var(preset.env_var)
+        .ok()
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| {
+            prompt_read(&format!(
+                "API key for {} (or set ${} and re-run): ",
+                preset.label, preset.env_var
+            ))
+        });
 
     let model = if preset.models.is_empty() {
         prompt_read("model id: ")
@@ -515,12 +568,18 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
     if let Err(e) = settings.save() {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
     }
-    let env_path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join(".grace").join(".env");
+    let env_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".grace")
+        .join(".env");
     if let Some(parent) = env_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Err(e) = std::fs::write(&env_path, format!("{}={}\n", preset.env_var, api_key)) {
-        eprintln!("[grace] warning: could not save {}: {e}", env_path.display());
+        eprintln!(
+            "[grace] warning: could not save {}: {e}",
+            env_path.display()
+        );
     }
     println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");
 
@@ -532,59 +591,82 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
 /// content are visible as they happen, not just the final answer.
 ///
 /// Layout mirrors the tree-hierarchy style used by Claude Code / Codex CLI:
-/// thinking in dim italic-ish cyan, tool calls as a `⏺`-prefixed line with an
+/// thinking as an indented sub-level under a "thinking" header, tool calls
+/// as a `⏺`-prefixed line with an
 /// indented `⎿` result underneath (so a run of many tool calls reads as a
-/// visual tree, not a wall of flat log lines). Colors auto-disable when
-/// stdout isn't a real terminal (owo-colors' `if_supports_color` — respects
-/// NO_COLOR/CLICOLOR).
-fn print_agent_event(event: grace::agent::AgentEvent) {
-    use owo_colors::{OwoColorize, Stream::Stdout};
+/// visual tree, not a wall of flat log lines). All colors come from `skin`
+/// (see [`grace::skin`]) — nothing here is hardcoded, so switching skins
+/// restyles every surface at once. Colors auto-disable when stdout isn't a
+/// real terminal (checked once via [`no_color`]).
+fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
+    let color = |rgb: owo_colors::Rgb| if no_color() { String::new() } else { ansi(rgb) };
+    let reset = || if no_color() { "" } else { RESET };
 
     match event {
         grace::agent::AgentEvent::AssistantContent(text) => {
-            // Sub-level under a "thinking" header (dim italic-style label),
+            // Sub-level under a "thinking" header,
             // each line of the model's intermediate content indented under
             // it — the same visual nesting as tool-call results, so
             // thinking reads as one collapsible branch, not top-level noise.
-            println!("{}", "thinking".if_supports_color(Stdout, |t| t.blue()));
+            println!("{}thinking{}", color(skin.thinking), reset());
             for line in text.lines() {
-                println!("  {}", line.if_supports_color(Stdout, |t| t.blue()));
+                println!("  {}{}{}", color(skin.thinking), line, reset());
             }
         }
         grace::agent::AgentEvent::ToolCallStart { name, arguments } => {
             let compact = compact_args(arguments);
             println!(
-                "{} {}({})",
-                "⏺".if_supports_color(Stdout, |t| t.yellow()),
-                name.if_supports_color(Stdout, |t| t.bold()),
-                compact.if_supports_color(Stdout, |t| t.dimmed()),
+                "{}⏺{} {}({}){}",
+                color(skin.tool_bullet),
+                reset(),
+                name,
+                compact,
+                reset(),
             );
         }
         grace::agent::AgentEvent::ToolCallEnd { name, result } => {
             let preview: String = result.chars().take(240).collect();
-            let suffix = if result.len() > preview.len() { "…" } else { "" };
+            let suffix = if result.len() > preview.len() {
+                "…"
+            } else {
+                ""
+            };
             for (i, line) in preview.lines().enumerate() {
                 let prefix = if i == 0 { "  ⎿ " } else { "    " };
                 println!(
-                    "{}{}",
-                    prefix.if_supports_color(Stdout, |t| t.dimmed()),
-                    line.if_supports_color(Stdout, |t| t.truecolor(212, 175, 55)),
+                    "{}{}{}{}{}{}",
+                    color(skin.tool_dim),
+                    prefix,
+                    reset(),
+                    color(skin.code),
+                    line,
+                    reset(),
                 );
             }
             if !suffix.is_empty() {
-                println!("    {}", suffix.if_supports_color(Stdout, |t| t.dimmed()));
+                println!("    {}{}{}", color(skin.tool_dim), suffix, reset());
             }
             let _ = name; // shown on the ToolCallStart line already
         }
     }
 }
 
-/// The interactive-chat input prompt — magenta "you" to match the "grace"
-/// answer label, so the transcript reads as two clearly distinct speakers
-/// instead of a flat `you:`/`grace:` log.
-fn prompt_label() -> String {
-    use owo_colors::{OwoColorize, Stream::Stdout};
-    format!("{} ", "you".if_supports_color(Stdout, |t| t.cyan()))
+/// Whether ANSI color should be suppressed: not a TTY, or `NO_COLOR`/`CLICOLOR=0` set.
+fn no_color() -> bool {
+    use std::io::IsTerminal;
+    !std::io::stdout().is_terminal()
+        || std::env::var("NO_COLOR").is_ok()
+        || std::env::var("CLICOLOR").as_deref() == Ok("0")
+}
+
+/// The interactive-chat input prompt — a skin-colored glyph, never the
+/// literal word "you", so the transcript reads as two distinct visual
+/// speakers instead of a flat `you:`/`grace:` log.
+fn prompt_label(skin: &Skin) -> String {
+    if no_color() {
+        return format!("{} ", skin.prompt_glyph);
+    }
+    format!("{}{}{} ", ansi(skin.prompt), skin.prompt_glyph, RESET)
 }
 
 /// Shrink a JSON tool-arguments string to a single readable line for the

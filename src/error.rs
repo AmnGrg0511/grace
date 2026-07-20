@@ -31,7 +31,10 @@ impl fmt::Display for AgentError {
             AgentError::Tool(s) => write!(f, "tool error: {s}"),
             AgentError::Config(s) => write!(f, "config error: {s}"),
             AgentError::BudgetExhausted { iterations } => {
-                write!(f, "iteration budget exhausted after {iterations} iterations")
+                write!(
+                    f,
+                    "iteration budget exhausted after {iterations} iterations"
+                )
             }
         }
     }

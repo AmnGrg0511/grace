@@ -36,7 +36,11 @@ impl TransportConfig {
     pub fn to_cli_args(&self) -> Vec<String> {
         match self {
             TransportConfig::Mock { .. } => vec!["--mock".to_string()],
-            TransportConfig::Http { base_url, api_key, model } => vec![
+            TransportConfig::Http {
+                base_url,
+                api_key,
+                model,
+            } => vec![
                 "--base-url".to_string(),
                 base_url.clone(),
                 "--api-key".to_string(),
@@ -64,10 +68,14 @@ impl Config {
     /// Build the configured transport as a `dyn ProviderTransport`.
     pub fn build_transport(&self) -> Result<Box<dyn ProviderTransport>> {
         match &self.transport {
-            TransportConfig::Mock { max_tool_rounds } => {
-                Ok(Box::new(crate::transport_mock::MockTransport::new(*max_tool_rounds)))
-            }
-            TransportConfig::Http { base_url, api_key, model } => Ok(Box::new(crate::transport_http::HttpTransport::with_model(
+            TransportConfig::Mock { max_tool_rounds } => Ok(Box::new(
+                crate::transport_mock::MockTransport::new(*max_tool_rounds),
+            )),
+            TransportConfig::Http {
+                base_url,
+                api_key,
+                model,
+            } => Ok(Box::new(crate::transport_http::HttpTransport::with_model(
                 base_url.clone(),
                 api_key.clone(),
                 model.clone(),
@@ -94,7 +102,9 @@ impl Config {
     pub fn build_registry_with_skills(skills_root: impl Into<std::path::PathBuf>) -> ToolRegistry {
         let mut reg = Self::build_registry();
         let store = std::sync::Arc::new(crate::skill::SkillStore::new(skills_root.into()));
-        reg.register(Box::new(crate::skill::ListSkillsTool { store: store.clone() }));
+        reg.register(Box::new(crate::skill::ListSkillsTool {
+            store: store.clone(),
+        }));
         reg.register(Box::new(crate::skill::LoadSkillTool { store }));
         reg
     }
@@ -131,20 +141,29 @@ impl Config {
         let transport = if mock {
             TransportConfig::Mock { max_tool_rounds: 3 }
         } else if openrouter {
-            let model = model
-                .ok_or_else(|| AgentError::Config("missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into()))?;
+            let model = model.ok_or_else(|| {
+                AgentError::Config(
+                    "missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into(),
+                )
+            })?;
             // Prefer explicit --api-key, else the OPENROUTER_API_KEY env var.
             let api_key = api_key
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
                 .filter(|k| !k.is_empty())
-                .ok_or_else(|| AgentError::Config("missing OpenRouter API key: pass --api-key or set OPENROUTER_API_KEY".into()))?;
+                .ok_or_else(|| {
+                    AgentError::Config(
+                        "missing OpenRouter API key: pass --api-key or set OPENROUTER_API_KEY"
+                            .into(),
+                    )
+                })?;
             TransportConfig::Http {
                 base_url: OPENROUTER_BASE_URL.to_string(),
                 api_key,
                 model,
             }
         } else {
-            let base_url = base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
+            let base_url =
+                base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
             // Fall back to OPENROUTER_API_KEY (or any generic key already in
             // the environment via ~/.grace/.env) — not just the
             // --openrouter preset branch. Without this, config.toml-driven
@@ -153,7 +172,11 @@ impl Config {
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
                 .unwrap_or_default();
             let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;
-            TransportConfig::Http { base_url, api_key, model }
+            TransportConfig::Http {
+                base_url,
+                api_key,
+                model,
+            }
         };
         Ok(Config {
             transport,

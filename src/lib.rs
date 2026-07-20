@@ -41,6 +41,7 @@ pub mod recall;
 pub mod session;
 pub mod settings;
 pub mod skill;
+pub mod skin;
 pub mod tool;
 pub mod tools;
 pub mod transport;
