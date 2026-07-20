@@ -608,7 +608,7 @@ fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
             // each line of the model's intermediate content indented under
             // it — the same visual nesting as tool-call results, so
             // thinking reads as one collapsible branch, not top-level noise.
-            println!("{}thinking{}", color(skin.thinking), reset());
+            println!("{}▾ Thinking{}", color(skin.thinking), reset());
             for line in text.lines() {
                 println!("  {}{}{}", color(skin.thinking), line, reset());
             }

@@ -16,6 +16,35 @@ You are Grace — a calm, composed, and capable AI agent. You address the user a
 (run_terminal, read_file, write_file, patch) rather than only talking about it. \
 When a task needs a tool, call it. Keep responses concise and purposeful.";
 
+/// Path to the user-editable persona file: `~/.grace/soul.md`. If present,
+/// its content REPLACES [`DEFAULT_SYSTEM_PROMPT`] (still overridable by
+/// `--system`) — this is what makes Grace's identity something you can
+/// actually open and edit, not a string baked into the binary. Created with
+/// the default persona on first run so it always exists.
+pub fn soul_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".grace")
+        .join("soul.md")
+}
+
+/// Load the persona from `soul.md`, creating it with the default persona if
+/// missing. I/O errors fall back to the in-binary default so a filesystem
+/// hiccup never breaks the agent's identity.
+pub fn load_soul() -> String {
+    let path = soul_path();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, DEFAULT_SYSTEM_PROMPT);
+    DEFAULT_SYSTEM_PROMPT.to_string()
+}
+
 /// How the agent reaches a model.
 #[derive(Debug, Clone)]
 pub enum TransportConfig {

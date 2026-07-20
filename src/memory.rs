@@ -151,6 +151,40 @@ impl Memory {
         }
         Ok(out)
     }
+
+    /// Mirror all facts to a human-readable `~/.grace/memory.md` (best
+    /// effort, non-fatal on I/O error). The SQLite DB stays the source of
+    /// truth — this file exists so a fact can be **read** without a SQL
+    /// client; editing it does nothing (regenerated every run).
+    pub fn export_markdown(&self) -> Result<()> {
+        let facts = self.all()?;
+        let path = Self::default_markdown_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut s = String::from(
+            "# Grace — Durable Memory\n\n\
+             Auto-generated from `memory.db` on every run — edits here are \
+             NOT persisted. Use `grace --remember \"...\"` to add a fact.\n\n",
+        );
+        if facts.is_empty() {
+            s.push_str("_(no facts yet)_\n");
+        } else {
+            for f in &facts {
+                s.push_str(&format!("- **#{}** {}\n", f.id, f.content));
+            }
+        }
+        let _ = std::fs::write(path, s);
+        Ok(())
+    }
+
+    /// Default location for the read-only markdown mirror: `~/.grace/memory.md`.
+    pub fn default_markdown_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".grace")
+            .join("memory.md")
+    }
 }
 
 fn now_unix() -> i64 {
