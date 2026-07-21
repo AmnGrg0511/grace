@@ -598,43 +598,56 @@ fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '
     }
 }
 
-/// Shared model list+select flow: every model across every provider preset,
-/// flattened and numbered, plus a free-text "other" escape hatch. Used by
-/// both `/model` mid-chat and (via the same list) the first-run wizard's
-/// per-provider slice. Returns `None` on unparsable/EOF input (no-op).
+/// Two-level model picker: providers first, then models for that provider.
+/// Used by `/model` mid-chat. Returns `None` on unparsable/EOF input (no-op).
 fn pick_model_interactive() -> Option<String> {
     use std::io::Write;
-    let mut entries: Vec<(&str, &str)> = Vec::new();
-    for preset in PROVIDER_PRESETS {
-        for m in preset.models {
-            entries.push((preset.label, m.id));
+    println!("\nproviders:\n");
+    for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
+        println!("  {}) {}", i + 1, p.label);
+    }
+    let n_providers = PROVIDER_PRESETS.len();
+    print!("\nselect a provider [number]: ");
+    let _ = std::io::stdout().flush();
+    let raw = std::io::stdin().lines().next()?.ok()?;
+    let choice: usize = match raw.trim().parse::<usize>() {
+        Ok(n) if n >= 1 && n <= n_providers => n - 1,
+        _ => {
+            println!("not a valid choice.");
+            return None;
         }
+    };
+    let preset = &PROVIDER_PRESETS[choice];
+    if preset.models.is_empty() {
+        // Provider with no known models (e.g. "Custom endpoint"): type one.
+        print!("model id: ");
+        let _ = std::io::stdout().flush();
+        return std::io::stdin()
+            .lines()
+            .next()?
+            .ok()
+            .map(|s| s.trim().to_string());
     }
-    println!("\navailable models:\n");
-    for (i, (provider, id)) in entries.iter().enumerate() {
-        println!("  {}) {id}  ({provider})", i + 1);
+    println!("\n{label} models:\n", label = preset.label);
+    for (i, m) in preset.models.iter().enumerate() {
+        println!(
+            "  {i}) {}  ({}k ctx)",
+            m.id,
+            m.context_window / 1000,
+            i = i + 1
+        );
     }
-    println!("  {}) other (type a model id)", entries.len() + 1);
+    let n_models = preset.models.len();
     print!("\nselect a model [number]: ");
     let _ = std::io::stdout().flush();
     let raw = std::io::stdin().lines().next()?.ok()?;
-    let raw = raw.trim();
-    if let Ok(n) = raw.parse::<usize>() {
-        if n >= 1 && n <= entries.len() {
-            return Some(entries[n - 1].1.to_string());
-        }
-        if n == entries.len() + 1 {
-            print!("model id: ");
-            let _ = std::io::stdout().flush();
-            return std::io::stdin()
-                .lines()
-                .next()?
-                .ok()
-                .map(|s| s.trim().to_string());
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n >= 1 && n <= n_models => Some(preset.models[n - 1].id.to_string()),
+        _ => {
+            println!("not a valid choice.");
+            None
         }
     }
-    println!("not a valid choice — leaving model unchanged.");
-    None
 }
 
 /// `/skin` (interactive picker, same as `--select-skin`) or `/skin <name>`
