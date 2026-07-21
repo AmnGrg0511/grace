@@ -948,22 +948,27 @@ fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
 
     match event {
         grace::agent::AgentEvent::AssistantContent(text) => {
-            // Sub-level under a "thinking" header,
-            // each line of the model's intermediate content indented under
-            // it — the same visual nesting as tool-call results, so
-            // thinking reads as one collapsible branch, not top-level noise.
-            println!("{}▾ Thinking{}", color(skin.thinking), reset());
+            // Decorative-only header — pushed to the deepest dimming tier so
+            // it recedes behind the conversation text. The ▾ glyph gets a
+            // touch of the tool-bullet accent for visual identity.
+            println!(
+                "{}{}▾{}{} Thinking{}",
+                dim(),
+                color(skin.tool_bullet),
+                reset(),
+                dim(),
+                reset(),
+            );
             for line in text.lines() {
-                println!("  {}{}{}", color(skin.thinking), line, reset());
+                println!("  {}{}{}{}", dim(), color(skin.thinking), line, reset());
             }
         }
         grace::agent::AgentEvent::ToolCallStart { name, arguments } => {
             let compact = compact_args(arguments);
-            // Tool-call header dimmed as a whole — it's plumbing/traceability,
-            // not the conversation itself, so it should recede visually
-            // behind thinking/answer text rather than print at full brightness.
+            // ● (smaller filled circle) instead of the heavy ⏺ — cleaner
+            // and less visually dominant over the conversation text.
             println!(
-                "{}⏺{} {}{}({}){}",
+                "{}●{} {}{}({}){}",
                 color(skin.tool_bullet),
                 reset(),
                 dim(),
@@ -972,47 +977,39 @@ fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
                 reset(),
             );
         }
-        grace::agent::AgentEvent::ToolCallEnd { name, result } => {
-            // Render markdown (tables, code fences, etc.) in tool output too
-            // — previously this printed raw lines, so a table in a tool's
-            // stdout (e.g. read_file on a .md file) never got box-drawing.
-            // No truncation: the full result is shown, matching the header
-            // (also untruncated — see `compact_args`). Output is dimmed
-            // *more* than the header (ANSI dim stacked on top of its own
-            // muted color) so it visually reads as a rung below the
-            // `⏺ name(args)` line that produced it.
+        grace::agent::AgentEvent::ToolCallEnd {
+            name,
+            result,
+            elapsed,
+        } => {
+            // Tool output: single dim (the muted color alone, no extra
+            // ANSI dim) — one tier above decorative labels.
             let rendered = grace::markdown::render_terminal(result, skin);
             for (i, line) in rendered.lines().enumerate() {
                 let prefix = if i == 0 { "  ⎿ " } else { "    " };
-                println!(
-                    "{}{}{}{}{}",
-                    dim(),
-                    color(skin.tool_dim),
-                    prefix,
-                    line,
-                    reset()
-                );
+                println!("{}{}{}{}", color(skin.tool_dim), prefix, line, reset(),);
             }
-            // Σ — a cheap, tokenizer-free estimate (~4 chars/token, the
-            // common rule of thumb) of how much this one result adds to
-            // every future request in the session, since the full history
-            // is resent each turn. Not exact, but close enough to flag a
-            // tool call that's quietly bloating context.
+            // Σ line: double-dimmed decorative info (deepest tier). The Σ
+            // symbol itself gets the tool-bullet accent, the rest stays
+            // dimmed in tool_dim. Timing from execution is appended.
             let tokens = estimate_tokens(result);
-            println!(
-                "    {}{}Σ ~{tokens} tok{}",
-                dim(),
-                color(skin.tool_dim),
-                reset()
-            );
-            let _ = name; // shown on the ToolCallStart line already
+            let secs = elapsed.as_secs_f64();
+            let timing = if secs >= 1.0 {
+                format!("{secs:.1}s")
+            } else {
+                format!("{}ms", (secs * 1000.0) as u64)
+            };
+            // Compose: dim(space · accent(Σ) dim( ~{tokens} tok · {timing}))
+            let prefix = format!("    {}· {}Σ{}", dim(), color(skin.tool_bullet), reset());
+            let rest = format!("{} ~{tokens} tok · {timing}{}", dim(), reset());
+            println!("{prefix}{rest}");
+            let _ = name;
         }
     }
 }
 
 /// Rough token-count estimate with no tokenizer dependency: ~4 chars/token
 /// is the standard rule-of-thumb for English/code mixed text. Good enough
-/// to flag "this tool call is bloating the session", not meant to match a
 /// provider's exact billed count.
 fn estimate_tokens(text: &str) -> usize {
     (text.chars().count() / 4).max(1)
@@ -1100,7 +1097,8 @@ fn urlencoding(s: &str) -> String {
 
 /// A subtle status line above the prompt: model · context bar · elapsed.
 /// All in the skin's muted `tool_dim` color so it recedes behind the prompt
-/// glyph and never competes with the conversation itself.
+/// glyph and never competes with the conversation itself. Single dim
+/// (color only, no extra ANSI dim) — same tier as tool output body.
 fn print_status_line(
     skin: &Skin,
     transport: &(dyn grace::transport::ProviderTransport + '_),
@@ -1143,9 +1141,8 @@ fn print_status_line(
     if no_color() {
         println!("{line}");
     } else {
-        // skin's muted tool-dim color so it lightly inherits the palette
-        // without competing with the actual transcript colors.
-        println!("\x1b[2m{}{}\x1b[0m", ansi(skin.tool_dim), line);
+        // skin's muted tool-dim color, single dim.
+        println!("{}{}{}", ansi(skin.tool_dim), line, RESET);
     }
 }
 

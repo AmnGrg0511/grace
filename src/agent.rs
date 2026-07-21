@@ -62,7 +62,12 @@ pub enum AgentEvent<'a> {
     ToolCallStart { name: &'a str, arguments: &'a str },
     /// A tool call finished (ok or error, both surfaced — errors are fed
     /// back to the model as a tool message, not fatal to the turn).
-    ToolCallEnd { name: &'a str, result: &'a str },
+    /// `elapsed` is the wall-clock duration of the tool execution.
+    ToolCallEnd {
+        name: &'a str,
+        result: &'a str,
+        elapsed: std::time::Duration,
+    },
 }
 
 /// Same as [`run_turn`] but takes an optional event callback so the caller
@@ -143,14 +148,17 @@ pub fn run_turn_with_events(
                             arguments: call.arguments(),
                         });
                     }
+                    let started = std::time::Instant::now();
                     let result = match tools.execute(call.name(), call.arguments()) {
                         Ok(out) => out,
                         Err(e) => format!("tool error: {e}"),
                     };
+                    let elapsed = started.elapsed();
                     if let Some(cb) = on_event.as_deref_mut() {
                         cb(AgentEvent::ToolCallEnd {
                             name: call.name(),
                             result: &result,
+                            elapsed,
                         });
                     }
                     messages.push(Message::tool(
