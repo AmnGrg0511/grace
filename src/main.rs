@@ -22,17 +22,13 @@
 
 use std::process::ExitCode;
 
-use grace::config::Config;
+use grace::config::{Config, load_soul};
 use grace::memory::Memory;
 use grace::message::Message;
 use grace::session::SessionStore;
 use grace::settings::PROVIDER_PRESETS;
-use grace::skin::Skin;
+use grace::skin::{Role, Skin};
 
-/// Render `skin`'s Rgb color as a 24-bit ANSI escape sequence.
-fn ansi(c: owo_colors::Rgb) -> String {
-    format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
-}
 const RESET: &str = "\x1b[0m";
 
 fn main() -> ExitCode {
@@ -245,6 +241,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if let Some(fact) = remember {
         let id = memory.remember(&fact).map_err(|e| e.to_string())?;
         println!("remembered (id {id}): {fact}");
+        // Mirror the DB to the human-readable markdown file.
+        let _ = memory.export_markdown();
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -311,10 +309,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     )));
 
     let mut messages: Vec<Message> = Vec::new();
-    let mut sp = config
-        .system_prompt
-        .clone()
-        .unwrap_or_else(|| grace::config::DEFAULT_SYSTEM_PROMPT.to_string());
+    let mut sp = config.system_prompt.clone().unwrap_or_else(load_soul);
+
     // Ground the persona in durable facts instead of leaving it purely
     // decorative text: whatever Grace has been told to remember is appended
     // to every system prompt, every run.
@@ -664,6 +660,8 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
             i = i + 1
         );
     }
+    // Add "other" option for custom model ID
+    println!("  {}) other (type a model id)", preset.models.len() + 1);
     let n_models = preset.models.len();
     print!("\nselect a model [number]: ");
     let _ = std::io::stdout().flush();
@@ -673,6 +671,17 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
             preset.models[n - 1].id.to_string(),
             Some(preset.models[n - 1].context_window),
         )),
+        Ok(n) if n == n_models + 1 => {
+            // Custom model ID
+            print!("model id: ");
+            let _ = std::io::stdout().flush();
+            let typed = std::io::stdin().lines().next()?.ok()?.trim().to_string();
+            if typed.is_empty() {
+                None
+            } else {
+                Some((typed, None))
+            }
+        },
         _ => {
             println!("not a valid choice.");
             None
@@ -714,22 +723,21 @@ fn pick_skin_interactive(names: &[String]) -> Option<String> {
     println!("\navailable skins:\n");
     for (i, name) in names.iter().enumerate() {
         let s = grace::skin::by_name(Some(name));
-        // A real mini-transcript, not a flat swatch: prompt glyph, a dimmed
-        // tool-call header, and an answer with inline code — exercises
-        // every role color at once so the picker actually shows what the
-        // skin looks like in use.
+        // A real mini-transcript, not a flat swatch: prompt glyph, a tool-call
+        // header, and an answer with inline code — exercises every role
+        // color at once using actual Grace tools (terminal, ls).
         println!(
-            "  {i}) {name}\n     {p}{glyph} you{r}  {tb}⏺{r} {tn}search_files{r}(query)  {td}⎿ 3 matches{r}\n     {a}{ag}{r} {c}rg{r} is faster than {c}grep{r} here.",
+            "  {i}) {name}\n     {p}{glyph} you{r}\n       {tb}●{r} {tn}terminal{r}(list files)  {td}⎿ file1.txt  file2.txt{r}\n     {a}{ag}{r}  Use {c}ls{r} for directory listings.",
             i = i + 1,
-            p = ansi(s.prompt),
+            p = s.paint(Role::Prompt, ""),
             glyph = s.prompt_glyph,
             r = RESET,
-            tb = ansi(s.tool_bullet),
-            tn = ansi(s.tool_name),
-            td = ansi(s.tool_dim),
-            a = ansi(s.answer),
+            tb = s.paint(Role::ToolBullet, ""),
+            tn = s.paint(Role::ToolName, ""),
+            td = s.paint(Role::ToolDim, ""),
+            a = s.paint(Role::Answer, ""),
             ag = s.answer_glyph,
-            c = ansi(s.code),
+            c = s.paint(Role::Code, ""),
         );
     }
     print!("\nselect a skin [number]: ");
@@ -777,7 +785,7 @@ fn run_one_chat_turn(
         Ok(answer) => {
             println!(
                 "\n{}{}{} {}\n",
-                ansi(skin.answer),
+                skin.paint(Role::Answer, ""),
                 skin.answer_glyph,
                 RESET,
                 grace::markdown::render_terminal(&answer, skin)
@@ -942,56 +950,29 @@ fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
 /// restyles every surface at once. Colors auto-disable when stdout isn't a
 /// real terminal (checked once via [`no_color`]).
 fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
-    let color = |rgb: owo_colors::Rgb| if no_color() { String::new() } else { ansi(rgb) };
-    let reset = || if no_color() { "" } else { RESET };
-    let dim = || if no_color() { "" } else { "\x1b[2m" };
+    let no_color = no_color();
+    let dim = |s: &str| if no_color { s.to_string() } else { format!("\x1b[2m{s}\x1b[0m") };
 
     match event {
         grace::agent::AgentEvent::AssistantContent(text) => {
-            // Decorative-only header — pushed to the deepest dimming tier so
-            // it recedes behind the conversation text. The ▾ glyph gets a
-            // touch of the tool-bullet accent for visual identity.
-            println!(
-                "{}{}▾{}{} Thinking{}",
-                dim(),
-                color(skin.tool_bullet),
-                reset(),
-                dim(),
-                reset(),
-            );
+            let bullet = skin.paint(Role::ToolBullet, "▾");
+            let thinking = skin.paint(Role::Thinking, "Thinking");
+            println!("{} {}", bullet, thinking);
             for line in text.lines() {
-                println!("  {}{}{}{}", dim(), color(skin.thinking), line, reset());
+                println!("  {}", skin.paint(Role::Thinking, line));
             }
         }
         grace::agent::AgentEvent::ToolCallStart { name, arguments } => {
             let compact = compact_args(arguments);
-            // ● (smaller filled circle) instead of the heavy ⏺ — cleaner
-            // and less visually dominant over the conversation text.
-            println!(
-                "{}●{} {}{}({}){}",
-                color(skin.tool_bullet),
-                reset(),
-                dim(),
-                name,
-                compact,
-                reset(),
-            );
+            let bullet = skin.paint(Role::ToolBullet, "●");
+            println!("{} {}{}({})", bullet, dim(""), name, compact);
         }
-        grace::agent::AgentEvent::ToolCallEnd {
-            name,
-            result,
-            elapsed,
-        } => {
-            // Tool output: single dim (the muted color alone, no extra
-            // ANSI dim) — one tier above decorative labels.
+        grace::agent::AgentEvent::ToolCallEnd { name: _, result, elapsed } => {
             let rendered = grace::markdown::render_terminal(result, skin);
             for (i, line) in rendered.lines().enumerate() {
                 let prefix = if i == 0 { "  ⎿ " } else { "    " };
-                println!("{}{}{}{}", color(skin.tool_dim), prefix, line, reset(),);
+                println!("{}{}{}", skin.paint(Role::ToolDim, ""), prefix, line);
             }
-            // Σ line: double-dimmed decorative info (deepest tier). The Σ
-            // symbol itself gets the tool-bullet accent, the rest stays
-            // dimmed in tool_dim. Timing from execution is appended.
             let tokens = estimate_tokens(result);
             let secs = elapsed.as_secs_f64();
             let timing = if secs >= 1.0 {
@@ -999,11 +980,9 @@ fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
             } else {
                 format!("{}ms", (secs * 1000.0) as u64)
             };
-            // Compose: dim(space · accent(Σ) dim( ~{tokens} tok · {timing}))
-            let prefix = format!("    {}· {}Σ{}", dim(), color(skin.tool_bullet), reset());
-            let rest = format!("{} ~{tokens} tok · {timing}{}", dim(), reset());
+            let prefix = format!("    {}· {}Σ", dim(""), skin.paint(Role::ToolBullet, ""));
+            let rest = format!("{} ~{tokens} tok · {timing}", dim(""));
             println!("{prefix}{rest}");
-            let _ = name;
         }
     }
 }
@@ -1030,7 +1009,7 @@ fn prompt_label(skin: &Skin) -> String {
     if no_color() {
         return format!("{} ", skin.prompt_glyph);
     }
-    format!("{}{}{} ", ansi(skin.prompt), skin.prompt_glyph, RESET)
+    skin.paint(Role::Prompt, &format!("{} ", skin.prompt_glyph))
 }
 
 /// Best-effort API fetch to discover a model's context window. Covers
@@ -1142,7 +1121,7 @@ fn print_status_line(
         println!("{line}");
     } else {
         // skin's muted tool-dim color, single dim.
-        println!("{}{}{}", ansi(skin.tool_dim), line, RESET);
+        println!("{}", skin.paint(Role::ToolDim, &line));
     }
 }
 

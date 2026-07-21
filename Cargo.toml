@@ -30,16 +30,20 @@ dirs = "5"
 toml = "0.8"
 # Readline-style input (arrow-key history, line editing) for chat mode.
 rustyline = "14"
-# Terminal styling — const-generic, zero-alloc, respects NO_COLOR/CLICOLOR.
-# Chosen over ansi_term/colored (unmaintained / global mutable state) per
-# https://rust-cli-recommendations.sunshowers.io/managing-colors-in-rust.html
-owo-colors = { version = "4", features = ["supports-colors"] }
+# Terminal styling — anstyle is a modern, zero-alloc crate with NO_COLOR/CLICOLOR support.
+# Replaces owo-colors; chosen for const-generic, allocation-free design and proper
+# TTY detection. See https://rust-cli-recommendations.sunshowers.io/managing-colors-in-rust.html
+anstyle = "1"
+anstyle-query = "1"
 # Unified diff generation for the patch tool's terminal output — same
 # diffing engine used by ruff, difftastic-adjacent tooling. Avoids
 # hand-rolling LCS/Myers diff.
 similar = "2"
 unicode-width = "0.2.2"
 ctrlc = "3.5.2"
+# Markdown rendering with syntax highlighting
+pulldown-cmark = "0.12"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 
 [profile.release]
 opt-level = 3

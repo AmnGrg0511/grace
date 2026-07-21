@@ -9,7 +9,7 @@
 //! Colors are 24-bit truecolor (`\x1b[38;2;r;g;b m`) so a skin can be an
 //! exact palette, not just the 16-color ANSI approximation.
 
-use owo_colors::Rgb;
+use anstyle::{Color, RgbColor, Style};
 
 /// One coherent palette. Each field is the color for a distinct role in the
 /// transcript — no two roles share a slot, so a skin fully re-themes the UI.
@@ -19,26 +19,57 @@ pub struct Skin {
     /// The glyph printed at the start of the user's input line (replaces
     /// the old literal "you: " label).
     pub prompt_glyph: &'static str,
-    pub prompt: Rgb,
+    pub prompt: RgbColor,
     /// The glyph printed before grace's final answer (replaces "grace: ").
     pub answer_glyph: &'static str,
-    pub answer: Rgb,
+    pub answer: RgbColor,
     /// Intermediate model content ("thinking" sub-level).
-    pub thinking: Rgb,
+    pub thinking: RgbColor,
     /// Tool-call header bullet + name.
-    pub tool_bullet: Rgb,
-    pub tool_name: Rgb,
+    pub tool_bullet: RgbColor,
+    pub tool_name: RgbColor,
     /// Tool-call result / diff context lines (dimmed prefix).
-    pub tool_dim: Rgb,
+    pub tool_dim: RgbColor,
     /// Inline code / fenced code blocks — "golden monospace" by default,
     /// but fully skin-controlled.
-    pub code: Rgb,
+    pub code: RgbColor,
 }
 
-macro_rules! rgb {
-    ($r:expr, $g:expr, $b:expr) => {
-        Rgb($r, $g, $b)
-    };
+impl Skin {
+    /// Get a `Style` for a color role.
+    pub fn style(&self, role: Role) -> Style {
+        match role {
+            Role::Prompt => Style::new().fg_color(Some(Color::from(self.prompt))),
+            Role::Answer => Style::new().fg_color(Some(Color::from(self.answer))),
+            Role::Thinking => Style::new().fg_color(Some(Color::from(self.thinking))),
+            Role::ToolBullet => Style::new().fg_color(Some(Color::from(self.tool_bullet))),
+            Role::ToolName => Style::new().fg_color(Some(Color::from(self.tool_name))),
+            Role::ToolDim => Style::new().fg_color(Some(Color::from(self.tool_dim))),
+            Role::Code => Style::new().fg_color(Some(Color::from(self.code))),
+        }
+    }
+
+    /// Render text with a role's color (TTY only; no-op otherwise).
+    pub fn paint(&self, role: Role, text: &str) -> String {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            return text.to_string();
+        }
+        let style = self.style(role);
+        format!("{}{}{}", style.render(), text, Style::new().render())
+    }
+}
+
+/// Color roles used throughout the CLI.
+#[derive(Debug, Clone, Copy)]
+pub enum Role {
+    Prompt,
+    Answer,
+    Thinking,
+    ToolBullet,
+    ToolName,
+    ToolDim,
+    Code,
 }
 
 /// "gilded" (default) — graphite neutrals with an old-gold code accent;
@@ -46,101 +77,45 @@ macro_rules! rgb {
 pub const GILDED: Skin = Skin {
     name: "gilded",
     prompt_glyph: "❯",
-    prompt: rgb!(0, 200, 200),
+    prompt: RgbColor(0, 200, 200),
     answer_glyph: "◆",
-    answer: rgb!(190, 120, 220),
-    thinking: rgb!(120, 110, 100),
-    tool_bullet: rgb!(210, 170, 60),
-    tool_name: rgb!(230, 230, 230),
-    tool_dim: rgb!(120, 120, 120),
-    code: rgb!(248, 163, 0), // #F8A300
+    answer: RgbColor(190, 120, 220),
+    thinking: RgbColor(120, 110, 100),
+    tool_bullet: RgbColor(210, 170, 60),
+    tool_name: RgbColor(230, 230, 230),
+    tool_dim: RgbColor(120, 120, 120),
+    code: RgbColor(248, 163, 0), // #F8A300
 };
 
 /// "royal" — deep violet/indigo with a brighter gold, more formal.
 pub const ROYAL: Skin = Skin {
     name: "royal",
     prompt_glyph: "❯",
-    prompt: rgb!(147, 112, 219),
+    prompt: RgbColor(147, 112, 219),
     answer_glyph: "◆",
-    answer: rgb!(186, 85, 211),
-    thinking: rgb!(125, 115, 105),
-    tool_bullet: rgb!(255, 215, 0),
-    tool_name: rgb!(230, 230, 250),
-    tool_dim: rgb!(110, 100, 130),
-    code: rgb!(255, 215, 0),
+    answer: RgbColor(186, 85, 211),
+    thinking: RgbColor(125, 115, 105),
+    tool_bullet: RgbColor(255, 215, 0),
+    tool_name: RgbColor(230, 230, 250),
+    tool_dim: RgbColor(110, 100, 130),
+    code: RgbColor(255, 215, 0),
 };
 
 /// "ocean" — cool teal/blue, calm and low-contrast.
 pub const OCEAN: Skin = Skin {
     name: "ocean",
     prompt_glyph: "›",
-    prompt: rgb!(64, 190, 200),
+    prompt: RgbColor(64, 190, 200),
     answer_glyph: "«",
-    answer: rgb!(70, 130, 220),
-    thinking: rgb!(110, 105, 100),
-    tool_bullet: rgb!(0, 180, 170),
-    tool_name: rgb!(220, 235, 240),
-    tool_dim: rgb!(90, 120, 130),
-    code: rgb!(0, 200, 190),
+    answer: RgbColor(70, 130, 220),
+    thinking: RgbColor(110, 105, 100),
+    tool_bullet: RgbColor(0, 180, 170),
+    tool_name: RgbColor(220, 235, 240),
+    tool_dim: RgbColor(90, 120, 130),
+    code: RgbColor(0, 200, 190),
 };
 
-/// "sakura" — warm pinks, soft and bright.
-pub const SAKURA: Skin = Skin {
-    name: "sakura",
-    prompt_glyph: "✿",
-    prompt: rgb!(240, 130, 170),
-    answer_glyph: "✦",
-    answer: rgb!(230, 100, 150),
-    thinking: rgb!(130, 115, 110),
-    tool_bullet: rgb!(255, 180, 200),
-    tool_name: rgb!(255, 235, 240),
-    tool_dim: rgb!(150, 110, 125),
-    code: rgb!(255, 160, 190),
-};
-
-/// "forest" — greens and earth tones, grounded.
-pub const FOREST: Skin = Skin {
-    name: "forest",
-    prompt_glyph: "❯",
-    prompt: rgb!(80, 170, 100),
-    answer_glyph: "◆",
-    answer: rgb!(60, 140, 80),
-    thinking: rgb!(115, 110, 95),
-    tool_bullet: rgb!(180, 160, 60),
-    tool_name: rgb!(220, 230, 210),
-    tool_dim: rgb!(100, 115, 95),
-    code: rgb!(160, 190, 90),
-};
-
-/// "solaris" — amber/orange, high energy.
-pub const SOLARIS: Skin = Skin {
-    name: "solaris",
-    prompt_glyph: "»",
-    prompt: rgb!(230, 140, 40),
-    answer_glyph: "»",
-    answer: rgb!(220, 100, 40),
-    thinking: rgb!(130, 110, 90),
-    tool_bullet: rgb!(255, 170, 0),
-    tool_name: rgb!(250, 230, 200),
-    tool_dim: rgb!(140, 110, 80),
-    code: rgb!(255, 180, 60),
-};
-
-/// "midnight" — near-monochrome blue/violet, minimal and quiet.
-pub const MIDNIGHT: Skin = Skin {
-    name: "midnight",
-    prompt_glyph: "·",
-    prompt: rgb!(100, 110, 190),
-    answer_glyph: "·",
-    answer: rgb!(130, 120, 200),
-    thinking: rgb!(105, 100, 100),
-    tool_bullet: rgb!(150, 150, 210),
-    tool_name: rgb!(210, 210, 230),
-    tool_dim: rgb!(90, 90, 110),
-    code: rgb!(160, 170, 220),
-};
-
-pub const ALL: &[Skin] = &[GILDED, ROYAL, OCEAN, SAKURA, FOREST, SOLARIS, MIDNIGHT];
+pub const ALL: &[Skin] = &[GILDED, ROYAL, OCEAN];
 
 /// A custom, user-defined skin loaded from `~/.grace/skins/<name>.toml`.
 /// Owns its strings (unlike the `&'static` built-ins) since it's parsed at
@@ -191,7 +166,7 @@ pub fn load_custom_skins() -> Vec<CustomSkin> {
         .collect()
 }
 
-/// Names of every skin available right now: the 7 built-ins plus any custom
+/// Names of every skin available right now: the 3 built-ins plus any custom
 /// skins found on disk. Used by the `--select-skin` picker and `--list-skins`.
 pub fn all_names() -> Vec<String> {
     let mut names: Vec<String> = ALL.iter().map(|s| s.name.to_string()).collect();
@@ -201,8 +176,8 @@ pub fn all_names() -> Vec<String> {
 
 /// Resolve a skin by name (case-insensitive) — built-ins first, then custom
 /// skins from disk — falling back to [`GILDED`] for an unknown/missing name
-/// so a typo in config.toml never breaks startup. Custom skins are leaked
-/// once into `'static` storage so the return type stays a plain `Skin`.
+/// so a typo in `config.toml` never breaks startup. Custom skins are leaked
+/// once into `'static` storage so the return type stays a plain [`Skin`].
 pub fn by_name(name: Option<&str>) -> Skin {
     let Some(name) = name else { return GILDED };
     if let Some(s) = ALL.iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
@@ -221,14 +196,14 @@ fn leak_custom(c: CustomSkin) -> Skin {
     Skin {
         name: leak_str(c.name),
         prompt_glyph: leak_str(c.prompt_glyph),
-        prompt: Rgb(c.prompt[0], c.prompt[1], c.prompt[2]),
+        prompt: RgbColor(c.prompt[0], c.prompt[1], c.prompt[2]),
         answer_glyph: leak_str(c.answer_glyph),
-        answer: Rgb(c.answer[0], c.answer[1], c.answer[2]),
-        thinking: Rgb(c.thinking[0], c.thinking[1], c.thinking[2]),
-        tool_bullet: Rgb(c.tool_bullet[0], c.tool_bullet[1], c.tool_bullet[2]),
-        tool_name: Rgb(c.tool_name[0], c.tool_name[1], c.tool_name[2]),
-        tool_dim: Rgb(c.tool_dim[0], c.tool_dim[1], c.tool_dim[2]),
-        code: Rgb(c.code[0], c.code[1], c.code[2]),
+        answer: RgbColor(c.answer[0], c.answer[1], c.answer[2]),
+        thinking: RgbColor(c.thinking[0], c.thinking[1], c.thinking[2]),
+        tool_bullet: RgbColor(c.tool_bullet[0], c.tool_bullet[1], c.tool_bullet[2]),
+        tool_name: RgbColor(c.tool_name[0], c.tool_name[1], c.tool_name[2]),
+        tool_dim: RgbColor(c.tool_dim[0], c.tool_dim[1], c.tool_dim[2]),
+        code: RgbColor(c.code[0], c.code[1], c.code[2]),
     }
 }
 
@@ -237,12 +212,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seven_default_skins_all_distinct_by_name() {
-        assert_eq!(ALL.len(), 7);
+    fn three_default_skins_all_distinct_by_name() {
+        assert_eq!(ALL.len(), 3);
         let mut names: Vec<&str> = ALL.iter().map(|s| s.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 7, "skin names must be unique");
+        assert_eq!(names.len(), 3, "skin names must be unique");
     }
 
     #[test]
@@ -250,5 +225,12 @@ mod tests {
         assert_eq!(by_name(Some("ROYAL")).name, "royal");
         assert_eq!(by_name(Some("nonexistent")).name, "gilded");
         assert_eq!(by_name(None).name, "gilded");
+    }
+
+    #[test]
+    fn style_rendering_works() {
+        let skin = GILDED;
+        let styled = skin.paint(Role::Prompt, "test");
+        assert!(styled.contains("test"));
     }
 }

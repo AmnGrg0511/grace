@@ -1,6 +1,6 @@
 //! Persistent memory — durable facts that survive across process runs.
 //!
-//! This is the thing Hermes gets *conceptually* right (memory injected every
+//! This is the thing Grace gets *conceptually* right (memory injected every
 //! turn) but Grace backs with a real embedded database instead of re-reading
 //! a markdown file: a single SQLite file via `rusqlite` (bundled, no system
 //! libsqlite3 required). Facts are plain rows; there is no LLM-driven

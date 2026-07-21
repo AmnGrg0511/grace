@@ -1,13 +1,12 @@
 # grace
 
 A **minimal, vendor-neutral ReAct agent core** — the irreducible spine of an
-agent (Hermes-inspired), written in Rust.
+agent, written in Rust.
 
-This is the result of a careful analysis of the Hermes engine: we extracted
-what is *core tech* (a normalized LLM loop + a tool substrate) and dropped the
-*wrapper* (multi-provider fallback chains, context compression, tool-safety
-guardrails, `/steer`, the TUI) — while fixing the things that make Hermes feel
-unfinished: no durable memory, no real skill loading, brittle transports.
+This is the result of extracting what is *core tech* (a normalized LLM loop + a
+tool substrate) and dropping the *wrapper* (multi-provider fallback chains,
+context compression, tool-safety guardrails, `/steer`, the TUI) — while adding
+what was missing: durable memory, real skill loading, solid transports.
 
 ## Dependency stance
 
@@ -103,7 +102,7 @@ procedures on demand:
 # loaded on demand via the built-in `load_skill` tool — no vault required.
 ```
 
-This is deliberately simple compared to Hermes' skill/vault system: a flat
+This is deliberately simple compared to a vault-based skill system: a flat
 filesystem convention plus one SQLite file. It is not feature-complete
 (no vault, no dreaming yet) — it is the smallest version of "the agent
 actually remembers you and can learn a procedure" that is real, not a stub.

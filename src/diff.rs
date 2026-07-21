@@ -1,19 +1,12 @@
-//! Unified-diff snippets for tool output (the `patch` tool's terminal view).
-//!
-//! Uses `similar` (Myers diff, same engine class as `git diff`/`ruff`) instead
-//! of hand-rolling LCS — a real diff snippet is worth a small, well-maintained
-//! dependency rather than reinventing sequence alignment.
-
+use anstyle::{Color, RgbColor, Style};
 use similar::{ChangeTag, TextDiff};
+use std::io::IsTerminal;
 
 /// Render a compact unified-style diff between `old` and `new`, capped to
 /// `context` lines of unchanged context around each change. Colored when
 /// stdout is a real terminal (green `+`, red `-`); plain `+`/`-` prefixes
 /// otherwise so piped output/logs stay diffable.
 pub fn unified_snippet(old: &str, new: &str, context: usize) -> String {
-    use owo_colors::OwoColorize;
-    use std::io::IsTerminal;
-
     let color = std::io::stdout().is_terminal();
     let diff = TextDiff::from_lines(old, new);
     let mut out = String::new();
@@ -27,17 +20,13 @@ pub fn unified_snippet(old: &str, new: &str, context: usize) -> String {
                 };
                 let line = line.trim_end_matches('\n');
                 if color {
-                    match change.tag() {
-                        ChangeTag::Delete => {
-                            out.push_str(&format!("{}\n", format!("-{line}").red()))
-                        }
-                        ChangeTag::Insert => {
-                            out.push_str(&format!("{}\n", format!("+{line}").green()))
-                        }
-                        ChangeTag::Equal => {
-                            out.push_str(&format!("{}\n", format!(" {line}").dimmed()))
-                        }
-                    }
+                    let style = match change.tag() {
+                        ChangeTag::Delete => Style::new().fg_color(Some(Color::from(RgbColor(255, 100, 100)))),
+                        ChangeTag::Insert => Style::new().fg_color(Some(Color::from(RgbColor(100, 255, 100)))),
+                        ChangeTag::Equal => Style::new().fg_color(Some(Color::from(RgbColor(150, 150, 150)))),
+                    };
+                    let reset = Style::new().render();
+                    out.push_str(&format!("{}{}{}{}\n", style.render(), sign, line, reset));
                 } else {
                     out.push_str(&format!("{sign}{line}\n"));
                 }

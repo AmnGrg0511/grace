@@ -2,7 +2,7 @@
 //!
 //! [`ProviderTransport`] is the only thing the agent loop knows about "an LLM".
 //! Every provider (OpenAI, Anthropic, Ollama, a mock) implements these two
-//! methods. This is the seam Hermes isolates behind `transports/base.py`.
+//! methods. This is the seam isolated behind `ProviderTransport`.
 
 use crate::error::Result;
 use crate::message::Message;

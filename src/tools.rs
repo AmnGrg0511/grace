@@ -14,7 +14,7 @@ use crate::error::{AgentError, Result};
 use crate::tool::Tool;
 use serde_json::{json, Value};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -29,6 +29,34 @@ fn arg_str(args: &Value, key: &str) -> Result<String> {
 
 fn str_prop(desc: &str) -> Value {
     json!({"type": "string", "description": desc})
+}
+
+/// Check if a path is allowed under the configured allow-list.
+/// If `GRACE_ALLOW_DIR` is set, only paths under that directory are permitted.
+/// If not set, all paths are allowed (backward-compatible default).
+fn check_path_allowed(path: &str) -> Result<PathBuf> {
+    let path = Path::new(path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| AgentError::Tool(format!("cwd error: {e}")))?
+            .join(path)
+    };
+
+    if let Ok(allow_dir) = std::env::var("GRACE_ALLOW_DIR") {
+        let allow_root = Path::new(&allow_dir).canonicalize()
+            .map_err(|e| AgentError::Tool(format!("invalid GRACE_ALLOW_DIR: {e}")))?;
+        let canonical = absolute.canonicalize()
+            .map_err(|e| AgentError::Tool(format!("path resolve error: {e}")))?;
+        if !canonical.starts_with(&allow_root) {
+            return Err(AgentError::Tool(format!(
+                "path '{}' outside allowed directory '{}'",
+                canonical.display(), allow_root.display()
+            )));
+        }
+    }
+    Ok(absolute)
 }
 
 // ---- session_search ---------------------------------------------------------
@@ -104,6 +132,18 @@ impl TerminalTool {
             .collect()
     }
 
+    /// Allow-list: if `GRACE_TERMINAL_ALLOW` is set, only commands whose
+    /// first token matches an entry are permitted. Empty/unset = allow all
+    /// (backward-compatible default).
+    fn allow_list() -> Vec<String> {
+        std::env::var("GRACE_TERMINAL_ALLOW")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
     fn allow_dir() -> Option<String> {
         std::env::var("GRACE_TERMINAL_ALLOW_DIR")
             .ok()
@@ -137,6 +177,15 @@ impl Tool for TerminalTool {
             return Err(AgentError::Tool(format!(
                 "command refused: contains denied pattern '{hit}'"
             )));
+        }
+        let allow = Self::allow_list();
+        if !allow.is_empty() {
+            let first_token = command.split_whitespace().next().unwrap_or("");
+            if !allow.iter().any(|a| a == first_token) {
+                return Err(AgentError::Tool(format!(
+                    "command refused: '{first_token}' not in allow-list"
+                )));
+            }
         }
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&command);
@@ -189,7 +238,8 @@ impl Tool for ReadFileTool {
 
     fn run(&self, args: &Value) -> Result<String> {
         let path = arg_str(args, "path")?;
-        let content = fs::read_to_string(&path)
+        let allowed = check_path_allowed(&path)?;
+        let content = fs::read_to_string(&allowed)
             .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
         Ok(content)
     }
@@ -223,14 +273,15 @@ impl Tool for WriteFileTool {
     fn run(&self, args: &Value) -> Result<String> {
         let path = arg_str(args, "path")?;
         let content = arg_str(args, "content")?;
-        if let Some(parent) = Path::new(&path).parent() {
+        let allowed = check_path_allowed(&path)?;
+        if let Some(parent) = allowed.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)
                     .map_err(|e| AgentError::Tool(format!("create dirs for {}: {e}", path)))?;
             }
         }
         let nbytes = content.len();
-        fs::write(&path, &content).map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
+        fs::write(&allowed, &content).map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
         Ok(format!("wrote {nbytes} bytes to {}", path))
     }
 }
@@ -267,7 +318,8 @@ impl Tool for PatchTool {
         let path = arg_str(args, "path")?;
         let old = arg_str(args, "old_string")?;
         let new = arg_str(args, "new_string")?;
-        let original = fs::read_to_string(&path)
+        let allowed = check_path_allowed(&path)?;
+        let original = fs::read_to_string(&allowed)
             .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
         match original.find(&old) {
             Some(idx) => {
@@ -277,7 +329,7 @@ impl Tool for PatchTool {
                     new,
                     &original[idx + old.len()..]
                 );
-                fs::write(&path, &replaced)
+                fs::write(&allowed, &replaced)
                     .map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
                 let diff = crate::diff::unified_snippet(&old, &new, 3);
                 Ok(format!("patched {path}\n{diff}"))

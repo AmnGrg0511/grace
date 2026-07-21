@@ -1,6 +1,6 @@
 //! `grace` — a minimal, vendor-neutral ReAct agent core.
 //!
-//! This is the irreducible spine of an agent (Hermes-inspired), written in
+//! This is the irreducible spine of an agent, written in
 //! Rust with best practices, preferring official/native crates (`reqwest`,
 //! `serde`/`serde_json`) over hand-rolled reimplementations of TCP/TLS/JSON.
 //!
