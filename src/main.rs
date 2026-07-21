@@ -219,6 +219,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // Layered settings: defaults -> ~/.grace/config.toml -> CLI flags (CLI wins).
     let settings = grace::settings::Settings::load();
     let skin = grace::skin::by_name(skin_override.as_deref().or(settings.skin.as_deref()));
+
     let mut max_iterations_opt: Option<u32> = None;
     settings.merge_into_args(
         &mut base_url,
@@ -574,8 +575,10 @@ fn run_chat(
 }
 
 /// `/model` (interactive picker, same list as onboarding) or `/model <name>`
-/// (direct switch) mid-chat. Only takes effect on transports that own a
-/// swappable model (`HttpTransport`); mock has nothing to switch.
+/// (direct switch) mid-chat. Persists to ~/.grace/config.toml so the choice
+/// sticks across restarts (unlike the old session-only behavior).
+/// Only takes effect on transports that own a swappable model (`HttpTransport`);
+/// mock has nothing to switch.
 fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '_), arg: &str) {
     if transport.current_model().is_none() {
         println!(
@@ -594,7 +597,13 @@ fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '
     };
     transport.set_model(&picked);
     if let Some(m) = transport.current_model() {
-        println!("model switched to \"{m}\" for this session (not saved to config).");
+        let mut settings = grace::settings::Settings::load();
+        settings.default_model = Some(m.clone());
+        if let Err(e) = settings.save() {
+            eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
+        } else {
+            println!("model switched to \"{m}\" (saved to config).");
+        }
     }
 }
 
@@ -667,7 +676,13 @@ fn handle_skin_command(arg: &str, skin: &mut Skin) {
         return;
     };
     *skin = grace::skin::by_name(Some(&picked));
-    println!("skin switched to \"{picked}\" for this session (not saved to config).");
+    let mut settings = grace::settings::Settings::load();
+    settings.skin = Some(picked.clone());
+    if let Err(e) = settings.save() {
+        eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
+    } else {
+        println!("skin switched to \"{picked}\" (saved to config).");
+    }
 }
 
 /// Shared skin list+preview+select flow, identical presentation to
