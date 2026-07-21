@@ -467,6 +467,8 @@ fn run_chat(
 
     println!("chat mode — type a message, '/exit' to leave, '/model [name]' or '/skin [name]' to switch mid-chat.\n");
 
+    let started_at = std::time::Instant::now();
+
     // Prefer rustyline for arrow-key history/editing; if stdin isn't a real
     // TTY (piped input, tests) it errors on creation, so fall back to plain
     // line reading — same behavior as before, just no history in that case.
@@ -481,6 +483,7 @@ fn run_chat(
     if let Ok(mut rl) = rustyline::DefaultEditor::new() {
         let _ = rl.load_history(&history_path);
         loop {
+            print_status_line(&skin, transport, messages, started_at);
             let readline = rl.readline(&prompt_label(&skin));
             let line = match readline {
                 Ok(l) => l,
@@ -529,6 +532,7 @@ fn run_chat(
     // prompt glyph explicitly — rustyline normally owns that via its
     // `readline(prompt)` argument, but this path bypasses rustyline entirely.
     let stdin = std::io::stdin();
+    print_status_line(&skin, transport, messages, started_at);
     print!("{}", prompt_label(&skin));
     let _ = std::io::stdout().flush();
     for line in stdin.lock().lines() {
@@ -569,6 +573,7 @@ fn run_chat(
             &skin,
             &interrupted,
         );
+        print_status_line(&skin, transport, messages, started_at);
         print!("{}", prompt_label(&skin));
         let _ = std::io::stdout().flush();
     }
@@ -587,18 +592,29 @@ fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '
         );
         return;
     }
-    let picked = if arg.is_empty() {
+    let (picked, ctx) = if arg.is_empty() {
         match pick_model_interactive() {
-            Some(m) => m,
+            Some(result) => result,
             None => return,
         }
     } else {
-        arg.to_string()
+        (arg.to_string(), None)
     };
     transport.set_model(&picked);
     if let Some(m) = transport.current_model() {
         let mut settings = grace::settings::Settings::load();
         settings.default_model = Some(m.clone());
+        settings.default_context_window = ctx.or_else(|| {
+            // Direct-typed model: try fetching context window if we can
+            // reach the provider (base_url from current settings).
+            settings.default_base_url.as_ref().and_then(|url| {
+                let key = std::env::var("GRACE_API_KEY")
+                    .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                    .or_else(|_| std::env::var("OPENROUTER_API_KEY"))
+                    .unwrap_or_default();
+                fetch_context_window(&picked, url, &key)
+            })
+        });
         if let Err(e) = settings.save() {
             eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
         } else {
@@ -608,8 +624,9 @@ fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '
 }
 
 /// Two-level model picker: providers first, then models for that provider.
-/// Used by `/model` mid-chat. Returns `None` on unparsable/EOF input (no-op).
-fn pick_model_interactive() -> Option<String> {
+/// Returns `(model_id, optional_context_window)`. Used by `/model` mid-chat.
+/// Returns `None` on unparsable/EOF input (no-op).
+fn pick_model_interactive() -> Option<(String, Option<u32>)> {
     use std::io::Write;
     println!("\nproviders:\n");
     for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
@@ -631,11 +648,12 @@ fn pick_model_interactive() -> Option<String> {
         // Provider with no known models (e.g. "Custom endpoint"): type one.
         print!("model id: ");
         let _ = std::io::stdout().flush();
-        return std::io::stdin()
-            .lines()
-            .next()?
-            .ok()
-            .map(|s| s.trim().to_string());
+        let typed = std::io::stdin().lines().next()?.ok()?.trim().to_string();
+        return if typed.is_empty() {
+            None
+        } else {
+            Some((typed, None))
+        };
     }
     println!("\n{label} models:\n", label = preset.label);
     for (i, m) in preset.models.iter().enumerate() {
@@ -651,7 +669,10 @@ fn pick_model_interactive() -> Option<String> {
     let _ = std::io::stdout().flush();
     let raw = std::io::stdin().lines().next()?.ok()?;
     match raw.trim().parse::<usize>() {
-        Ok(n) if n >= 1 && n <= n_models => Some(preset.models[n - 1].id.to_string()),
+        Ok(n) if n >= 1 && n <= n_models => Some((
+            preset.models[n - 1].id.to_string(),
+            Some(preset.models[n - 1].context_window),
+        )),
         _ => {
             println!("not a valid choice.");
             None
@@ -831,33 +852,38 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
             ))
         });
 
-    let model = if preset.models.is_empty() {
-        prompt_read("model id: ")
+    let (model, ctx_window) = if preset.models.is_empty() {
+        (prompt_read("model id: "), None)
     } else {
         println!();
         for (i, m) in preset.models.iter().enumerate() {
             println!("  {}) {} (context: {})", i + 1, m.id, m.context_window);
         }
         println!("  {}) other (type a model id)", preset.models.len() + 1);
-        loop {
+        let picked: (String, Option<u32>) = loop {
             let raw = prompt_read("\nselect a model [number]: ");
             if let Ok(n) = raw.parse::<usize>() {
                 if n >= 1 && n <= preset.models.len() {
-                    break preset.models[n - 1].id.to_string();
+                    let m = &preset.models[n - 1];
+                    break (m.id.to_string(), Some(m.context_window));
                 }
                 if n == preset.models.len() + 1 {
-                    break prompt_read("model id: ");
+                    let typed = prompt_read("model id: ");
+                    let ctx = fetch_context_window(&typed, &base_url, &api_key);
+                    break (typed, ctx);
                 }
             }
             println!("enter a valid number");
-        }
+        };
+        picked
     };
 
-    // Persist: model + base_url go to config.toml; the key goes to .env
-    // (kept separate so config.toml can be safely shared/committed).
+    // Persist: model + base_url + context window go to config.toml; the
+    // key goes to .env (kept separate so config.toml can be safely shared).
     let mut settings = grace::settings::Settings::load();
     settings.default_model = Some(model.clone());
     settings.default_base_url = Some(base_url.clone());
+    settings.default_context_window = ctx_window;
     if let Err(e) = settings.save() {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
     }
@@ -1008,6 +1034,119 @@ fn prompt_label(skin: &Skin) -> String {
         return format!("{} ", skin.prompt_glyph);
     }
     format!("{}{}{} ", ansi(skin.prompt), skin.prompt_glyph, RESET)
+}
+
+/// Best-effort API fetch to discover a model's context window. Covers
+/// OpenRouter (GET /api/v1/models) and OpenAI (GET /v1/models/{id});
+/// everything else returns `None` silently.
+fn fetch_context_window(model: &str, base_url: &str, api_key: &str) -> Option<u32> {
+    // OpenRouter: list endpoint returns context_length per model.
+    if base_url.contains("openrouter") {
+        let url = format!(
+            "{}/api/v1/models",
+            base_url.trim_end_matches("/v1").trim_end_matches('/')
+        );
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).bearer_auth(api_key).send().ok()?;
+        let data: serde_json::Value = resp.json().ok()?;
+        let arr = data.get("data").and_then(|d| d.as_array())?;
+        for entry in arr {
+            let id = entry.get("id").and_then(|v| v.as_str())?;
+            if id == model {
+                return entry
+                    .get("context_length")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+            }
+            // Also match on model family prefix (e.g. "anthropic/claude-sonnet-4-*")
+            if model.starts_with(id) || id.starts_with(model) {
+                return entry
+                    .get("context_length")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+            }
+        }
+        return None;
+    }
+    // OpenAI: the models/{id} endpoint returns max_context_window for some.
+    if base_url.contains("openai.com") {
+        let url = format!(
+            "{}/models/{}",
+            base_url.trim_end_matches('/'),
+            urlencoding(model)
+        );
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).bearer_auth(api_key).send().ok()?;
+        let data: serde_json::Value = resp.json().ok()?;
+        if let Some(ctx) = data.pointer("/max_context_window") {
+            return ctx.as_u64().map(|n| n as u32);
+        }
+    }
+    None
+}
+
+/// Encode '/' and other URI-unfriendly chars for model-id path segments.
+fn urlencoding(s: &str) -> String {
+    s.replace('/', "%2F")
+        .replace('.', "%2E")
+        .replace(':', "%3A")
+}
+
+/// A subtle status line above the prompt: model · context bar · elapsed.
+/// All in the skin's muted `tool_dim` color so it recedes behind the prompt
+/// glyph and never competes with the conversation itself.
+fn print_status_line(
+    skin: &Skin,
+    transport: &(dyn grace::transport::ProviderTransport + '_),
+    messages: &[grace::message::Message],
+    started_at: std::time::Instant,
+) {
+    let elapsed = started_at.elapsed();
+    let secs = elapsed.as_secs();
+    let time = if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    };
+    let model = transport
+        .current_model()
+        .unwrap_or_else(|| transport.name().to_string());
+
+    // Token estimate: sum chars across all messages, ~4 chars/token.
+    let total_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+    let estimated = (total_chars / 4).max(1);
+    // Saved context window (from picker/API fetch) beats the static lookup
+    // table — it covers models only known at runtime.
+    let settings = grace::settings::Settings::load();
+    let ctx = settings
+        .default_context_window
+        .or_else(|| grace::settings::context_window_for(&model));
+
+    // Compact 8-segment context bar: █ filled, ░ empty.
+    let bar = match ctx {
+        Some(limit) if limit > 0 => {
+            let pct = ((estimated as f64) / (limit as f64) * 100.0) as usize;
+            let filled = (pct * 8 / 100).min(8);
+            let empty = 8 - filled;
+            format!("[{}] {pct}%", "█".repeat(filled) + &"░".repeat(empty))
+        }
+        _ => format!("~{estimated} tok"),
+    };
+
+    let line = format!("· {model} · {bar} · {time}");
+    if no_color() {
+        println!("{line}");
+    } else {
+        // skin's muted tool-dim color so it lightly inherits the palette
+        // without competing with the actual transcript colors.
+        println!("\x1b[2m{}{}\x1b[0m", ansi(skin.tool_dim), line);
+    }
 }
 
 /// Shrink a JSON tool-arguments string to a single readable line for the

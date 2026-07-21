@@ -13,6 +13,10 @@ use std::path::PathBuf;
 pub struct Settings {
     pub default_model: Option<String>,
     pub default_base_url: Option<String>,
+    /// Context window of the currently-configured model, populated at
+    /// selection time (from the picker's known list, or fetched lazily) so
+    /// the status bar can show a real [████░░░░] bar for any model.
+    pub default_context_window: Option<u32>,
     pub memory_path: Option<String>,
     pub skills_dir: Option<String>,
     pub tools_dir: Option<String>,
