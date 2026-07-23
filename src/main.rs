@@ -200,6 +200,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 stream = true;
                 i += 1;
             }
+            "--completions" => {
+                let shell = args.get(i + 1).cloned().unwrap_or_default();
+                print_completions(&shell);
+                return Ok(ExitCode::SUCCESS);
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(ExitCode::SUCCESS);
@@ -1165,10 +1170,98 @@ Flags:
   --tools-dir <path>     Directory of tools/<name>/manifest.json plugins (default ./tools)
   --stream               Stream tokens as they arrive (one-shot HTTP mode only; falls back to
                          non-streaming under --mock)
+  --completions <shell>  Print shell completions (bash, zsh, fish) and exit
   -h, --help             Show this help
 
 Config file (optional, CLI flags always win):
   ~/.grace/config.toml   default_model, default_base_url, memory_path, skills_dir,
                          tools_dir, max_iterations, request_timeout_secs"#;
     println!("{help}");
+}
+
+/// Print shell completion scripts for bash, zsh, or fish.
+fn print_completions(shell: &str) {
+    match shell.trim() {
+        "bash" => print!("{}", bash_completions()),
+        "zsh" => print!("{}", zsh_completions()),
+        "fish" => print!("{}", fish_completions()),
+        other => {
+            eprintln!("unknown shell: {other} (supported: bash, zsh, fish)");
+            std::process::exit(1);
+        }
+    }
+}
+
+const FLAGS: &[&str] = &[
+    "--prompt", "--base-url", "--api-key", "--model", "--mock", "--openrouter",
+    "--chat", "--max-iterations", "--system", "--remember", "--session",
+    "--list-sessions", "--search-sessions", "--skills-dir", "--skin",
+    "--list-skins", "--select-skin", "--memory-path", "--tools-dir",
+    "--stream", "--completions", "--help", "-h",
+];
+
+fn bash_completions() -> String {
+    format!(
+        r#"# bash completions for grace
+_grace() {{
+    local cur prev
+    COMPREPLY=()
+    cur="${{COMP_WORDS[COMP_CWORD]}}"
+
+    if [[ $cur == --* ]]; then
+        COMPREPLY=($(compgen -W "{flags_str}" -- "$cur"))
+        return
+    fi
+
+    case "${{COMP_WORDS[COMP_CWORD-1]}}" in
+        --skin) COMPREPLY=($(compgen -W "solaris royal ocean sakura" -- "$cur")) ;;
+        --completions) COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur")) ;;
+        --model) ;;
+        --session) ;;
+        *) ;;
+    esac
+}}
+complete -F _grace grace
+"#,
+        flags_str = FLAGS.join(" ")
+    )
+}
+
+fn zsh_completions() -> String {
+    format!(
+        r#"#compdef grace
+
+_grace() {{
+    local -a flags
+    flags=({flags})
+
+    if [[ ${{words[CURRENT]}} == --* ]]; then
+        _describe 'flag' flags
+        return
+    fi
+
+    case ${{words[CURRENT-1]}} in
+        --skin) _values 'skin' 'solaris' 'royal' 'ocean' 'sakura' ;;
+        --completions) _values 'shell' 'bash' 'zsh' 'fish' ;;
+    esac
+}}
+
+_grace "$@"
+"#,
+        flags = FLAGS
+            .iter()
+            .map(|f| format!("'{f}[flag]'"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn fish_completions() -> String {
+    let mut out = String::new();
+    for f in FLAGS {
+        out.push_str(&format!("complete -c grace -l {} -d 'grace flag'\n", f.trim_start_matches('-')));
+    }
+    out.push_str("complete -c grace -l skin -d 'skin name' -a 'solaris royal ocean sakura'\n");
+    out.push_str("complete -c grace -l completions -d 'shell' -a 'bash zsh fish'\n");
+    out
 }
