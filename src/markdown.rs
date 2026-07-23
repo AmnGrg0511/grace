@@ -121,7 +121,18 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                 }
                 TagEnd::Table => {
                     if !table_rows.is_empty() {
+                        // Ensure a blank line separates the table from
+                        // preceding text — otherwise the top border renders
+                        // glued to the line above.
+                        if !out.is_empty() && !out.ends_with("\n\n") {
+                            if out.ends_with('\n') {
+                                out.push('\n');
+                            } else {
+                                out.push_str("\n\n");
+                            }
+                        }
                         out.push_str(&render_table(&table_rows));
+                        out.push('\n');
                     }
                     table_rows.clear();
                 }
