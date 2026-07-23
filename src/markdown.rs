@@ -4,13 +4,11 @@
 //! when stdout is a real TTY; when piped, returns raw text unchanged.
 
 use crate::skin::Skin;
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, CodeBlockKind};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::io::IsTerminal;
-use anstyle::{Color, RgbColor, Style as AnsiStyle};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
-use syntect::util::LinesWithEndings;
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -32,31 +30,35 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
     let parser = Parser::new_ext(md, opts);
 
     let ss = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
-    let syntax = ss
-        .find_syntax_by_extension("rs")
-        .unwrap_or_else(|| ss.find_syntax_plain_text());
     let theme = &ts.themes["base16-ocean.dark"];
-    let mut highlighter = HighlightLines::new(syntax, theme);
 
     let gold = code_color(skin);
+
     let mut out = String::with_capacity(md.len() + md.len() / 4);
+
+    // State
     let mut in_code = false;
     let mut code_lang = String::new();
     let mut code_buf = String::new();
-    let mut heading_level = 0;
+    let mut heading_level: usize = 0;
     let mut in_blockquote = false;
     let mut list_depth: usize = 0;
-    let mut in_table = false;
+    let mut list_item_started = false;
+
+    // Table state
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     let mut current_row: Vec<String> = Vec::new();
     let mut in_cell = false;
+    let mut cell_buf = String::new();
 
     for event in parser {
         match event {
+            // ── Start tags ───────────────────────────────────────
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
                     heading_level = level as usize;
@@ -75,9 +77,10 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                 Tag::List(_) => {
                     list_depth += 1;
                 }
-                Tag::Item => {}
+                Tag::Item => {
+                    list_item_started = true;
+                }
                 Tag::Table(_) => {
-                    in_table = true;
                     table_rows.clear();
                     current_row.clear();
                 }
@@ -87,34 +90,20 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                 }
                 Tag::TableCell => {
                     in_cell = true;
+                    cell_buf.clear();
                 }
                 _ => {}
             },
+
+            // ── End tags ─────────────────────────────────────────
             Event::End(tag_end) => match tag_end {
-                TagEnd::Heading(level) => {
+                TagEnd::Heading(_) => {
                     out.push('\n');
-                    // heading_level not needed anymore since we have the level here
-                    let _ = level;
                     heading_level = 0;
                 }
                 TagEnd::CodeBlock => {
-                    // Render syntax-highlighted code block
                     if !code_buf.is_empty() {
-                        out.push_str(&gold);
-                        out.push_str("┌────────────────────────────────────────┐\n");
-                        for line in LinesWithEndings::from(&code_buf) {
-                            out.push_str("│ ");
-                            let ranges = highlighter.highlight_line(line, &ss).unwrap_or_default();
-                            for (style, text) in ranges {
-                                let color = syntect_style_to_ansi(style);
-                                out.push_str(&color);
-                                out.push_str(text);
-                                out.push_str(RESET);
-                            }
-                            out.push_str(" │\n");
-                        }
-                        out.push_str("└────────────────────────────────────────┘\n");
-                        out.push_str(RESET);
+                        out.push_str(&render_code_block(&code_buf, &code_lang, &ss, theme, &gold));
                     }
                     in_code = false;
                     code_lang.clear();
@@ -127,14 +116,13 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                     list_depth = list_depth.saturating_sub(1);
                 }
                 TagEnd::Item => {
+                    list_item_started = false;
                     out.push('\n');
                 }
                 TagEnd::Table => {
-                    // Render table
                     if !table_rows.is_empty() {
                         out.push_str(&render_table(&table_rows));
                     }
-                    in_table = false;
                     table_rows.clear();
                 }
                 TagEnd::TableRow => {
@@ -143,65 +131,94 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                     }
                 }
                 TagEnd::TableCell => {
+                    if in_cell {
+                        current_row.push(cell_buf.clone());
+                    }
                     in_cell = false;
+                    cell_buf.clear();
                 }
                 _ => {}
             },
+
+            // ── Text ─────────────────────────────────────────────
             Event::Text(text) => {
-                let styled = style_inline(&text, &gold);
                 if in_code {
                     code_buf.push_str(&text);
-                } else if in_table && in_cell {
-                    current_row.push(styled);
+                } else if in_cell {
+                    // pulldown-cmark already strips ** and ` markers;
+                    // it emits separate events for bold/code spans.
+                    // Just store raw text — inline styling handled by
+                    // Event::Code and the bold is implicit.
+                    cell_buf.push_str(&text);
                 } else if in_blockquote {
                     out.push_str(DIM);
                     out.push_str("▏ ");
-                    out.push_str(&styled);
+                    out.push_str(&text);
                     out.push_str(RESET);
                     out.push('\n');
                 } else if heading_level > 0 {
                     out.push_str(BOLD);
                     out.push_str(&"#".repeat(heading_level));
                     out.push(' ');
-                    out.push_str(&styled);
+                    out.push_str(&text);
                     out.push_str(RESET);
+                    out.push('\n');
                 } else if list_depth > 0 {
-                    out.push_str(&"  ".repeat(list_depth - 1));
-                    out.push_str(BOLD);
-                    out.push_str("• ");
-                    out.push_str(RESET);
-                    out.push_str(&styled);
+                    if list_item_started {
+                        out.push_str(&"  ".repeat(list_depth - 1));
+                        out.push_str(BOLD);
+                        out.push_str("• ");
+                        out.push_str(RESET);
+                        list_item_started = false;
+                    }
+                    out.push_str(&text);
                 } else {
-                    out.push_str(&styled);
+                    out.push_str(&text);
                 }
             },
+
+            // ── Inline code ──────────────────────────────────────
             Event::Code(text) => {
                 if in_code {
                     code_buf.push_str(&text);
+                } else if in_cell {
+                    // Inline code inside table cell
+                    cell_buf.push_str(&gold);
+                    cell_buf.push_str(&text);
+                    cell_buf.push_str(RESET);
                 } else {
                     out.push_str(&gold);
                     out.push_str(&text);
                     out.push_str(RESET);
                 }
             },
+
+            // ── Line breaks ──────────────────────────────────────
             Event::SoftBreak => {
-                if !in_code && !in_table {
+                if in_code {
+                    // Keep newlines in code blocks
+                } else if !in_cell {
                     out.push('\n');
                 }
-            },
+            }
             Event::HardBreak => {
-                if !in_code && !in_table {
+                if !in_code && !in_cell {
                     out.push('\n');
                 }
-            },
+            }
+
+            // ── Horizontal rule ──────────────────────────────────
             Event::Rule => {
                 out.push_str(DIM);
                 out.push_str("────────────────────────────────────────\n");
                 out.push_str(RESET);
-            },
+            }
+
+            // ── Task list ────────────────────────────────────────
             Event::TaskListMarker(checked) => {
                 out.push_str(if checked { "[x] " } else { "[ ] " });
-            },
+            }
+
             _ => {}
         }
     }
@@ -209,47 +226,76 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
     out
 }
 
+/// Render a fenced code block with syntax highlighting and a content-width box.
+fn render_code_block(
+    code: &str,
+    lang: &str,
+    ss: &SyntaxSet,
+    theme: &syntect::highlighting::Theme,
+    _gold: &str,
+) -> String {
+    let syntax = ss
+        .find_syntax_by_token(lang.trim())
+        .or_else(|| ss.find_syntax_by_extension("rs"))
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
+    // Determine the widest line for box width
+    let lines: Vec<&str> = code.lines().collect();
+    let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    let box_width = max_len.max(20) + 2; // "│ " + content + " │"
+
+    let mut out = String::new();
+
+    // Top border
+    out.push_str(DIM);
+    out.push('┌');
+    out.push_str(&"─".repeat(box_width));
+    out.push('┐');
+    out.push('\n');
+    out.push_str(RESET);
+
+    // Content lines
+    for line in &lines {
+        let ranges = highlighter.highlight_line(line, ss).unwrap_or_default();
+        let visible_len: usize = ranges.iter().map(|(_, t)| t.len()).sum();
+        let pad = box_width.saturating_sub(visible_len + 2);
+
+        out.push_str(DIM);
+        out.push_str("│ ");
+        out.push_str(RESET);
+        for (style, text) in &ranges {
+            let color = syntect_style_to_ansi(*style);
+            out.push_str(&color);
+            out.push_str(text);
+            out.push_str(RESET);
+        }
+        out.push_str(&" ".repeat(pad));
+        out.push_str(DIM);
+        out.push_str(" │");
+        out.push('\n');
+        out.push_str(RESET);
+    }
+
+    // Bottom border
+    out.push_str(DIM);
+    out.push('└');
+    out.push_str(&"─".repeat(box_width));
+    out.push('┘');
+    out.push('\n');
+    out.push_str(RESET);
+
+    out
+}
+
 /// Convert a syntect Style to ANSI escape sequence.
 fn syntect_style_to_ansi(style: SyntectStyle) -> String {
     let fg = style.foreground;
-    let ansi_style = AnsiStyle::new().fg_color(Some(Color::from(RgbColor(fg.r, fg.g, fg.b))));
+    let ansi_style =
+        anstyle::Style::new().fg_color(Some(anstyle::Color::from(anstyle::RgbColor(
+            fg.r, fg.g, fg.b,
+        ))));
     ansi_style.render().to_string()
-}
-
-/// Apply inline markdown styling: **bold**, `code`.
-fn style_inline(text: &str, gold: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '*' && chars.peek() == Some(&'*') {
-            chars.next();
-            out.push_str(BOLD);
-            let mut buf = String::new();
-            while let Some(c2) = chars.next() {
-                if c2 == '*' && chars.peek() == Some(&'*') {
-                    chars.next();
-                    break;
-                }
-                buf.push(c2);
-            }
-            out.push_str(&buf);
-            out.push_str(RESET);
-        } else if c == '`' {
-            let mut buf = String::new();
-            for c2 in chars.by_ref() {
-                if c2 == '`' {
-                    break;
-                }
-                buf.push(c2);
-            }
-            out.push_str(gold);
-            out.push_str(&buf);
-            out.push_str(RESET);
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Render a markdown table as aligned box-drawing.
@@ -257,48 +303,58 @@ fn render_table(rows: &[Vec<String>]) -> String {
     if rows.is_empty() {
         return String::new();
     }
+
     let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    let mut widths = vec![0; ncols];
+    if ncols == 0 {
+        return String::new();
+    }
+
+    // Calculate column widths from visible (ANSI-stripped) text
+    let mut widths = vec![0usize; ncols];
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            // Strip ANSI for width calculation
             let visible = strip_ansi(cell);
-            widths[i] = widths[i].max(visible.len().min(40));
+            widths[i] = widths[i].max(visible.chars().count());
         }
     }
 
     let mut out = String::new();
+
+    // Top border: ┌─────┬─────┐
+    out.push_str(DIM);
+    out.push('┌');
+    for (ci, w) in widths.iter().enumerate() {
+        out.push_str(&"─".repeat(w + 2));
+        out.push(if ci + 1 == ncols { '┐' } else { '┬' });
+    }
+    out.push('\n');
+    out.push_str(RESET);
+
     for (ri, row) in rows.iter().enumerate() {
         let is_header = ri == 0;
-        let mut wrapped: Vec<Vec<String>> = Vec::new();
-        let mut max_lines = 1;
+
+        // Cell line: │ cell │ cell │
+        out.push_str(DIM);
+        out.push_str("│ ");
+        out.push_str(RESET);
         for (ci, cell) in row.iter().enumerate() {
-            let w = widths[ci];
-            let lines = wrap_cell(cell, w);
-            max_lines = max_lines.max(lines.len());
-            wrapped.push(lines);
-        }
-        for line_idx in 0..max_lines {
-            out.push_str(DIM);
-            out.push_str("│ ");
-            out.push_str(RESET);
-            for (ci, lines) in wrapped.iter().enumerate() {
-                let cell = lines.get(line_idx).map(|s| s.as_str()).unwrap_or("");
-                let pad = widths[ci].saturating_sub(strip_ansi(cell).len());
-                if is_header {
-                    out.push_str(BOLD);
-                    out.push_str(cell);
-                    out.push_str(RESET);
-                } else {
-                    out.push_str(cell);
-                }
-                out.push_str(&" ".repeat(pad));
-                out.push_str(DIM);
-                out.push_str(" │ ");
+            let visible = strip_ansi(cell);
+            let pad = widths[ci].saturating_sub(visible.chars().count());
+            if is_header {
+                out.push_str(BOLD);
+                out.push_str(cell);
                 out.push_str(RESET);
+            } else {
+                out.push_str(cell);
             }
-            out.push('\n');
+            out.push_str(&" ".repeat(pad));
+            out.push_str(DIM);
+            out.push_str(" │ ");
+            out.push_str(RESET);
         }
+        out.push('\n');
+
+        // Header separator: ├───┼───┤
         if is_header {
             out.push_str(DIM);
             out.push('├');
@@ -310,6 +366,17 @@ fn render_table(rows: &[Vec<String>]) -> String {
             out.push_str(RESET);
         }
     }
+
+    // Bottom border: └─────┴─────┘
+    out.push_str(DIM);
+    out.push('└');
+    for (ci, w) in widths.iter().enumerate() {
+        out.push_str(&"─".repeat(w + 2));
+        out.push(if ci + 1 == ncols { '┘' } else { '┴' });
+    }
+    out.push('\n');
+    out.push_str(RESET);
+
     out
 }
 
@@ -329,38 +396,6 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Wrap a cell to max width, preserving ANSI.
-fn wrap_cell(text: &str, width: usize) -> Vec<String> {
-    let visible = strip_ansi(text);
-    if visible.len() <= width {
-        return vec![text.to_string()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_visible = 0;
-    for word in visible.split_whitespace() {
-        let wlen = word.len();
-        if current_visible + wlen + 1 > width && !current.is_empty() {
-            lines.push(current);
-            current = String::new();
-            current_visible = 0;
-        }
-        if !current.is_empty() {
-            current.push(' ');
-            current_visible += 1;
-        }
-        current.push_str(word);
-        current_visible += wlen;
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,29 +404,50 @@ mod tests {
     fn passthrough_when_not_a_tty() {
         // In test harness stdout is piped, so rendering must be a no-op.
         let md = "# Title\n**bold** and `code`";
-        assert_eq!(render_terminal(md, &crate::skin::GILDED), md);
+        assert_eq!(render_terminal(md, &crate::skin::SOLARIS), md);
     }
 
     #[test]
     fn inline_styling_contains_escapes() {
         // Force styling by simulating a TTY is hard; just check the helper.
-        let gold = code_color(&crate::skin::GILDED);
-        let styled = style_inline("a **b** c `d`", &gold);
-        assert!(styled.contains(BOLD));
-        assert!(styled.contains(&gold));
-        assert!(styled.contains(RESET));
-        assert!(styled.contains("b"));
-        assert!(styled.contains("d"));
+        let gold = code_color(&crate::skin::SOLARIS);
+        assert!(!gold.is_empty());
+        assert!(gold.contains("\x1b[38;2;"));
     }
 
     #[test]
-    fn table_is_detected_and_rendered_as_box_drawing() {
-        let _gold = code_color(&crate::skin::GILDED);
-        let _md = "| a | bb |\n|---|----|\n| 1 | 22 |";
-        let rendered = render_table(&[vec!["a".into(), "bb".into()], vec!["1".into(), "22".into()]]);
+    fn table_has_all_four_border_types() {
+        // render_table is not TTY-gated, so we can test it directly.
+        let rows = vec![
+            vec!["Feature".to_string(), "Description".to_string()],
+            vec!["Variable".to_string().to_string(), "Declares".to_string()],
+        ];
+        let rendered = render_table(&rows);
+        // Must have top, header separator, and bottom borders
+        assert!(rendered.contains('┌'), "missing top-left");
+        assert!(rendered.contains('┐'), "missing top-right");
+        assert!(rendered.contains('├'), "missing header-left separator");
+        assert!(rendered.contains('┤'), "missing header-right separator");
+        assert!(rendered.contains('└'), "missing bottom-left");
+        assert!(rendered.contains('┘'), "missing bottom-right");
+        assert!(rendered.contains('│'), "missing vertical bar");
+        // Should NOT contain literal pipes
+        assert!(!rendered.contains('|'), "table should not contain literal | pipes");
+    }
+
+    #[test]
+    fn render_code_block_scales_to_content() {
+        let ss = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+        let theme = &ts.themes["base16-ocean.dark"];
+        let gold = code_color(&crate::skin::SOLARIS);
+
+        let code = "fn main() {\n    println!(\"hi\");\n}";
+        let rendered = render_code_block(code, "rust", &ss, theme, &gold);
+        assert!(rendered.contains('┌'));
+        assert!(rendered.contains('└'));
         assert!(rendered.contains('│'));
-        assert!(rendered.contains('┼') || rendered.contains('┤'));
-        assert!(rendered.contains("a"));
-        assert!(rendered.contains("22"));
+        // Box width should match content, not be hardcoded
+        assert!(!rendered.contains("────────────────────────────────────────┐"));
     }
 }

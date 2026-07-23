@@ -72,19 +72,18 @@ pub enum Role {
     Code,
 }
 
-/// "gilded" (default) — graphite neutrals with an old-gold code accent;
-/// the palette this CLI shipped its first classy pass with.
-pub const GILDED: Skin = Skin {
-    name: "gilded",
-    prompt_glyph: "❯",
-    prompt: RgbColor(0, 200, 200),
-    answer_glyph: "◆",
-    answer: RgbColor(190, 120, 220),
-    thinking: RgbColor(120, 110, 100),
-    tool_bullet: RgbColor(210, 170, 60),
-    tool_name: RgbColor(230, 230, 230),
-    tool_dim: RgbColor(120, 120, 120),
-    code: RgbColor(248, 163, 0), // #F8A300
+/// "solaris" — amber/orange, high energy (DEFAULT).
+pub const SOLARIS: Skin = Skin {
+    name: "solaris",
+    prompt_glyph: "»",
+    prompt: RgbColor(230, 140, 40),
+    answer_glyph: "»",
+    answer: RgbColor(220, 100, 40),
+    thinking: RgbColor(130, 110, 90),
+    tool_bullet: RgbColor(255, 170, 0),
+    tool_name: RgbColor(250, 230, 200),
+    tool_dim: RgbColor(140, 110, 80),
+    code: RgbColor(255, 180, 60),
 };
 
 /// "royal" — deep violet/indigo with a brighter gold, more formal.
@@ -115,7 +114,21 @@ pub const OCEAN: Skin = Skin {
     code: RgbColor(0, 200, 190),
 };
 
-pub const ALL: &[Skin] = &[GILDED, ROYAL, OCEAN];
+/// "sakura" — warm pinks, soft and bright.
+pub const SAKURA: Skin = Skin {
+    name: "sakura",
+    prompt_glyph: "✿",
+    prompt: RgbColor(240, 130, 170),
+    answer_glyph: "✦",
+    answer: RgbColor(230, 100, 150),
+    thinking: RgbColor(130, 115, 110),
+    tool_bullet: RgbColor(255, 180, 200),
+    tool_name: RgbColor(255, 235, 240),
+    tool_dim: RgbColor(150, 110, 125),
+    code: RgbColor(255, 160, 190),
+};
+
+pub const ALL: &[Skin] = &[SOLARIS, ROYAL, OCEAN, SAKURA];
 
 /// A custom, user-defined skin loaded from `~/.grace/skins/<name>.toml`.
 /// Owns its strings (unlike the `&'static` built-ins) since it's parsed at
@@ -166,7 +179,7 @@ pub fn load_custom_skins() -> Vec<CustomSkin> {
         .collect()
 }
 
-/// Names of every skin available right now: the 3 built-ins plus any custom
+/// Names of every skin available right now: the 4 built-ins plus any custom
 /// skins found on disk. Used by the `--select-skin` picker and `--list-skins`.
 pub fn all_names() -> Vec<String> {
     let mut names: Vec<String> = ALL.iter().map(|s| s.name.to_string()).collect();
@@ -175,11 +188,11 @@ pub fn all_names() -> Vec<String> {
 }
 
 /// Resolve a skin by name (case-insensitive) — built-ins first, then custom
-/// skins from disk — falling back to [`GILDED`] for an unknown/missing name
+/// skins from disk — falling back to [`SOLARIS`] for an unknown/missing name
 /// so a typo in `config.toml` never breaks startup. Custom skins are leaked
 /// once into `'static` storage so the return type stays a plain [`Skin`].
 pub fn by_name(name: Option<&str>) -> Skin {
-    let Some(name) = name else { return GILDED };
+    let Some(name) = name else { return SOLARIS };
     if let Some(s) = ALL.iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
         return *s;
     }
@@ -188,7 +201,7 @@ pub fn by_name(name: Option<&str>) -> Skin {
             return leak_custom(c);
         }
     }
-    GILDED
+    SOLARIS
 }
 
 fn leak_custom(c: CustomSkin) -> Skin {
@@ -212,24 +225,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn three_default_skins_all_distinct_by_name() {
-        assert_eq!(ALL.len(), 3);
+    fn four_default_skins_all_distinct_by_name() {
+        assert_eq!(ALL.len(), 4);
         let mut names: Vec<&str> = ALL.iter().map(|s| s.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 3, "skin names must be unique");
+        assert_eq!(names.len(), 4, "skin names must be unique");
     }
 
     #[test]
     fn by_name_is_case_insensitive_and_falls_back() {
         assert_eq!(by_name(Some("ROYAL")).name, "royal");
-        assert_eq!(by_name(Some("nonexistent")).name, "gilded");
-        assert_eq!(by_name(None).name, "gilded");
+        assert_eq!(by_name(Some("nonexistent")).name, "solaris");
+        assert_eq!(by_name(None).name, "solaris");
     }
 
     #[test]
     fn style_rendering_works() {
-        let skin = GILDED;
+        let skin = SOLARIS;
         let styled = skin.paint(Role::Prompt, "test");
         assert!(styled.contains("test"));
     }

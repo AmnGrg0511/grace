@@ -168,7 +168,7 @@ impl Config {
         system_prompt: Option<String>,
     ) -> Result<Config> {
         let transport = if mock {
-            TransportConfig::Mock { max_tool_rounds: 3 }
+            TransportConfig::Mock { max_tool_rounds: 256 }
         } else if openrouter {
             let model = model.ok_or_else(|| {
                 AgentError::Config(

@@ -77,7 +77,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut mock = false;
     let mut chat = false;
     let mut openrouter = false;
-    let mut max_iterations: u32 = 16;
+    let mut max_iterations: u32 = 256;
     let mut system_prompt: Option<String> = None;
     let mut remember: Option<String> = None;
     let mut session_id: Option<String> = None;
@@ -727,17 +727,18 @@ fn pick_skin_interactive(names: &[String]) -> Option<String> {
         // header, and an answer with inline code — exercises every role
         // color at once using actual Grace tools (terminal, ls).
         println!(
-            "  {i}) {name}\n     {p}{glyph} you{r}\n       {tb}●{r} {tn}terminal{r}(list files)  {td}⎿ file1.txt  file2.txt{r}\n     {a}{ag}{r}  Use {c}ls{r} for directory listings.",
+            "  {a}{i}) {name}{r}\n     {p}{glyph} you{r}\n       {tb}●{r} {tn}terminal{r}(list files)  {td}⎿ file1.txt  file2.txt{r}\n     {a}{ag}{r}  Use {c}ls{r} for directory listings.",
             i = i + 1,
-            p = s.paint(Role::Prompt, ""),
+            name = name,
+            p = s.style(Role::Prompt).render(),
             glyph = s.prompt_glyph,
             r = RESET,
-            tb = s.paint(Role::ToolBullet, ""),
-            tn = s.paint(Role::ToolName, ""),
-            td = s.paint(Role::ToolDim, ""),
-            a = s.paint(Role::Answer, ""),
+            tb = s.style(Role::ToolBullet).render(),
+            tn = s.style(Role::ToolName).render(),
+            td = s.style(Role::ToolDim).render(),
+            a = s.style(Role::Answer).render(),
             ag = s.answer_glyph,
-            c = s.paint(Role::Code, ""),
+            c = s.style(Role::Code).render(),
         );
     }
     print!("\nselect a skin [number]: ");

@@ -10,3 +10,4 @@
 .env
 *.key
 credentials*
+typescript
