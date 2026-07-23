@@ -69,7 +69,7 @@ impl ProviderTransport for MockTransport {
         if rounds < self.max_tool_rounds {
             if wants_terminal {
                 return Ok(ModelResponse {
-                    content: String::new(),
+                    content: "I'll run that command for you.".to_string(),
                     tool_calls: vec![ToolCall::new(
                         format!("call_{rounds}"),
                         "run_terminal",
@@ -80,7 +80,7 @@ impl ProviderTransport for MockTransport {
             }
             if wants_file {
                 return Ok(ModelResponse {
-                    content: String::new(),
+                    content: "Writing the file now.".to_string(),
                     tool_calls: vec![ToolCall::new(
                         format!("call_{rounds}"),
                         "write_file",

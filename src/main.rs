@@ -295,7 +295,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     .map_err(|e| e.to_string())?;
 
     let transport = config.build_transport().map_err(|e| e.to_string())?;
-    let skills_root = skills_dir.unwrap_or_else(|| "skills".to_string());
+
+    // Seed default skills (grace-agent, memory-update, skill-author) into
+    // ~/.grace/skills/ on first run, and use that as the default skills
+    // root unless --skills-dir overrides it.
+    let skills_root = skills_dir.unwrap_or_else(|| {
+        grace::default_skills::default_root().to_string_lossy().to_string()
+    });
+    let _ = grace::default_skills::ensure_default_skills();
     let tools_root = tools_dir.unwrap_or_else(|| "tools".to_string());
     let skills = grace::skill::SkillStore::new(&skills_root);
     // Shared, not `Sync` (SQLite `Connection` isn't) — fine since Grace is
@@ -451,6 +458,8 @@ fn run_chat(
     // Owned+mutable so `/skin <name>` can swap it live; `/model <name>` swaps
     // the transport's own interior model instead (see `set_model`).
     let mut skin = *skin;
+    // Owned so `/session <name>` can switch mid-chat.
+    let mut current_session: Option<String> = session_id.map(|s| s.to_string());
 
     // Ctrl-C mid-turn cancels the current turn (tool calls already run stay
     // recorded) and returns to the prompt, instead of killing the whole
@@ -513,13 +522,17 @@ fn run_chat(
                 handle_skin_command(rest.trim(), &mut skin);
                 continue;
             }
+            if let Some(rest) = text.strip_prefix("/session") {
+                handle_session_command(rest.trim(), sessions, messages, &mut current_session);
+                continue;
+            }
             run_one_chat_turn(
                 transport,
                 tools,
                 messages,
                 max_iterations,
                 sessions,
-                session_id,
+                current_session.as_deref(),
                 text,
                 &skin,
                 &interrupted,
@@ -563,13 +576,19 @@ fn run_chat(
             let _ = std::io::stdout().flush();
             continue;
         }
+        if let Some(rest) = text.strip_prefix("/session") {
+            handle_session_command(rest.trim(), sessions, messages, &mut current_session);
+            print!("{}", prompt_label(&skin));
+            let _ = std::io::stdout().flush();
+            continue;
+        }
         run_one_chat_turn(
             transport,
             tools,
             messages,
             max_iterations,
             sessions,
-            session_id,
+            current_session.as_deref(),
             text,
             &skin,
             &interrupted,
@@ -717,6 +736,95 @@ fn handle_skin_command(arg: &str, skin: &mut Skin) {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
     } else {
         println!("skin switched to \"{picked}\" (saved to config).");
+    }
+}
+
+/// `/session` — switch, list, or clear session mid-chat.
+/// - `/session` (no arg): interactive picker (lists recent sessions)
+/// - `/session <name>`: switch to that session (loads history)
+/// - `/session new`: start a fresh unnamed session (clears in-memory history)
+/// - `/session none`: disable session persistence for the rest of the chat
+fn handle_session_command(
+    arg: &str,
+    sessions: &SessionStore,
+    messages: &mut Vec<Message>,
+    current_session: &mut Option<String>,
+) {
+    if arg.is_empty() {
+        // Interactive: list recent sessions and let the user pick.
+        let session_list = match sessions.list_sessions() {
+            Ok(list) => list,
+            Err(e) => {
+                println!("error listing sessions: {e}");
+                return;
+            }
+        };
+        if session_list.is_empty() {
+            println!("no saved sessions yet.");
+            return;
+        }
+        println!("\nsaved sessions (most recent first):\n");
+        for (i, sid) in session_list.iter().enumerate() {
+            let preview = sessions
+                .load(sid)
+                .ok()
+                .and_then(|m| m.first().map(|m| m.content.clone()))
+                .unwrap_or_default();
+            let preview = preview.chars().take(50).collect::<String>();
+            println!("  {}) {}  {}", i + 1, sid, preview);
+        }
+        print!("\nselect a session [number, or 0 for new]: ");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let raw = std::io::stdin().lines().next().and_then(|l| l.ok()).unwrap_or_default();
+        match raw.trim().parse::<usize>() {
+            Ok(0) => {
+                messages.clear();
+                *current_session = None;
+                println!("started a fresh session (no persistence).");
+            }
+            Ok(n) if n >= 1 && n <= session_list.len() => {
+                let sid = &session_list[n - 1];
+                match sessions.load(sid) {
+                    Ok(loaded) => {
+                        messages.clear();
+                        messages.extend(loaded);
+                        *current_session = Some(sid.clone());
+                        println!("switched to session \"{sid}\" ({} messages loaded).", messages.len());
+                    }
+                    Err(e) => println!("error loading session: {e}"),
+                }
+            }
+            _ => println!("not a valid choice — staying on current session."),
+        }
+        return;
+    }
+
+    match arg {
+        "new" => {
+            messages.clear();
+            *current_session = None;
+            println!("started a fresh session (no persistence).");
+        }
+        "none" => {
+            *current_session = None;
+            println!("session persistence disabled for this chat.");
+        }
+        name => {
+            match sessions.load(name) {
+                Ok(loaded) => {
+                    messages.clear();
+                    messages.extend(loaded);
+                    *current_session = Some(name.to_string());
+                    println!("switched to session \"{name}\" ({} messages loaded).", messages.len());
+                }
+                Err(e) => {
+                    println!("session \"{name}\" not found ({}). Starting fresh.", e);
+                    messages.clear();
+                    *current_session = Some(name.to_string());
+                }
+            }
+        }
     }
 }
 

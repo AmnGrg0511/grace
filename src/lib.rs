@@ -30,6 +30,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod default_skills;
 pub mod delegate_tool;
 pub mod diff;
 pub mod error;
