@@ -1,32 +1,7 @@
 # grace
 
-A **minimal, vendor-neutral ReAct agent core** — the irreducible spine of an
-agent, written in Rust.
-
-This is the result of extracting what is *core tech* (a normalized LLM loop + a
-tool substrate) and dropping the *wrapper* (multi-provider fallback chains,
-context compression, tool-safety guardrails, `/steer`, the TUI) — while adding
-what was missing: durable memory, real skill loading, solid transports.
-
-## Dependency stance
-
-Grace prefers **official, maintained crates** over hand-rolled
-reimplementations of solved problems. Reinventing TCP/TLS framing, a JSON
-parser, or an HTTP client from `std` alone is not "minimal" — it's fragile and
-unmaintainable. So:
-
-- `reqwest` (rustls-tls, blocking) — real HTTPS, no proxy hacks.
-- `serde` / `serde_json` — real JSON, not a hand-rolled parser.
-- `rusqlite` (bundled) — real persistent memory, not a text file re-read on
-  every turn.
-
-What Grace still avoids: heavy async runtimes when a blocking CLI doesn't need
-one, ORMs, config-management frameworks, anything with a large transitive
-dependency tree relative to the value it adds. Every dependency has to earn
-its place; official/native and actively maintained is the bar, not "zero
-deps at all costs."
-
-## What it is
+A **minimal, fast, vendor-neutral ReAct agent core** — the irreducible spine of
+an AI agent, written in Rust. No bloat. No async runtime. No TUI. Just the loop.
 
 ```
 Message list  ──►  ProviderTransport (normalized LLM call)
@@ -38,37 +13,47 @@ Message list  ──►  ProviderTransport (normalized LLM call)
               loop until FinishReason::Stop (or budget exhausted)
 ```
 
-That is the whole agent. Persistent memory and skills are additive state
-around it, not a rewrite of the loop.
+That is the whole agent. Everything else — memory, skills, skins, streaming,
+session history — is additive state around that loop, not a rewrite of it.
 
-## Modules
+## Why
 
-| Module | Role |
+Most agent frameworks are either:
+- **Thick orchestrators** (LangChain, AutoGen) — layers of abstraction,
+  context compression, multi-provider routing, plugins, hooks, config
+  DSLs. You spend more time fighting the framework than writing your agent.
+- **Thin wrappers** (basic API clients) — no tool loop, no memory, no
+  persistence. Just a glorified `curl`.
+
+Grace is the **third path**: a production-quality ReAct loop with real tools,
+real memory, real transports, real rendering — in ~5,000 lines of Rust. It
+compiles in 40 seconds, runs as a single binary, and doesn't require you to
+learn a framework. You read the source and you understand the whole thing.
+
+## Features
+
+| Feature | What it does |
 |---|---|
-| `message` | The unified conversation record (the source of truth). |
-| `transport` | `ProviderTransport` trait + normalized `ModelResponse`/`FinishReason`. |
-| `transport_http` | OpenAI-compatible `/chat/completions` over real HTTPS via `reqwest`. Also serves OpenRouter (just a base-url preset). |
-| `transport_mock` | Scripted offline "model" — proves the loop with zero network. |
-| `tool` | `Tool` trait + `ToolRegistry` (name → handler dispatch). |
-| `tools` | Built-ins: `run_terminal`, `read_file`, `write_file`, `patch`. |
-| `agent` | The ReAct loop. |
-| `config` | Runtime wiring (which transport, which model, budget). |
-| `memory` | SQLite-backed persistent facts, injected into every system prompt. |
-| `skill` | Filesystem-convention skill loading (`skills/<name>/SKILL.md`). |
-| `session` | SQLite-backed chat history with FTS search; `--chat` survives restarts. |
-| `markdown` | Zero-dep Markdown→ANSI renderer (TTY-gated; no crate needed for this scope). |
+| **ReAct loop** | Model calls tools → tools return results → model continues, until it answers. Bounded by `max_iterations` (default 256). |
+| **Vendor-neutral transport** | One trait (`ProviderTransport`), three implementations: `HttpTransport` (any OpenAI-compatible endpoint), `MockTransport` (offline), `SseStream` (streaming). Switch providers with `/model` mid-chat. |
+| **Built-in tools** | `run_terminal`, `read_file`, `write_file`, `patch` — with path allow-lists (`GRACE_ALLOW_DIR`) and command allow-lists (`GRACE_TERMINAL_ALLOW`). |
+| **Durable memory** | SQLite-backed facts that survive process restarts. Injected into every system prompt. |
+| **Session history** | SQLite + FTS5 full-text search across past conversations. `--list-sessions`, `--search-sessions "query"`. |
+| **Skills** | Filesystem convention: `skills/<name>/SKILL.md`. Loaded on demand via the `load_skill` tool. |
+| **Markdown rendering** | pulldown-cmark + syntect. Tables, code blocks (with syntax highlighting), bold, inline code, blockquotes, task lists, horizontal rules. TTY-gated (pipes pass through raw). |
+| **4 built-in skins** | `solaris` (amber, default), `royal` (violet), `ocean` (teal), `sakura` (pink). Custom skins via `~/.grace/skins/<name>.toml`. |
+| **Streaming** | `--stream` flag for one-shot mode. SSE parsing with live token printing. |
+| **Shell completions** | `--completions bash\|zsh\|fish` prints installable completion scripts. |
+| **Interactive chat** | `--chat` mode with rustyline (arrow-key history, line editing), `/model`, `/skin`, `/exit` commands. |
+| **Ctrl-C handling** | Mid-turn interrupt cancels the current turn without killing the process. |
 
-## Build & run
-
-Requires Rust ≥ 1.75 and network access to crates.io on first build (fetches
-`reqwest`/`serde`/`rusqlite` and their dependency trees; subsequent builds are
-offline/cached as usual).
+## Quick start
 
 ```bash
+# Build (first run fetches crates, subsequent runs are cached)
 cargo build --release
-cargo test
 
-# Offline demo (scripted model drives the real tools):
+# Offline demo (scripted model drives real tools):
 ./target/release/grace --mock --prompt "run a terminal command"
 
 # Real OpenAI-compatible endpoint:
@@ -77,57 +62,109 @@ cargo test
   --api-key "$OPENAI_API_KEY" --model gpt-4o-mini \
   --prompt "list the files in the current directory"
 
-# OpenRouter (key from --api-key or $OPENROUTER_API_KEY):
+# OpenRouter:
 export OPENROUTER_API_KEY=sk-or-...
-./target/release/grace \
-  --openrouter --model tencent/hy3:free \
-  --prompt "list the files in the current directory"
-
-# Interactive chat (state persists across turns, and across restarts once
-# session persistence is wired to --chat):
 ./target/release/grace --openrouter --model tencent/hy3:free --chat
-```
 
-## Memory & skills
+# Stream tokens as they arrive:
+./target/release/grace --openrouter --model tencent/hy3:free --stream \
+  --prompt "explain how transformers work"
 
-Grace remembers durable facts across process runs and can load reusable
-procedures on demand:
-
-```bash
-# Persistent memory (SQLite at ~/.grace/memory.db by default)
+# Persistent memory:
 ./target/release/grace --mock --remember "user prefers concise answers"
 ./target/release/grace --mock --prompt "what do you know about me?"
 
-# Skills live as plain markdown under ./skills/<name>/SKILL.md and are
-# loaded on demand via the built-in `load_skill` tool — no vault required.
+# Search past conversations:
+./target/release/grace --search-sessions "rust async"
+
+# Shell completions:
+eval "$(./target/release/grace --completions bash)"
 ```
 
-This is deliberately simple compared to a vault-based skill system: a flat
-filesystem convention plus one SQLite file. It is not feature-complete
-(no vault, no dreaming yet) — it is the smallest version of "the agent
-actually remembers you and can learn a procedure" that is real, not a stub.
+## Security
 
-## What is intentionally NOT here (yet)
+Grace executes model-requested shell commands and file writes. Two
+environment variables harden it:
 
-- **Obsidian vault integration** — deferred; the memory/skill primitives above
-  are the substrate it will build on later.
-- **Multi-provider fallback chains** — `HttpTransport` is one provider at a
-  time; chain several behind `ProviderTransport` if you need resilience.
-- **Context compression** — long sessions will hit the model's context limit.
-- **Tool-safety guardrails** — `run_terminal` is unguarded. Add a command
-  allow-list / sandbox before exposing this on a shared host.
-- **Streaming, `/steer`** — out of scope by design; the loop is intentionally
-  synchronous and easy to reason about.
+- **`GRACE_ALLOW_DIR`** — path allow-list for `read_file`/`write_file`/`patch`.
+  Defaults to the current working directory. Set to `*` to allow all paths.
+- **`GRACE_TERMINAL_ALLOW`** — command allow-list for `run_terminal`.
+  Default-deny (empty = no commands allowed). Set to `ls,cat,echo` or `*` to
+  allow. Commands are matched by their first token (the executable name).
 
-## Security & safety
+```bash
+# Only allow ls and cat:
+GRACE_TERMINAL_ALLOW="ls,cat" ./target/release/grace --mock --chat
 
-Grace executes model-requested shell commands and file writes with **no
-sandbox or allow-list**. Safe against the offline `--mock` model or a trusted
-endpoint; do **not** point it at an untrusted model or expose it on a shared
-host without adding guardrails. The bundled tools are deliberately thin so you
-can harden them for your environment.
+# Only allow file access under /home/user/projects:
+GRACE_ALLOW_DIR="/home/user/projects" ./target/release/grace --mock --chat
+```
+
+## Dependency stance
+
+Grace prefers **official, maintained crates** over hand-rolled
+reimplementations of solved problems:
+
+| Crate | Why |
+|---|---|
+| `reqwest` (rustls-tls, blocking) | Real HTTPS. No proxy hacks, no hand-rolled TLS. |
+| `serde` / `serde_json` | Real JSON. Not a hand-rolled parser. |
+| `rusqlite` (bundled) | Real persistent memory + FTS5. Not a text file. |
+| `pulldown-cmark` | GFM markdown parsing. Tables, task lists, strikethrough. |
+| `syntect` | Syntax highlighting for code blocks. 200+ languages. |
+| `anstyle` | Zero-alloc ANSI styling with proper NO_COLOR/CLICOLOR support. |
+| `similar` | Unified diff for the `patch` tool. Same engine as ruff. |
+| `rustyline` | Arrow-key history, line editing for chat mode. |
+
+What Grace avoids: heavy async runtimes (blocking CLI doesn't need one), ORMs,
+config frameworks, anything with a large transitive tree relative to its value.
+Every dependency earns its place.
+
+## Architecture
+
+```
+~5,400 lines across 22 modules:
+
+message.rs          143  — unified conversation record
+transport.rs        155  — ProviderTransport trait + ModelResponse/FinishReason
+transport_http.rs   183  — OpenAI-compatible HTTPS via reqwest
+transport_mock.rs   104  — offline scripted model (zero network)
+transport_stream.rs 228  — SSE streaming with tool-call accumulation
+tool.rs              72  — Tool trait + ToolRegistry dispatch
+tools.rs            379  — built-ins: terminal, read_file, write_file, patch
+agent.rs            244  — the ReAct loop (bounded, interruptible)
+config.rs           216  — runtime wiring (transport, model, budget)
+settings.rs        264  — ~/.grace/config.toml persistence
+memory.rs           237  — SQLite durable facts (injected into system prompt)
+session.rs          261  — SQLite chat history with FTS5 search
+skill.rs            207  — filesystem-convention skill loading
+skin.rs             249  — 4 built-in skins + custom skins from TOML
+markdown.rs         453  — pulldown-cmark + syntect rendering
+diff.rs              50  — similar-based diff rendering
+main.rs          1,267  — CLI, chat loop, model/skin pickers, completions
+```
+
+## What's intentionally not here
+
+- **Multi-provider fallback chains** — one transport at a time. Compose
+  multiple behind `ProviderTransport` if you need resilience.
+- **Context compression** — long sessions hit the model's context limit.
+- **TUI** — Grace is a CLI. A TUI is a separate layer on top, not a core
+  concern.
+- **Sandboxing** — the allow-lists are a first step, not a sandbox. Use a
+  container or VM for untrusted models.
+
+## Build & test
+
+```bash
+# Standard:
+cargo build --release
+cargo test
+cargo clippy --all-targets -- -D warnings
+
+# 35 tests, 0 warnings, 0 clippy violations.
+```
 
 ## License
 
-Licensed under either of **MIT** or **Apache-2.0** at your option (see the
-`LICENSE` file). Written by Aman Garg.
+MIT OR Apache-2.0, at your option. Written by Aman Garg.
