@@ -4,7 +4,7 @@
 //! when stdout is a real TTY; when piped, returns raw text unchanged.
 
 use crate::skin::Skin;
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::io::IsTerminal;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
@@ -13,11 +13,28 @@ use syntect::parsing::SyntaxSet;
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
+const ITALIC: &str = "\x1b[3m";
+const UNDERLINE: &str = "\x1b[4m";
 
 /// Build the 24-bit ANSI escape for `skin`'s code color.
 fn code_color(skin: &Skin) -> String {
     let anstyle::RgbColor(r, g, b) = skin.code;
     format!("\x1b[38;2;{r};{g};{b}m")
+}
+
+/// Ensure `out` ends with exactly `n` newlines (no more, no fewer).
+/// This is the core spacing primitive — it guarantees blank separation
+/// between block elements without ever doubling up.
+fn ensure_blank(out: &mut String, n: usize) {
+    if out.is_empty() {
+        return;
+    }
+    let trailing_newlines = out.chars().rev().take_while(|&c| c == '\n').count();
+    if trailing_newlines < n {
+        for _ in 0..(n - trailing_newlines) {
+            out.push('\n');
+        }
+    }
 }
 
 /// Render `md` to terminal-friendly ANSI text if stdout is a TTY; otherwise
@@ -38,6 +55,7 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
     let theme = &ts.themes["base16-ocean.dark"];
 
     let gold = code_color(skin);
+    let heading_color = heading_ansi(skin);
 
     let mut out = String::with_capacity(md.len() + md.len() / 4);
 
@@ -47,8 +65,15 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
     let mut code_buf = String::new();
     let mut heading_level: usize = 0;
     let mut in_blockquote = false;
-    let mut list_depth: usize = 0;
+    let mut bq_needs_prefix = true;
+    // Stack of (is_ordered, index) for nested lists
+    let mut list_stack: Vec<(bool, usize)> = Vec::new();
     let mut list_item_started = false;
+
+    // Inline emphasis stack
+    let mut strong_stack = 0u32;
+    let mut em_stack = 0u32;
+    let mut _in_link = false;
 
     // Table state
     let mut table_rows: Vec<Vec<String>> = Vec::new();
@@ -60,27 +85,52 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
         match event {
             // ── Start tags ───────────────────────────────────────
             Event::Start(tag) => match tag {
+                Tag::Paragraph => {
+                    ensure_blank(&mut out, 1);
+                }
                 Tag::Heading { level, .. } => {
+                    ensure_blank(&mut out, 2);
                     heading_level = level as usize;
                 }
                 Tag::CodeBlock(kind) => {
+                    ensure_blank(&mut out, 1);
                     in_code = true;
                     code_lang = match kind {
-                        CodeBlockKind::Fenced(info) => info.to_string(),
-                        CodeBlockKind::Indented => String::new(),
+                        pulldown_cmark::CodeBlockKind::Fenced(info) => info.to_string(),
+                        pulldown_cmark::CodeBlockKind::Indented => String::new(),
                     };
                     code_buf.clear();
                 }
                 Tag::BlockQuote(_) => {
+                    ensure_blank(&mut out, 1);
                     in_blockquote = true;
+                    // ▏ prefix will be added by the first Text/SoftBreak
                 }
-                Tag::List(_) => {
-                    list_depth += 1;
+                Tag::List(ordered) => {
+                    if !list_stack.is_empty() {
+                        // Nested list — no blank line between items of the same list
+                    } else {
+                        ensure_blank(&mut out, 1);
+                    }
+                    list_stack.push((ordered.is_some(), 0));
                 }
                 Tag::Item => {
                     list_item_started = true;
                 }
+                Tag::Strong => {
+                    strong_stack += 1;
+                    out.push_str(BOLD);
+                }
+                Tag::Emphasis => {
+                    em_stack += 1;
+                    out.push_str(ITALIC);
+                }
+                Tag::Link { .. } => {
+                    _in_link = true;
+                    out.push_str(UNDERLINE);
+                }
                 Tag::Table(_) => {
+                    ensure_blank(&mut out, 1);
                     table_rows.clear();
                     current_row.clear();
                 }
@@ -97,8 +147,11 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
 
             // ── End tags ─────────────────────────────────────────
             Event::End(tag_end) => match tag_end {
-                TagEnd::Heading(_) => {
+                TagEnd::Paragraph => {
                     out.push('\n');
+                }
+                TagEnd::Heading(_) => {
+                    out.push_str("\n\n");
                     heading_level = 0;
                 }
                 TagEnd::CodeBlock => {
@@ -110,29 +163,36 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                     code_buf.clear();
                 }
                 TagEnd::BlockQuote(_) => {
+                    out.push('\n');
                     in_blockquote = false;
+                    bq_needs_prefix = true;
                 }
                 TagEnd::List(_) => {
-                    list_depth = list_depth.saturating_sub(1);
+                    list_stack.pop();
                 }
                 TagEnd::Item => {
                     list_item_started = false;
                     out.push('\n');
+                    // Reset numbering for next item in this list level
+                    if let Some(elem) = list_stack.last_mut() {
+                        elem.1 += 1;
+                    }
+                }
+                TagEnd::Strong => {
+                    strong_stack = strong_stack.saturating_sub(1);
+                    out.push_str(RESET);
+                }
+                TagEnd::Emphasis => {
+                    em_stack = em_stack.saturating_sub(1);
+                    out.push_str(RESET);
+                }
+                TagEnd::Link => {
+                    _in_link = false;
+                    out.push_str(RESET);
                 }
                 TagEnd::Table => {
                     if !table_rows.is_empty() {
-                        // Ensure a blank line separates the table from
-                        // preceding text — otherwise the top border renders
-                        // glued to the line above.
-                        if !out.is_empty() && !out.ends_with("\n\n") {
-                            if out.ends_with('\n') {
-                                out.push('\n');
-                            } else {
-                                out.push_str("\n\n");
-                            }
-                        }
                         out.push_str(&render_table(&table_rows));
-                        out.push('\n');
                     }
                     table_rows.clear();
                 }
@@ -156,32 +216,41 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                 if in_code {
                     code_buf.push_str(&text);
                 } else if in_cell {
-                    // pulldown-cmark already strips ** and ` markers;
-                    // it emits separate events for bold/code spans.
-                    // Just store raw text — inline styling handled by
-                    // Event::Code and the bold is implicit.
                     cell_buf.push_str(&text);
                 } else if in_blockquote {
+                    if bq_needs_prefix {
+                        out.push_str(DIM);
+                        out.push_str("▏ ");
+                        out.push_str(RESET);
+                        bq_needs_prefix = false;
+                    }
                     out.push_str(DIM);
-                    out.push_str("▏ ");
                     out.push_str(&text);
                     out.push_str(RESET);
-                    out.push('\n');
                 } else if heading_level > 0 {
+                    out.push_str(&heading_color);
                     out.push_str(BOLD);
-                    out.push_str(&"#".repeat(heading_level));
-                    out.push(' ');
                     out.push_str(&text);
                     out.push_str(RESET);
-                    out.push('\n');
-                } else if list_depth > 0 {
-                    if list_item_started {
-                        out.push_str(&"  ".repeat(list_depth - 1));
+                } else if list_item_started {
+                    let indent = list_depth(&list_stack);
+                    // Ensure we're on a new line before printing the bullet
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&"  ".repeat(indent));
+                    let (is_ordered, idx) = list_stack.last().copied().unwrap_or((false, 0));
+                    if is_ordered {
+                        out.push_str(&format!("{}. ", idx + 1));
+                    } else {
                         out.push_str(BOLD);
                         out.push_str("• ");
                         out.push_str(RESET);
-                        list_item_started = false;
                     }
+                    list_item_started = false;
+                    out.push_str(&text);
+                } else if !list_stack.is_empty() {
+                    // Continuation text in a list item
                     out.push_str(&text);
                 } else {
                     out.push_str(&text);
@@ -193,7 +262,6 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                 if in_code {
                     code_buf.push_str(&text);
                 } else if in_cell {
-                    // Inline code inside table cell
                     cell_buf.push_str(&gold);
                     cell_buf.push_str(&text);
                     cell_buf.push_str(RESET);
@@ -208,7 +276,14 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
             Event::SoftBreak => {
                 if in_code {
                     // Keep newlines in code blocks
-                } else if !in_cell {
+                } else if in_cell {
+                    cell_buf.push('\n');
+                } else if in_blockquote {
+                    out.push('\n');
+                    out.push_str(DIM);
+                    out.push_str("▏ ");
+                    out.push_str(RESET);
+                } else {
                     out.push('\n');
                 }
             }
@@ -220,8 +295,9 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
 
             // ── Horizontal rule ──────────────────────────────────
             Event::Rule => {
+                ensure_blank(&mut out, 2);
                 out.push_str(DIM);
-                out.push_str("────────────────────────────────────────\n");
+                out.push_str("────────────────────────────────────────\n\n");
                 out.push_str(RESET);
             }
 
@@ -234,7 +310,20 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
         }
     }
 
-    out
+    // Trim trailing whitespace but keep content
+    let trimmed = out.trim_end_matches('\n').to_string();
+    format!("{trimmed}\n")
+}
+
+fn list_depth(stack: &[(bool, usize)]) -> usize {
+    // The current item is in the last-pushed list; its indent is `depth - 1`
+    stack.len().saturating_sub(1)
+}
+
+/// ANSI color for headings, derived from the skin's answer color.
+fn heading_ansi(skin: &Skin) -> String {
+    let anstyle::RgbColor(r, g, b) = skin.answer;
+    format!("\x1b[38;2;{r};{g};{b}m")
 }
 
 /// Render a fenced code block with syntax highlighting and a content-width box.
@@ -251,14 +340,12 @@ fn render_code_block(
         .unwrap_or_else(|| ss.find_syntax_plain_text());
     let mut highlighter = HighlightLines::new(syntax, theme);
 
-    // Determine the widest line for box width
     let lines: Vec<&str> = code.lines().collect();
     let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
-    let box_width = max_len.max(20) + 2; // "│ " + content + " │"
+    let box_width = max_len.max(20) + 2;
 
     let mut out = String::new();
 
-    // Top border
     out.push_str(DIM);
     out.push('┌');
     out.push_str(&"─".repeat(box_width));
@@ -266,7 +353,6 @@ fn render_code_block(
     out.push('\n');
     out.push_str(RESET);
 
-    // Content lines
     for line in &lines {
         let ranges = highlighter.highlight_line(line, ss).unwrap_or_default();
         let visible_len: usize = ranges.iter().map(|(_, t)| t.len()).sum();
@@ -288,7 +374,6 @@ fn render_code_block(
         out.push_str(RESET);
     }
 
-    // Bottom border
     out.push_str(DIM);
     out.push('└');
     out.push_str(&"─".repeat(box_width));
@@ -320,7 +405,6 @@ fn render_table(rows: &[Vec<String>]) -> String {
         return String::new();
     }
 
-    // Calculate column widths from visible (ANSI-stripped) text
     let mut widths = vec![0usize; ncols];
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
@@ -344,7 +428,6 @@ fn render_table(rows: &[Vec<String>]) -> String {
     for (ri, row) in rows.iter().enumerate() {
         let is_header = ri == 0;
 
-        // Cell line: │ cell │ cell │
         out.push_str(DIM);
         out.push_str("│ ");
         out.push_str(RESET);
@@ -360,12 +443,15 @@ fn render_table(rows: &[Vec<String>]) -> String {
             }
             out.push_str(&" ".repeat(pad));
             out.push_str(DIM);
-            out.push_str(" │ ");
+            if ci + 1 == ncols {
+                out.push_str(" │");
+            } else {
+                out.push_str(" │ ");
+            }
             out.push_str(RESET);
         }
         out.push('\n');
 
-        // Header separator: ├───┼───┤
         if is_header {
             out.push_str(DIM);
             out.push('├');
@@ -413,14 +499,12 @@ mod tests {
 
     #[test]
     fn passthrough_when_not_a_tty() {
-        // In test harness stdout is piped, so rendering must be a no-op.
         let md = "# Title\n**bold** and `code`";
         assert_eq!(render_terminal(md, &crate::skin::SOLARIS), md);
     }
 
     #[test]
     fn inline_styling_contains_escapes() {
-        // Force styling by simulating a TTY is hard; just check the helper.
         let gold = code_color(&crate::skin::SOLARIS);
         assert!(!gold.is_empty());
         assert!(gold.contains("\x1b[38;2;"));
@@ -428,13 +512,11 @@ mod tests {
 
     #[test]
     fn table_has_all_four_border_types() {
-        // render_table is not TTY-gated, so we can test it directly.
         let rows = vec![
             vec!["Feature".to_string(), "Description".to_string()],
-            vec!["Variable".to_string().to_string(), "Declares".to_string()],
+            vec!["Variable".to_string(), "Declares".to_string()],
         ];
         let rendered = render_table(&rows);
-        // Must have top, header separator, and bottom borders
         assert!(rendered.contains('┌'), "missing top-left");
         assert!(rendered.contains('┐'), "missing top-right");
         assert!(rendered.contains('├'), "missing header-left separator");
@@ -442,7 +524,6 @@ mod tests {
         assert!(rendered.contains('└'), "missing bottom-left");
         assert!(rendered.contains('┘'), "missing bottom-right");
         assert!(rendered.contains('│'), "missing vertical bar");
-        // Should NOT contain literal pipes
         assert!(!rendered.contains('|'), "table should not contain literal | pipes");
     }
 
@@ -458,7 +539,27 @@ mod tests {
         assert!(rendered.contains('┌'));
         assert!(rendered.contains('└'));
         assert!(rendered.contains('│'));
-        // Box width should match content, not be hardcoded
         assert!(!rendered.contains("────────────────────────────────────────┐"));
+    }
+
+    #[test]
+    fn ensure_blank_adds_correct_newlines() {
+        let mut s = String::from("hello\n");
+        ensure_blank(&mut s, 2);
+        assert_eq!(s, "hello\n\n");
+    }
+
+    #[test]
+    fn ensure_blank_no_double_up() {
+        let mut s = String::from("hello\n\n\n");
+        ensure_blank(&mut s, 2);
+        assert_eq!(s, "hello\n\n\n");
+    }
+
+    #[test]
+    fn ensure_blank_empty_is_noop() {
+        let mut s = String::new();
+        ensure_blank(&mut s, 2);
+        assert_eq!(s, "");
     }
 }
