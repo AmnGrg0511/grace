@@ -341,7 +341,7 @@ fn render_code_block(
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     let lines: Vec<&str> = code.lines().collect();
-    let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let box_width = max_len.max(20) + 2;
 
     let mut out = String::new();
@@ -355,7 +355,7 @@ fn render_code_block(
 
     for line in &lines {
         let ranges = highlighter.highlight_line(line, ss).unwrap_or_default();
-        let visible_len: usize = ranges.iter().map(|(_, t)| t.len()).sum();
+        let visible_len: usize = ranges.iter().map(|(_, t)| t.chars().count()).sum();
         let pad = box_width.saturating_sub(visible_len + 2);
 
         out.push_str(DIM);
