@@ -4,8 +4,6 @@
 //! Rust with best practices, preferring official/native crates (`reqwest`,
 //! `serde`/`serde_json`) over hand-rolled reimplementations of TCP/TLS/JSON.
 //!
-//! The architecture mirrors the engine we studied:
-//!
 //! ```text
 //! Message list  ──►  ProviderTransport (normalized LLM call)
 //!                       │  returns content + optional tool_calls
@@ -18,11 +16,17 @@
 //!
 //! Modules:
 //! - [`message`] — the unified conversation record (the source of truth).
-//! - [`transport`] — [`ProviderTransport`](transport::ProviderTransport) trait + OpenAI-compatible & mock transports.
+//! - [`transport`] — [`ProviderTransport`](transport::ProviderTransport) trait + OpenAI-compatible transports.
 //! - [`tool`] — [`Tool`](tool::Tool) trait + [`ToolRegistry`](tool::ToolRegistry).
 //! - [`tools`] — the bundled built-in tools (terminal, file read/write, patch).
 //! - [`agent`] — the ReAct loop.
 //! - [`config`] — runtime configuration.
+//! - [`memory`] — durable SQLite-backed facts.
+//! - [`session`] — chat history with FTS5 search.
+//! - [`skill`] — filesystem-convention skill loading.
+//! - [`recall`] — pre-flight recall (injects past context).
+//! - [`markdown`] — pulldown-cmark + syntect rendering.
+//! - [`skin`] — 4 built-in color skins + custom skins from TOML.
 //! - [`error`] — the single error type.
 
 #![forbid(unsafe_code)]
@@ -47,5 +51,4 @@ pub mod tool;
 pub mod tools;
 pub mod transport;
 pub mod transport_http;
-pub mod transport_mock;
 pub mod transport_stream;

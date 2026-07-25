@@ -1,12 +1,9 @@
 //! `grace` binary: a minimal CLI that drives the agent loop.
 //!
 //! Usage:
-//!   # Offline demo (scripted model + real tools):
-//!   grace --mock --prompt "run a terminal command"
-//!
 //!   # Interactive chat (state persists across turns, and across restarts
 //!   # via --session):
-//!   grace --mock --chat --session work
+//!   grace --openrouter --model openai/gpt-4o-mini --chat --session work
 //!
 //!   # Real OpenAI-compatible endpoint (HTTPS via reqwest/rustls):
 //!   grace --base-url https://api.openai.com/v1 \
@@ -17,8 +14,8 @@
 //!   grace --openrouter --model tencent/hy3:free --prompt "list files"
 //!
 //!   # Durable memory (survives process restarts, injected into every prompt):
-//!   grace --mock --remember "user prefers concise answers"
-//!   grace --mock --prompt "what do you know about me?"
+//!   grace --openrouter --model openai/gpt-4o-mini --remember "user prefers concise answers"
+//!   grace --openrouter --model openai/gpt-4o-mini --prompt "what do you know about me?"
 
 use std::process::ExitCode;
 
@@ -74,7 +71,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut base_url: Option<String> = None;
     let mut api_key: Option<String> = None;
     let mut model: Option<String> = None;
-    let mut mock = false;
     let mut chat = false;
     let mut openrouter = false;
     let mut max_iterations: u32 = 256;
@@ -105,10 +101,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             "--model" => {
                 model = args.get(i + 1).cloned();
                 i += 2;
-            }
-            "--mock" => {
-                mock = true;
-                i += 1;
             }
             "--openrouter" => {
                 openrouter = true;
@@ -272,8 +264,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // vars), stop and run the interactive picker instead of failing with a
     // terse "missing --model" error. Runs once; picks are persisted to
     // ~/.grace/config.toml and the key to ~/.grace/.env so this never asks
-    // twice. Skipped entirely for --mock (no network needed).
-    if !mock && model.is_none() {
+    // twice.
+    if model.is_none() {
         let (picked_model, picked_base_url, picked_key) = run_onboarding_wizard()?;
         model = Some(picked_model);
         base_url = Some(picked_base_url);
@@ -287,7 +279,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         base_url,
         api_key,
         model,
-        mock,
         openrouter,
         max_iterations,
         system_prompt,
@@ -386,37 +377,35 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     // --stream only applies to one-shot mode against a real HTTP endpoint; it
-    // falls back to the normal (non-streaming) path for --mock or when tool
-    // calls are needed, since streaming here is a single direct completion
-    // call (no tool-loop), matching the task's scope.
+    // falls back to the normal (non-streaming) path when tool calls are
+    // needed, since streaming here is a single direct completion call (no
+    // tool-loop), matching the task's scope.
     if stream {
-        if let grace::config::TransportConfig::Http {
+        let grace::config::TransportConfig::Http {
             base_url,
             api_key,
             model,
-        } = &config.transport
-        {
-            print!("\n--- answer (streaming) ---\n");
-            use std::io::Write;
-            let response = grace::transport_stream::stream_complete(
-                base_url,
-                api_key,
-                model,
-                &messages,
-                &tools.specs(),
-                |frag| {
-                    print!("{frag}");
-                    let _ = std::io::stdout().flush();
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            println!();
-            if let Some(sid) = &session_id {
-                let _ = sessions.append(sid, &Message::assistant(response.content.clone()));
-            }
-            return Ok(ExitCode::SUCCESS);
+        } = &config.transport;
+
+        print!("\n--- answer (streaming) ---\n");
+        use std::io::Write;
+        let response = grace::transport_stream::stream_complete(
+            base_url,
+            api_key,
+            model,
+            &messages,
+            &tools.specs(),
+            |frag| {
+                print!("{frag}");
+                let _ = std::io::stdout().flush();
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        println!();
+        if let Some(sid) = &session_id {
+            let _ = sessions.append(sid, &Message::assistant(response.content.clone()));
         }
-        println!("[grace] --stream requested but no HTTP transport configured (mock mode); falling back to non-streaming.");
+        return Ok(ExitCode::SUCCESS);
     }
 
     let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -475,7 +464,7 @@ fn run_chat(
         });
     }
 
-    println!("chat mode — type a message, '/exit' to leave, '/model [name]' or '/skin [name]' to switch mid-chat.\n");
+    println!("chat mode — type a message, '/exit' to leave, '/model [name]' to switch models, '/skin [name]' to retheme, '/session' to switch sessions.\n");
 
     let started_at = std::time::Instant::now();
 
@@ -602,8 +591,7 @@ fn run_chat(
 /// `/model` (interactive picker, same list as onboarding) or `/model <name>`
 /// (direct switch) mid-chat. Persists to ~/.grace/config.toml so the choice
 /// sticks across restarts (unlike the old session-only behavior).
-/// Only takes effect on transports that own a swappable model (`HttpTransport`);
-/// mock has nothing to switch.
+/// Only takes effect on transports that own a swappable model (`HttpTransport`).
 fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '_), arg: &str) {
     if transport.current_model().is_none() {
         println!(
@@ -1250,11 +1238,10 @@ fn print_help() {
     let help = r#"grace — minimal vendor-neutral ReAct agent
 
 Usage:
-  grace --mock --prompt "run a terminal command"
-  grace --mock --chat --session work
+  grace --chat --session work
   grace --base-url https://api.openai.com/v1 --api-key KEY --model M --prompt "..."
   grace --openrouter --model tencent/hy3:free --prompt "..."   (key from --api-key or $OPENROUTER_API_KEY; free-only keys need a :free model)
-  grace --mock --remember "user prefers concise answers"
+  grace --remember "user prefers concise answers"
 
 Flags:
   --prompt <text>        The user instruction (one-shot mode)
@@ -1268,7 +1255,6 @@ Flags:
   --remember <fact>      Store a durable fact (SQLite memory) and exit
   --memory-path <path>   Override memory DB path (default ~/.grace/memory.db)
   --skills-dir <path>    Directory of skills/<name>/SKILL.md (default ./skills)
-  --mock                 Use the offline scripted model (no network)
   --openrouter           Use OpenRouter (HTTPS via reqwest/rustls)
   --base-url <url>       OpenAI-compatible endpoint (http:// or https://)
   --api-key <key>        Bearer token (default empty; for OpenRouter uses $OPENROUTER_API_KEY)
@@ -1276,8 +1262,7 @@ Flags:
   --max-iterations <n>   Tool-call round cap (default 16)
   --system <text>        Optional system prompt
   --tools-dir <path>     Directory of tools/<name>/manifest.json plugins (default ./tools)
-  --stream               Stream tokens as they arrive (one-shot HTTP mode only; falls back to
-                         non-streaming under --mock)
+  --stream               Stream tokens as they arrive (one-shot HTTP mode only)
   --completions <shell>  Print shell completions (bash, zsh, fish) and exit
   -h, --help             Show this help
 
@@ -1301,7 +1286,7 @@ fn print_completions(shell: &str) {
 }
 
 const FLAGS: &[&str] = &[
-    "--prompt", "--base-url", "--api-key", "--model", "--mock", "--openrouter",
+    "--prompt", "--base-url", "--api-key", "--model", "--openrouter",
     "--chat", "--max-iterations", "--system", "--remember", "--session",
     "--list-sessions", "--search-sessions", "--skills-dir", "--skin",
     "--list-skins", "--select-skin", "--memory-path", "--tools-dir",

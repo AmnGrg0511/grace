@@ -1,8 +1,8 @@
 //! Provider transport — the vendor-neutral seam.
 //!
 //! [`ProviderTransport`] is the only thing the agent loop knows about "an LLM".
-//! Every provider (OpenAI, Anthropic, Ollama, a mock) implements these two
-//! methods. This is the seam isolated behind `ProviderTransport`.
+//! Every provider (OpenAI, Anthropic, Ollama, any OpenAI-compatible endpoint)
+//! implements these methods. This is the seam isolated behind `ProviderTransport`.
 
 use crate::error::Result;
 use crate::message::Message;
@@ -56,7 +56,6 @@ impl FinishReason {
 
 /// A normalized LLM endpoint.
 pub trait ProviderTransport {
-    /// Stable identifier, e.g. `"openai"`, `"mock"`. For diagnostics/logging.
     fn name(&self) -> &str;
 
     /// Send the conversation and available tools; return the model's response.
@@ -68,7 +67,6 @@ pub trait ProviderTransport {
     ) -> Result<ModelResponse>;
 
     /// Switch the model this transport talks to, for `/model` mid-chat.
-    /// Default no-op (e.g. `MockTransport` has no real model to switch);
     /// `HttpTransport` overrides this to actually change what it sends.
     fn set_model(&self, _model: &str) {}
 

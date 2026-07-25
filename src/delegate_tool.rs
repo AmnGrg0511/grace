@@ -10,25 +10,16 @@ use std::process::Command;
 /// A tool named `delegate`: runs `{task, model?}` as a brand-new `grace
 /// --prompt <task>` subprocess and returns its cleaned answer text.
 pub struct DelegateTool {
-    /// Extra flags to pass through to the child (e.g. `--mock` or
+    /// Extra flags to pass through to the child (e.g.
     /// `--base-url ... --api-key ... --model ...`), so the child inherits the
     /// parent's transport instead of guessing.
     pub transport_args: Vec<String>,
 }
 
 impl DelegateTool {
-    /// Build a delegate tool that spawns children in `--mock` mode
-    /// (deterministic, no network — used by tests and safe default).
-    pub fn mock() -> Self {
-        Self {
-            transport_args: vec!["--mock".to_string()],
-        }
-    }
-
     /// Build a delegate tool whose children inherit the parent's real,
-    /// currently-configured transport (base-url/api-key/model, or --mock)
-    /// instead of guessing — this is what makes `delegate` actually usable
-    /// against a live provider rather than silently downgrading to mock.
+    /// currently-configured transport instead of guessing — this is what
+    /// makes `delegate` actually usable against a live provider.
     pub fn for_transport(transport: &crate::config::TransportConfig) -> Self {
         Self {
             transport_args: transport.to_cli_args(),
@@ -115,33 +106,12 @@ mod tests {
         assert_eq!(cleaned, "Understood. (mock response after 0 tool round(s))");
     }
 
-    /// Spawns the real release binary in --mock mode, if present. Skips
-    /// gracefully (does not fail the suite) when the binary hasn't been
-    /// built yet at test time.
+    /// Test that clean_output strips the `[grace]` banner and `--- answer ---`
+    /// marker, leaving just the answer text.
     #[test]
-    fn delegate_spawns_real_mock_subprocess_if_binary_present() {
-        let release_bin =
-            std::path::PathBuf::from("/calypto/scratch/amagar24/grace-target/release/grace");
-        if !release_bin.exists() {
-            eprintln!(
-                "skipping: release binary not built at {}",
-                release_bin.display()
-            );
-            return;
-        }
-
-        // We can't swap `current_exe()` easily inside the test, so directly
-        // exercise the subprocess+clean_output path against the known binary.
-        let output = Command::new(&release_bin)
-            .args(["--mock", "--prompt", "say hello"])
-            .output()
-            .expect("spawn release binary");
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let cleaned = DelegateTool::clean_output(&stdout);
-        assert!(
-            cleaned.contains("Understood."),
-            "unexpected output: {cleaned}"
-        );
+    fn clean_output_strips_banner_and_answer_marker() {
+        let raw = "[grace] transport=openrouter model=gpt-4o\n--- answer ---\nHello, world!";
+        let cleaned = DelegateTool::clean_output(raw);
+        assert_eq!(cleaned.trim(), "Hello, world!");
     }
 }

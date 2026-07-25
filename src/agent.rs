@@ -175,7 +175,47 @@ pub fn run_turn_with_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport_mock::MockTransport;
+    use crate::message::ToolCall;
+    use crate::transport::{FinishReason, ModelResponse, ToolSpec};
+    use std::cell::Cell;
+
+    /// Minimal scripted transport for testing the agent loop without network.
+    struct StubTransport {
+        rounds: Cell<u32>,
+        infinite: bool,
+    }
+
+    impl StubTransport {
+        fn new() -> Self { Self { rounds: Cell::new(0), infinite: false } }
+        fn infinite() -> Self { Self { rounds: Cell::new(0), infinite: true } }
+    }
+
+    impl ProviderTransport for StubTransport {
+        fn name(&self) -> &str { "stub" }
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _model: &str,
+        ) -> Result<ModelResponse> {
+            let n = self.rounds.get();
+            self.rounds.set(n + 1);
+            let args = r#"{"command":"echo hello from tool"}"#.to_string();
+            if self.infinite || n == 0 {
+                Ok(ModelResponse {
+                    content: "Running that for you.".to_string(),
+                    tool_calls: vec![ToolCall::new("call_1", "run_terminal", args)],
+                    finish_reason: FinishReason::ToolCalls,
+                })
+            } else {
+                Ok(ModelResponse {
+                    content: "Done \u{2014} stub response after tool round.".to_string(),
+                    tool_calls: vec![],
+                    finish_reason: FinishReason::Stop,
+                })
+            }
+        }
+    }
 
     fn base_messages() -> Vec<Message> {
         vec![Message::user("please run a terminal command for me")]
@@ -183,62 +223,55 @@ mod tests {
 
     #[test]
     fn loop_runs_terminal_tool_then_answers() {
-        let transport: Box<dyn ProviderTransport> = Box::new(MockTransport::new(1));
+        let transport = StubTransport::new();
         let mut tools = ToolRegistry::new();
         crate::tools::register_builtins(&mut tools);
         let mut messages = base_messages();
 
-        let answer = run_turn(transport.as_ref(), &tools, &mut messages, 8).unwrap();
+        let answer = run_turn(&transport, &tools, &mut messages, 8).unwrap();
 
         assert_eq!(messages.len(), 4, "expected user+assistant+tool+final");
-        assert!(answer.contains("mock response"));
-        let tool_msg = messages
-            .iter()
-            .find(|m| m.role == Role::Tool)
+        assert!(answer.contains("stub response"));
+        let tool_msg = messages.iter().find(|m| m.role == Role::Tool)
             .expect("a tool message must exist");
-        assert!(tool_msg.content.contains("hello from tool"));
+        assert!(tool_msg.content.contains("hello from tool"),
+            "got: {}", tool_msg.content);
     }
 
     #[test]
     fn budget_exhaustion_is_an_error() {
-        let transport: Box<dyn ProviderTransport> = Box::new(MockTransport::new(100));
+        let transport = StubTransport::infinite();
         let mut tools = ToolRegistry::new();
         crate::tools::register_builtins(&mut tools);
         let mut messages = base_messages();
-        let res = run_turn(transport.as_ref(), &tools, &mut messages, 2);
+        let res = run_turn(&transport, &tools, &mut messages, 2);
         assert!(matches!(res, Err(AgentError::BudgetExhausted { .. })));
     }
 
     #[test]
     fn unknown_tool_recovers_gracefully() {
-        let transport: Box<dyn ProviderTransport> = Box::new(MockTransport::new(1));
+        let transport = StubTransport::new();
         let tools = ToolRegistry::new();
         let mut messages = base_messages();
-        let answer = run_turn(transport.as_ref(), &tools, &mut messages, 8).unwrap();
+        let answer = run_turn(&transport, &tools, &mut messages, 8).unwrap();
         let tool_msg = messages.iter().find(|m| m.role == Role::Tool).unwrap();
         assert!(tool_msg.content.contains("unknown tool"));
-        assert!(answer.contains("mock response"));
+        assert!(answer.contains("stub response"));
     }
 
     #[test]
     fn pre_set_interrupt_flag_aborts_before_any_completion() {
-        let transport: Box<dyn ProviderTransport> = Box::new(MockTransport::new(1));
+        let transport = StubTransport::new();
         let mut tools = ToolRegistry::new();
         crate::tools::register_builtins(&mut tools);
         let mut messages = base_messages();
         let flag = std::sync::atomic::AtomicBool::new(true);
 
         let res = run_turn_with_events(
-            transport.as_ref(),
-            &tools,
-            &mut messages,
-            8,
-            None,
-            Some(&flag),
+            &transport, &tools, &mut messages, 8, None, Some(&flag),
         );
 
         assert!(matches!(res, Err(AgentError::Interrupted)));
-        // Nothing ran — the flag was already set before the first iteration.
-        assert_eq!(messages.len(), 1, "only the original user message");
+        assert_eq!(messages.len(), 1);
     }
 }

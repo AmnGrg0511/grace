@@ -60,8 +60,6 @@ pub fn load_soul() -> String {
 /// How the agent reaches a model.
 #[derive(Debug, Clone)]
 pub enum TransportConfig {
-    /// Scripted, offline model (tests/demos). No network.
-    Mock { max_tool_rounds: u32 },
     /// Real OpenAI-compatible endpoint (any base_url, including OpenRouter's).
     Http {
         base_url: String,
@@ -73,10 +71,9 @@ pub enum TransportConfig {
 impl TransportConfig {
     /// Re-derive the CLI flags that would reproduce this transport, so a
     /// delegated subagent subprocess inherits the *real* configured
-    /// provider/model instead of silently falling back to `--mock`.
+    /// provider/model.
     pub fn to_cli_args(&self) -> Vec<String> {
         match self {
-            TransportConfig::Mock { .. } => vec!["--mock".to_string()],
             TransportConfig::Http {
                 base_url,
                 api_key,
@@ -109,9 +106,6 @@ impl Config {
     /// Build the configured transport as a `dyn ProviderTransport`.
     pub fn build_transport(&self) -> Result<Box<dyn ProviderTransport>> {
         match &self.transport {
-            TransportConfig::Mock { max_tool_rounds } => Ok(Box::new(
-                crate::transport_mock::MockTransport::new(*max_tool_rounds),
-            )),
             TransportConfig::Http {
                 base_url,
                 api_key,
@@ -124,10 +118,9 @@ impl Config {
         }
     }
 
-    /// The model name (empty for Mock).
+    /// The model name.
     pub fn model(&self) -> &str {
         match &self.transport {
-            TransportConfig::Mock { .. } => "mock",
             TransportConfig::Http { model, .. } => model,
         }
     }
@@ -174,14 +167,11 @@ impl Config {
         base_url: Option<String>,
         api_key: Option<String>,
         model: Option<String>,
-        mock: bool,
         openrouter: bool,
         max_iterations: u32,
         system_prompt: Option<String>,
     ) -> Result<Config> {
-        let transport = if mock {
-            TransportConfig::Mock { max_tool_rounds: 2 }
-        } else if openrouter {
+        let transport = if openrouter {
             let model = model.ok_or_else(|| {
                 AgentError::Config(
                     "missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into(),
