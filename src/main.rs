@@ -1250,7 +1250,7 @@ Flags:
   --session <id>         Persist/resume chat history across process restarts (SQLite)
   --list-sessions        List saved session ids, most recently active first, and exit
   --search-sessions <q>  Full-text search past session turns (SQLite FTS5) and exit
-  --skin <name>          Use a named skin for this run (gilded/royal/ocean/sakura/forest/solaris/midnight, or a custom one)
+  --skin <name>          Use a named skin for this run (solaris/royal/ocean/sakura, or a custom one)
   --list-skins           List every available skin name and exit
   --select-skin          Interactive skin picker with color previews; saves the choice to ~/.grace/config.toml
   --remember <fact>      Store a durable fact (SQLite memory) and exit

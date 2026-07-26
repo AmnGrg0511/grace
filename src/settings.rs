@@ -23,7 +23,7 @@ pub struct Settings {
     pub max_iterations: Option<u32>,
     pub request_timeout_secs: Option<u64>,
     /// Name of the color skin to use (see [`crate::skin`]). `None` (or an
-    /// unrecognized name) falls back to the default "gilded" skin.
+    /// unrecognized name) falls back to the default "solaris" skin.
     pub skin: Option<String>,
 }
 
