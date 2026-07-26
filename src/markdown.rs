@@ -80,6 +80,8 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
     let mut current_row: Vec<String> = Vec::new();
     let mut in_cell = false;
     let mut cell_buf = String::new();
+    let mut in_table_head = false;
+    let mut header_row_indices: Vec<usize> = Vec::new();
 
     for event in parser {
         match event {
@@ -134,7 +136,9 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                     table_rows.clear();
                     current_row.clear();
                 }
-                Tag::TableHead => {}
+                Tag::TableHead => {
+                    in_table_head = true;
+                }
                 Tag::TableRow => {
                     current_row.clear();
                 }
@@ -190,15 +194,32 @@ pub fn render_terminal(md: &str, skin: &Skin) -> String {
                     _in_link = false;
                     out.push_str(RESET);
                 }
+                TagEnd::TableHead => {
+                    // The header row is complete - push it and record its index
+                    if !current_row.is_empty() {
+                        if in_table_head {
+                            // row_idx intentionally unused; tracked via table_rows.len()
+                            header_row_indices.push(table_rows.len());
+                        }
+                        table_rows.push(current_row.clone());
+                    }
+                    in_table_head = false;
+                }
                 TagEnd::Table => {
                     if !table_rows.is_empty() {
-                        out.push_str(&render_table(&table_rows));
+                        out.push_str(&render_table(&table_rows, &header_row_indices));
                     }
                     table_rows.clear();
+                    header_row_indices.clear();
                 }
                 TagEnd::TableRow => {
                     if !current_row.is_empty() {
-                        table_rows.push(current_row.clone());
+                        if in_table_head {
+                            // Header row already pushed in TableHead end
+                            // (TableRow inside TableHead doesn't fire separately in pulldown-cmark)
+                        } else {
+                            table_rows.push(current_row.clone());
+                        }
                     }
                 }
                 TagEnd::TableCell => {
@@ -395,7 +416,7 @@ fn syntect_style_to_ansi(style: SyntectStyle) -> String {
 }
 
 /// Render a markdown table as aligned box-drawing.
-fn render_table(rows: &[Vec<String>]) -> String {
+fn render_table(rows: &[Vec<String>], header_indices: &[usize]) -> String {
     if rows.is_empty() {
         return String::new();
     }
@@ -426,7 +447,7 @@ fn render_table(rows: &[Vec<String>]) -> String {
     out.push_str(RESET);
 
     for (ri, row) in rows.iter().enumerate() {
-        let is_header = ri == 0;
+        let is_header = header_indices.contains(&ri);
 
         out.push_str(DIM);
         out.push_str("│ ");
@@ -452,7 +473,8 @@ fn render_table(rows: &[Vec<String>]) -> String {
         }
         out.push('\n');
 
-        if is_header {
+        // Header separator: ├───┼───┤ (only after the LAST header row)
+        if is_header && header_indices.last() == Some(&ri) {
             out.push_str(DIM);
             out.push('├');
             for (ci, w) in widths.iter().enumerate() {
@@ -476,7 +498,6 @@ fn render_table(rows: &[Vec<String>]) -> String {
 
     out
 }
-
 /// Strip ANSI escape sequences for width calculation.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::new();
@@ -516,7 +537,7 @@ mod tests {
             vec!["Feature".to_string(), "Description".to_string()],
             vec!["Variable".to_string(), "Declares".to_string()],
         ];
-        let rendered = render_table(&rows);
+        let rendered = render_table(&rows, &[0]);
         assert!(rendered.contains('┌'), "missing top-left");
         assert!(rendered.contains('┐'), "missing top-right");
         assert!(rendered.contains('├'), "missing header-left separator");
