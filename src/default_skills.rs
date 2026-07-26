@@ -184,5 +184,5 @@ How to confirm the task was done correctly.
 3. Write the SKILL.md following the format above
 4. Create the directory: `~/.grace/skills/<name>/`
 5. Write the file: `~/.grace/skills/<name>/SKILL.md`
-6. Confirm it loads: the user can verify with `grace --mock --chat` then `load_skill <name>`
+6. Confirm it loads: the user can verify with `grace --chat` then `load_skill <name>`
 "#;

@@ -101,9 +101,9 @@ mod tests {
 
     #[test]
     fn clean_output_strips_banner_and_marker() {
-        let raw = "[grace] transport=mock model=mock tools=4\n\n--- answer ---\nUnderstood. (mock response after 0 tool round(s))\n";
+        let raw = "[grace] transport=openrouter model=gpt-4o tools=4\n\n--- answer ---\nDone.\n";
         let cleaned = DelegateTool::clean_output(raw);
-        assert_eq!(cleaned, "Understood. (mock response after 0 tool round(s))");
+        assert_eq!(cleaned, "Done.");
     }
 
     /// Test that clean_output strips the `[grace]` banner and `--- answer ---`
