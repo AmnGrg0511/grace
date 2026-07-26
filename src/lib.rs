@@ -33,6 +33,7 @@
 #![allow(missing_docs)] // inline comments document intent; public API is small
 
 pub mod agent;
+pub mod completer;
 pub mod config;
 pub mod default_skills;
 pub mod delegate_tool;

@@ -479,7 +479,8 @@ fn run_chat(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    if let Ok(mut rl) = rustyline::DefaultEditor::new() {
+    if let Ok(mut rl) = rustyline::Editor::<grace::completer::CommandHelper, rustyline::history::DefaultHistory>::new() {
+        rl.set_helper(Some(grace::completer::CommandHelper));
         let _ = rl.load_history(&history_path);
         loop {
             print_status_line(&skin, transport, messages, started_at);
