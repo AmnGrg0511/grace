@@ -1,6 +1,6 @@
 #!/bin/bash
 # Grace install script
-# Usage: curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/install.sh | bash
 
 set -euo pipefail
 
@@ -33,7 +33,12 @@ detect_platform() {
         aarch64|arm64) arch="aarch64" ;;
         *) error "Unsupported arch: $(uname -m)"; exit 1 ;;
     esac
-    echo "${arch}-unknown-${os}-gnu"
+    # Use musl on Linux for better portability (no GLIBC version dependency)
+    if [[ "$os" == "linux" ]]; then
+        echo "${arch}-unknown-${os}-musl"
+    else
+        echo "${arch}-unknown-${os}-gnu"
+    fi
 }
 
 # Get latest release version
