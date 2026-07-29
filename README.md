@@ -1,99 +1,118 @@
 # Grace
 
-**A production-grade agent CLI.** ~5,700 lines of Rust. No framework. No async runtime. Single binary.
+**A production-grade agent CLI that learns.** ~5,700 lines of Rust. No framework. No async runtime. Single binary.
 
 ```bash
-# Build
-cargo build --release
-
-# First run: interactive provider setup
-./target/release/grace --chat
+# Install in 10 seconds
+curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/install.sh | bash
 ```
 
 ---
 
-## What it does
+## Why Grace?
 
-| Capability | Implementation |
-|---|---|
-| **Agent loop** | ReAct: model calls tools → tools return → model continues. Bounded iterations. Ctrl-C interrupts mid-turn. |
-| **Any provider** | OpenAI, OpenRouter, Ollama, vLLM, LM Studio — anything OpenAI-compatible. Switch with `/model` mid-chat. |
-| **Real tools** | `run_terminal`, `read_file`, `write_file`, `patch` — with path/command allow-lists. |
-| **Persistent memory** | SQLite-backed facts. Auto-injected. `--remember "prefers concise answers"`. |
-| **Searchable sessions** | FTS5 full-text across all history. `--search-sessions "refactor auth"`. |
-| **Skills on demand** | Filesystem convention: `~/.grace/skills/<name>/SKILL.md`. Loaded via `load_skill`. 3 defaults: `grace-agent`, `memory-update`, `skill-author`. |
-| **Pre-flight recall** | Searches past sessions before each turn, injects relevant context automatically. |
-| **Delegation** | `delegate` tool spawns isolated subprocesses for independent subtasks. |
-| **Plugin tools** | Drop `manifest.json` in `~/.grace/tools/` — auto-discovered. |
-| **Markdown that looks right** | Tables, syntax-highlighted code blocks, bold, blockquotes, task lists. TTY-gated (pipes pass raw). |
-| **4 skins** | `solaris` (default), `royal`, `ocean`, `sakura`. Custom via TOML. |
-| **Streaming** | `--stream` for live tokens. |
-| **Shell completions** | `--completions bash\|zsh\|fish`. |
+| Problem | Grace |
+|---------|-------|
+| **Slow setup** | `curl ... | bash` → works in 10s. No Rust, no Docker, no config. |
+| **Fragile tools** | Built-in `run_terminal`, `read_file`, `write_file`, `patch` with allow-lists. |
+| **Amnesia** | Persistent SQLite memory + FTS5 session search. Remembers across restarts. |
+| **One-shot skills** | Drop a `SKILL.md` in `~/.grace/skills/` → `load_skill` in chat. Self-improves. |
+| **Vendor lock-in** | Works with any OpenAI-compatible endpoint (OpenAI, OpenRouter, Ollama, vLLM, LM Studio). |
 
 ---
 
-## Quick start
+## Quick Start
 
 ```bash
-# Build (40s first time, cached after)
-cargo build --release
+# 1. Install (10s, statically linked musl binary — no GLIBC issues)
+curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/install.sh | bash
 
-# First run: interactive provider setup
-./target/release/grace --chat
+# 2. First run: interactive provider setup (OpenRouter, OpenAI, Ollama, etc.)
+grace --chat
 
-# Or point at any OpenAI-compatible endpoint
-export OPENROUTER_API_KEY=sk-or-...
-./target/release/grace --openrouter --model openai/gpt-4o-mini --chat
+# 3. Use it
+> "Read the codebase and add a health check endpoint"
+> "Refactor the auth module to use JWT"
+> "Find and fix the memory leak in the worker pool"
+```
 
-# One-shot with streaming
-./target/release/grace --openrouter --model openai/gpt-4o-mini --stream \
-  --prompt "explain how transformers work"
-
-# Teach it something permanent
-./target/release/grace --remember "user prefers concise answers"
-./target/release/grace --prompt "what do you know about me?"
-
-# Search history
-./target/release/grace --search-sessions "refactor auth"
+**One-shot mode:**
+```bash
+grace --prompt "Add a health check to main.rs"
 ```
 
 ---
 
-## Security
+## The Loop (Why It Feels Fast)
 
-Two environment variables. That's it.
+```
+Your prompt → Grace plans → Tools execute → Results feed back → Repeat until done
+```
+
+- **Bounded iterations** (default 256, configurable)
+- **Ctrl-C interrupts mid-turn** — no stuck processes
+- **Streaming tokens** with `--stream` (one-shot mode)
+- **Typical task: 3-8 tool calls, 10-30 seconds**
+
+---
+
+## Self-Learning & Skills (The Differentiator)
+
+### 1. Persistent Memory (Auto)
+```bash
+# You say:
+> "I prefer 2-space tabs and early returns"
+
+# Grace stores it in SQLite, injects into every future prompt automatically
+```
+
+### 2. Skills That Self-Improve
+```bash
+# Drop a skill file once:
+~/.grace/skills/my-refactor/SKILL.md
+
+# Use it forever:
+> "Apply my-refactor to the auth module"
+
+# Grace loads it, executes, and the skill evolves with each use
+```
+
+**3 default skills ship on first run:**
+- `grace-agent` — knows its own architecture
+- `memory-update` — when to persist facts
+- `skill-author` — creates new skills from workflows
+
+### 3. Pre-Flight Recall (Before Every Turn)
+Before each turn, Grace searches past sessions (FTS5) for relevant context and injects it. You don't ask "remember X" — it just knows.
+
+---
+
+## Security (Default-Deny)
 
 ```bash
-# Restrict file access
-GRACE_ALLOW_DIR="/home/amagar24/projects" ./target/release/grace --chat
+# File access: only within allowed dirs
+GRACE_ALLOW_DIR="/home/user/projects" grace --chat
 
-# Restrict commands
-GRACE_TERMINAL_ALLOW="ls,cat,rg" ./target/release/grace --chat
+# Commands: allow-list only
+GRACE_TERMINAL_ALLOW="ls,cat,rg,cargo" grace --chat
 ```
 
 ---
 
-## Dependencies — only what earns its place
+## Install Options
 
-| Crate | Purpose |
-|---|---|
-| `reqwest` (rustls-tls, blocking) | Real HTTPS. No hand-rolled TLS. |
-| `serde` / `serde_json` | Real JSON. |
-| `rusqlite` (bundled) | SQLite + FTS5. No system dependency. |
-| `pulldown-cmark` | GFM markdown. Tables, task lists, strikethrough. |
-| `syntect` | 200+ language syntax highlighting. |
-| `anstyle` | Zero-alloc ANSI. Proper NO_COLOR/CLICOLOR support. |
-| `similar` | Unified diff (same engine as ruff). |
-| `rustyline` | Arrow-key history, line editing. |
-| `ctrlc` | Graceful mid-turn interrupt. |
-
-No async runtime. No ORM. No config framework. Every dependency pays rent.
+| Method | Command |
+|--------|---------|
+| **Install script** | `curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/install.sh \| bash` |
+| **Homebrew** | `brew install grace` *(coming soon)* |
+| **Binary** | Download from [releases](https://github.com/AmnGrg0511/grace/releases) |
+| **Cargo** | `cargo install grace` |
 
 ---
 
-## What's not here (by design)
+## What's Not Here (By Design)
 
-- **Multi-provider fallback** — compose behind `ProviderTransport` if you need it
+- **Multi-provider fallback** — compose behind `ProviderTransport` if needed
 - **Context compression** — long sessions hit the model's limit
 - **TUI** — CLI first. TUI is a layer on top.
 - **Sandbox** — allow-lists are a first step. Use a container/VM for untrusted models.
