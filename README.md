@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/ins
 
 | Problem | Grace |
 |---------|-------|
-| **Slow setup** | `curl ... | bash` → works in 10s. No Rust, no Docker, no config. |
+|| **Slow setup** | `curl ... &#124; bash` → works in 10s. No Rust, no Docker, no config. |
 | **Fragile tools** | Built-in `run_terminal`, `read_file`, `write_file`, `patch` with allow-lists. |
 | **Amnesia** | Persistent SQLite memory + FTS5 session search. Remembers across restarts. |
 | **One-shot skills** | Drop a `SKILL.md` in `~/.grace/skills/` → `load_skill` in chat. Self-improves. |
@@ -103,7 +103,7 @@ GRACE_TERMINAL_ALLOW="ls,cat,rg,cargo" grace --chat
 
 | Method | Command |
 |--------|---------|
-| **Install script** | `curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/install.sh \| bash` |
+| **Install script** | `curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/install.sh &#124; bash` |
 | **Homebrew** | `brew install grace` *(coming soon)* |
 | **Binary** | Download from [releases](https://github.com/AmnGrg0511/grace/releases) |
 | **Cargo** | `cargo install grace` |
