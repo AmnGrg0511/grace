@@ -23,7 +23,7 @@ use grace::config::{Config, load_soul};
 use grace::memory::Memory;
 use grace::message::Message;
 use grace::session::SessionStore;
-use grace::settings::{PROVIDER_PRESETS, ProviderPreset, KnownModel};
+use grace::settings::PROVIDER_PRESETS;
 use grace::skin::{Role, Skin};
 use uuid::Uuid;
 
@@ -656,8 +656,7 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
     for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
         println!("  {}) {}", i + 1, p.label);
     }
-    println!("  {}) GitHub Copilot", PROVIDER_PRESETS.len() + 1);
-    let n_providers = PROVIDER_PRESETS.len() + 1;
+    let n_providers = PROVIDER_PRESETS.len();
     print!("\nselect a provider [number]: ");
     let _ = std::io::stdout().flush();
     let raw = std::io::stdin().lines().next()?.ok()?;
@@ -668,21 +667,7 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
             return None;
         }
     };
-    let preset = if choice < PROVIDER_PRESETS.len() {
-        &PROVIDER_PRESETS[choice]
-    } else {
-        // GitHub Copilot - need a custom preset for it
-        &ProviderPreset {
-            label: "GitHub Copilot",
-            base_url: "https://api.githubcopilot.com",
-            env_var: "GITHUB_COPILOT_TOKEN",
-            models: &[
-                KnownModel { id: "gpt-4o", context_window: 128_000 },
-                KnownModel { id: "gpt-4o-mini", context_window: 128_000 },
-                KnownModel { id: "gpt-4-turbo", context_window: 128_000 },
-            ],
-        }
-    };
+    let preset = &PROVIDER_PRESETS[choice];
     if preset.models.is_empty() {
         // Provider with no known models (e.g. "Custom endpoint"): type one.
         print!("model id: ");
@@ -981,20 +966,14 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
     for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
         println!("  {}) {}", i + 1, p.label);
     }
-    println!("  {}) GitHub Copilot", PROVIDER_PRESETS.len() + 1);
     let choice: usize = loop {
         let raw = prompt_read("\nselect a provider [number]: ");
         match raw.parse::<usize>() {
-            Ok(n) if n >= 1 && n <= PROVIDER_PRESETS.len() + 1 => break n - 1,
-            _ => println!("enter a number between 1 and {}", PROVIDER_PRESETS.len() + 1),
+            Ok(n) if n >= 1 && n <= PROVIDER_PRESETS.len() => break n - 1,
+            _ => println!("enter a number between 1 and {}", PROVIDER_PRESETS.len()),
         }
     };
-    let preset = if choice < PROVIDER_PRESETS.len() {
-        &PROVIDER_PRESETS[choice]
-    } else {
-        // GitHub Copilot - use the last preset from settings.rs which is Copilot
-        &PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1]
-    };
+    let preset = &PROVIDER_PRESETS[choice];
 
     let base_url = if preset.base_url.is_empty() {
         prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")

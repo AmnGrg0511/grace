@@ -8,7 +8,7 @@
 use crate::error::{AgentError, Result};
 use crate::message::Message;
 use crate::transport::{
-    parse_openai_message, tools_to_json, FinishReason, ProviderTransport, ToolSpec,
+    parse_openai_message, tools_to_json, FinishReason, ModelInfo, ProviderTransport, ToolSpec,
 };
 use serde_json::{json, Value};
 
@@ -200,5 +200,47 @@ impl ProviderTransport for HttpTransport {
         } else {
             Some(m.clone())
         }
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        // Try to fetch models from the provider's /models endpoint
+        let client = reqwest::blocking::Client::new();
+        let models_url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        
+        let mut req = client.get(&models_url);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        
+        match req.send() {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    let json: Value = resp.json().map_err(|e| AgentError::Transport(format!("Failed to parse models response: {e}")))?;
+                    let empty_vec = Vec::new();
+                    let models = json.get("data").and_then(Value::as_array).unwrap_or(&empty_vec);
+                    let result: Vec<ModelInfo> = models.iter().filter_map(|m| {
+                        let id = m.get("id")?.as_str()?;
+                        let name = m.get("name").and_then(Value::as_str).unwrap_or(id);
+                        let context_window = m.get("context_window").and_then(Value::as_u64).map(|v| v as u32);
+                        let max_output_tokens = m.get("max_output_tokens").and_then(Value::as_u64).map(|v| v as u32);
+                        Some(ModelInfo {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            context_window,
+                            max_output_tokens,
+                            provider: "openai-http".to_string(),
+                        })
+                    }).collect();
+                    if !result.is_empty() {
+                        return Ok(result);
+                    }
+                }
+            }
+            Err(e) => {
+                // If /models endpoint fails, return empty list
+                eprintln!("[grace] warning: failed to fetch models from {}: {}", models_url, e);
+            }
+        }
+        Ok(Vec::new())
     }
 }

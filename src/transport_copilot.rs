@@ -211,8 +211,91 @@ impl ProviderTransport for CopilotTransport {
     }
 
     fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        // For now, return known Copilot models
-        Ok(vec![
+        // Try to fetch models from Copilot API, fall back to known models
+        match self.fetch_models_from_api() {
+            Ok(models) => Ok(models),
+            Err(_) => Ok(self.known_models()),
+        }
+    }
+}
+
+impl CopilotTransport {
+    /// Fetch models from GitHub Copilot API
+    fn fetch_models_from_api(&self) -> Result<Vec<ModelInfo>> {
+        let token = self.get_access_token()?;
+        let url = self.endpoint("/models");
+        
+        let resp = self.client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/json")
+            .send()
+            .map_err(|e| AgentError::Transport(format!("Copilot models request failed: {e}")))?
+            .json::<Value>()
+            .map_err(|e| AgentError::Transport(format!("Failed to parse Copilot models response: {e}")))?;
+
+        // Parse the models array from the response
+        let models = resp["data"].as_array()
+            .ok_or_else(|| AgentError::Transport("Invalid models response format".into()))?;
+        
+        let mut result = Vec::new();
+        for model in models {
+            if let (Some(id), Some(name)) = (
+                model["id"].as_str(),
+                model["name"].as_str(),
+            ) {
+                // Try to get context window from capabilities or use defaults
+                let context_window = model["capabilities"]["context_window"]
+                    .as_u64()
+                    .map(|v| v as u32)
+                    .or_else(|| {
+                        // Default context windows based on model name
+                        if id.contains("gpt-4o") {
+                            Some(128000)
+                        } else if id.contains("gpt-4-turbo") {
+                            Some(128000)
+                        } else if id.contains("gpt-3.5") {
+                            Some(16384)
+                        } else {
+                            Some(8192)
+                        }
+                    });
+                
+                let max_output_tokens = model["capabilities"]["max_output_tokens"]
+                    .as_u64()
+                    .map(|v| v as u32)
+                    .or_else(|| {
+                        if id.contains("gpt-4o") && !id.contains("mini") {
+                            Some(16384)
+                        } else if id.contains("gpt-4-turbo") {
+                            Some(4096)
+                        } else if id.contains("gpt-4o-mini") {
+                            Some(16384)
+                        } else {
+                            Some(4096)
+                        }
+                    });
+
+                result.push(ModelInfo {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    context_window,
+                    max_output_tokens,
+                    provider: "github-copilot".to_string(),
+                });
+            }
+        }
+        
+        if result.is_empty() {
+            return Err(AgentError::Transport("No models found in Copilot response".into()));
+        }
+        
+        Ok(result)
+    }
+
+    /// Known Copilot models as fallback
+    fn known_models(&self) -> Vec<ModelInfo> {
+        vec![
             ModelInfo {
                 id: "gpt-4o".to_string(),
                 name: "GPT-4o".to_string(),
@@ -234,11 +317,9 @@ impl ProviderTransport for CopilotTransport {
                 max_output_tokens: Some(4096),
                 provider: "github-copilot".to_string(),
             },
-        ])
+        ]
     }
-}
 
-impl CopilotTransport {
     fn truncate(s: &str, max: usize) -> String {
         if s.len() <= max {
             s.to_string()
