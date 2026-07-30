@@ -25,6 +25,7 @@ use grace::message::Message;
 use grace::session::SessionStore;
 use grace::settings::PROVIDER_PRESETS;
 use grace::skin::{Role, Skin};
+use uuid::Uuid;
 
 const RESET: &str = "\x1b[0m";
 
@@ -769,8 +770,13 @@ fn handle_session_command(
         match raw.trim().parse::<usize>() {
             Ok(0) => {
                 messages.clear();
-                *current_session = None;
-                println!("started a fresh session (no persistence).");
+                let new_id = Uuid::new_v4().to_string();
+                // Persist the empty session immediately so it survives restarts
+                if let Err(e) = sessions.append(&new_id, &Message::user("")) {
+                    println!("warning: could not persist new session: {e}");
+                }
+                *current_session = Some(new_id.clone());
+                println!("started fresh persisted session: {new_id}.");
             }
             Ok(n) if n >= 1 && n <= session_list.len() => {
                 let sid = &session_list[n - 1];
@@ -794,6 +800,16 @@ fn handle_session_command(
             messages.clear();
             *current_session = None;
             println!("started a fresh session (no persistence).");
+        }
+        "new-persist" => {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            messages.clear();
+            *current_session = Some(new_id.clone());
+            // Persist the empty session immediately
+            if let Err(e) = sessions.append(&new_id, &Message::user("")) {
+                println!("warning: could not persist new session: {e}");
+            }
+            println!("started new persisted session: {new_id}");
         }
         "none" => {
             *current_session = None;
