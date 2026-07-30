@@ -52,4 +52,5 @@ pub mod tool;
 pub mod tools;
 pub mod transport;
 pub mod transport_http;
+pub mod transport_copilot;
 pub mod transport_stream;

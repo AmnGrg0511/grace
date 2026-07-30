@@ -66,12 +66,16 @@ pub enum TransportConfig {
         api_key: String,
         model: String,
     },
+    /// GitHub Copilot via device flow authentication.
+    Copilot {
+        model: String,
+    },
 }
 
 impl TransportConfig {
     /// Re-derive the CLI flags that would reproduce this transport, so a
     /// delegated subagent subprocess inherits the *real* configured
-    /// provider/model.
+    /// provider/model instead of silently falling back to `--mock`.
     pub fn to_cli_args(&self) -> Vec<String> {
         match self {
             TransportConfig::Http {
@@ -83,6 +87,11 @@ impl TransportConfig {
                 base_url.clone(),
                 "--api-key".to_string(),
                 api_key.clone(),
+                "--model".to_string(),
+                model.clone(),
+            ],
+            TransportConfig::Copilot { model } => vec![
+                "--copilot".to_string(),
                 "--model".to_string(),
                 model.clone(),
             ],
@@ -115,6 +124,9 @@ impl Config {
                 api_key.clone(),
                 model.clone(),
             ))),
+            TransportConfig::Copilot { model } => Ok(Box::new(
+                crate::transport_copilot::CopilotTransport::new(model)?,
+            )),
         }
     }
 
@@ -122,6 +134,7 @@ impl Config {
     pub fn model(&self) -> &str {
         match &self.transport {
             TransportConfig::Http { model, .. } => model,
+            TransportConfig::Copilot { model } => model,
         }
     }
 
@@ -168,10 +181,18 @@ impl Config {
         api_key: Option<String>,
         model: Option<String>,
         openrouter: bool,
+        copilot: bool,
         max_iterations: u32,
         system_prompt: Option<String>,
     ) -> Result<Config> {
-        let transport = if openrouter {
+        let transport = if copilot {
+            let model = model.ok_or_else(|| {
+                AgentError::Config(
+                    "missing --model (Copilot needs e.g. gpt-4o)".into(),
+                )
+            })?;
+            TransportConfig::Copilot { model }
+        } else if openrouter {
             let model = model.ok_or_else(|| {
                 AgentError::Config(
                     "missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into(),

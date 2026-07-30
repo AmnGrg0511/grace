@@ -91,6 +91,25 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         env_var: "GRACE_API_KEY",
         models: &[],
     },
+    ProviderPreset {
+        label: "GitHub Copilot",
+        base_url: "https://api.githubcopilot.com",
+        env_var: "GITHUB_COPILOT_TOKEN",
+        models: &[
+            KnownModel {
+                id: "gpt-4o",
+                context_window: 128_000,
+            },
+            KnownModel {
+                id: "gpt-4o-mini",
+                context_window: 128_000,
+            },
+            KnownModel {
+                id: "gpt-4-turbo",
+                context_window: 128_000,
+            },
+        ],
+    },
 ];
 
 /// Best-effort context window lookup by exact or substring model id match,

@@ -23,7 +23,7 @@ use grace::config::{Config, load_soul};
 use grace::memory::Memory;
 use grace::message::Message;
 use grace::session::SessionStore;
-use grace::settings::PROVIDER_PRESETS;
+use grace::settings::{PROVIDER_PRESETS, ProviderPreset, KnownModel};
 use grace::skin::{Role, Skin};
 use uuid::Uuid;
 
@@ -74,6 +74,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut model: Option<String> = None;
     let mut chat = false;
     let mut openrouter = false;
+    let mut copilot = false;
     let mut max_iterations: u32 = 256;
     let mut system_prompt: Option<String> = None;
     let mut remember: Option<String> = None;
@@ -105,6 +106,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
             "--openrouter" => {
                 openrouter = true;
+                i += 1;
+            }
+            "--copilot" => {
+                copilot = true;
                 i += 1;
             }
             "--chat" => {
@@ -281,6 +286,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         api_key,
         model,
         openrouter,
+        copilot,
         max_iterations,
         system_prompt,
     )
@@ -382,18 +388,25 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // needed, since streaming here is a single direct completion call (no
     // tool-loop), matching the task's scope.
     if stream {
-        let grace::config::TransportConfig::Http {
-            base_url,
-            api_key,
-            model,
-        } = &config.transport;
+        let (base_url, api_key, model) = match &config.transport {
+            grace::config::TransportConfig::Http {
+                base_url,
+                api_key,
+                model,
+            } => (base_url.clone(), api_key.clone(), model.clone()),
+            grace::config::TransportConfig::Copilot { model, .. } => {
+                let token = std::env::var("GITHUB_COPILOT_TOKEN")
+                    .map_err(|_| "GITHUB_COPILOT_TOKEN not set".to_string())?;
+                ("https://api.githubcopilot.com".to_string(), token, model.clone())
+            }
+        };
 
         print!("\n--- answer (streaming) ---\n");
         use std::io::Write;
         let response = grace::transport_stream::stream_complete(
-            base_url,
-            api_key,
-            model,
+            &base_url,
+            &api_key,
+            &model,
             &messages,
             &tools.specs(),
             |frag| {
@@ -621,6 +634,7 @@ fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '
                 let key = std::env::var("GRACE_API_KEY")
                     .or_else(|_| std::env::var("OPENAI_API_KEY"))
                     .or_else(|_| std::env::var("OPENROUTER_API_KEY"))
+                    .or_else(|_| std::env::var("GITHUB_COPILOT_TOKEN"))
                     .unwrap_or_default();
                 fetch_context_window(&picked, url, &key)
             })
@@ -642,7 +656,8 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
     for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
         println!("  {}) {}", i + 1, p.label);
     }
-    let n_providers = PROVIDER_PRESETS.len();
+    println!("  {}) GitHub Copilot", PROVIDER_PRESETS.len() + 1);
+    let n_providers = PROVIDER_PRESETS.len() + 1;
     print!("\nselect a provider [number]: ");
     let _ = std::io::stdout().flush();
     let raw = std::io::stdin().lines().next()?.ok()?;
@@ -653,7 +668,21 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
             return None;
         }
     };
-    let preset = &PROVIDER_PRESETS[choice];
+    let preset = if choice < PROVIDER_PRESETS.len() {
+        &PROVIDER_PRESETS[choice]
+    } else {
+        // GitHub Copilot - need a custom preset for it
+        &ProviderPreset {
+            label: "GitHub Copilot",
+            base_url: "https://api.githubcopilot.com",
+            env_var: "GITHUB_COPILOT_TOKEN",
+            models: &[
+                KnownModel { id: "gpt-4o", context_window: 128_000 },
+                KnownModel { id: "gpt-4o-mini", context_window: 128_000 },
+                KnownModel { id: "gpt-4-turbo", context_window: 128_000 },
+            ],
+        }
+    };
     if preset.models.is_empty() {
         // Provider with no known models (e.g. "Custom endpoint"): type one.
         print!("model id: ");
@@ -952,14 +981,20 @@ fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::erro
     for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
         println!("  {}) {}", i + 1, p.label);
     }
+    println!("  {}) GitHub Copilot", PROVIDER_PRESETS.len() + 1);
     let choice: usize = loop {
         let raw = prompt_read("\nselect a provider [number]: ");
         match raw.parse::<usize>() {
-            Ok(n) if n >= 1 && n <= PROVIDER_PRESETS.len() => break n - 1,
-            _ => println!("enter a number between 1 and {}", PROVIDER_PRESETS.len()),
+            Ok(n) if n >= 1 && n <= PROVIDER_PRESETS.len() + 1 => break n - 1,
+            _ => println!("enter a number between 1 and {}", PROVIDER_PRESETS.len() + 1),
         }
     };
-    let preset = &PROVIDER_PRESETS[choice];
+    let preset = if choice < PROVIDER_PRESETS.len() {
+        &PROVIDER_PRESETS[choice]
+    } else {
+        // GitHub Copilot - use the last preset from settings.rs which is Copilot
+        &PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1]
+    };
 
     let base_url = if preset.base_url.is_empty() {
         prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")

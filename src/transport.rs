@@ -75,6 +75,22 @@ pub trait ProviderTransport {
     fn current_model(&self) -> Option<String> {
         None
     }
+
+    /// Fetch available models from the provider.
+    /// Default implementation returns empty list - providers should override.
+    fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Information about a model from the provider.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    pub context_window: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+    pub provider: String,
 }
 
 #[derive(Serialize)]
