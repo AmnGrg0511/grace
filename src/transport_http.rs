@@ -81,13 +81,25 @@ impl HttpTransport {
             match req.send() {
                 Ok(resp) => {
                     let status = resp.status();
+                    // Read raw text first to handle non-JSON responses
+                    let text = resp.text().map_err(|e| {
+                        AgentError::Transport(format!("failed to read response body: {e}"))
+                    })?;
                     if status.is_server_error() || status.as_u16() == 429 {
-                        last_err =
-                            Some(AgentError::Transport(format!("retryable status {status}")));
+                        last_err = Some(AgentError::Transport(format!(
+                            "retryable status {status}: {text}"
+                        )));
                     } else {
-                        return resp.json().map_err(|e| {
-                            AgentError::Transport(format!("invalid JSON response: {e}"))
-                        });
+                        // Try to parse as JSON, include raw text on failure for debugging
+                        match serde_json::from_str(&text) {
+                            Ok(json) => return Ok(json),
+                            Err(e) => {
+                                return Err(AgentError::Transport(format!(
+                                    "invalid JSON response (status {status}): {e}. Raw: {}",
+                                    Self::truncate(&text, 500)
+                                )));
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -100,6 +112,14 @@ impl HttpTransport {
             }
         }
         Err(last_err.unwrap_or_else(|| AgentError::Transport("request failed".into())))
+    }
+
+    fn truncate(s: &str, max: usize) -> String {
+        if s.len() <= max {
+            s.to_string()
+        } else {
+            format!("{}... [truncated {} bytes]", &s[..max], s.len() - max)
+        }
     }
 }
 
@@ -160,6 +180,7 @@ impl ProviderTransport for HttpTransport {
         let finish_reason_str = choice.get("finish_reason").and_then(Value::as_str);
 
         let mut resp = parse_openai_message(&msg, finish_reason_str)?;
+
         // If the model emitted tool_calls, force the finish reason regardless of
         // what the provider reported (some send "stop" with tool calls).
         if !resp.tool_calls.is_empty() {
