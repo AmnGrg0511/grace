@@ -73,11 +73,43 @@ impl CopilotTransport {
             }
         }
         
-        // For now, require GITHUB_COPILOT_TOKEN env var
-        std::env::var("GITHUB_COPILOT_TOKEN")
-            .map_err(|_| AgentError::Config(
-                "GitHub Copilot token not found. Set GITHUB_COPILOT_TOKEN env var or run device flow auth.".into()
-            ))
+        // Check for cached token file
+        let token_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".grace")
+            .join("copilot_token");
+        
+        if let Ok(token) = std::fs::read_to_string(&token_path) {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Ok(token);
+            }
+        }
+        
+        // Trigger device flow
+        let device_code = Self::start_device_flow()?;
+        
+        println!("\n🔐 GitHub Copilot Authentication Required");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("Please authorize GitHub Copilot in your browser:");
+        println!();
+        println!("  1. Open: {}", device_code.verification_uri);
+        println!("  2. Enter code: {}", device_code.user_code);
+        println!();
+        println!("Waiting for authorization... (press Ctrl+C to cancel)");
+        
+        // Poll for token
+        let token = Self::poll_token(&device_code.device_code, device_code.interval)?;
+        
+        // Save token to cache file
+        if let Some(parent) = token_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&token_path, &token);
+        
+        println!("\n✅ Authentication successful! Token cached for future use.\n");
+        
+        Ok(token)
     }
 
     /// Start device flow authentication.
@@ -98,7 +130,7 @@ impl CopilotTransport {
     fn poll_token(device_code: &str, _interval: u64) -> Result<String> {
         let client = reqwest::blocking::Client::new();
         let max_attempts = 120; // 10 minutes max
-        for _ in 0..max_attempts {
+        for attempt in 0..max_attempts {
             std::thread::sleep(Duration::from_secs(5));
             let resp = reqwest::blocking::Client::new()
                 .post("https://github.com/login/oauth/access_token")
@@ -108,22 +140,46 @@ impl CopilotTransport {
                     ("device_code", device_code),
                     ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ])
-                .send()?
-                .json::<TokenResponse>()?;
+                .send()?;
             
-            if let Some(token) = resp.access_token {
+            let status = resp.status();
+            let text = resp.text().map_err(|e| AgentError::Transport(format!("Failed to read response: {e}")))?;
+            
+            if !status.is_success() {
+                if attempt % 6 == 0 { // Print every 30 seconds
+                    eprintln!("Polling... (attempt {}/{})", attempt + 1, max_attempts);
+                }
+                // Check for specific error conditions in the text
+                if text.contains("authorization_pending") {
+                    continue;
+                }
+                if text.contains("slow_down") {
+                    continue;
+                }
+                if text.contains("expired_token") {
+                    return Err(AgentError::Config("Device code expired".into()));
+                }
+                if text.contains("access_denied") {
+                    return Err(AgentError::Config("User denied authorization".into()));
+                }
+                continue;
+            }
+            
+            // Try to parse as JSON
+            let token_resp: TokenResponse = serde_json::from_str(&text)
+                .map_err(|e| AgentError::Transport(format!("Failed to parse token response: {e}. Raw: {}", Self::truncate(&text, 200))))?;
+            
+            if let Some(token) = token_resp.access_token {
                 if !token.is_empty() {
                     return Ok(token);
                 }
             }
             
-            if let Some(err) = &resp.error {
+            if let Some(err) = &token_resp.error {
                 if err == "authorization_pending" {
-                    std::thread::sleep(Duration::from_secs(5));
                     continue;
                 }
                 if err == "slow_down" {
-                    std::thread::sleep(Duration::from_secs(5));
                     continue;
                 }
                 if err == "expired_token" {
@@ -133,19 +189,36 @@ impl CopilotTransport {
                     return Err(AgentError::Config("User denied authorization".into()));
                 }
             }
-            std::thread::sleep(Duration::from_secs(5));
         }
         Err(AgentError::Config("Device flow timed out".into()))
     }
     
     /// Get or create access token (with caching)
     fn get_access_token(&self) -> Result<String> {
-        // For now, require GITHUB_COPILOT_TOKEN env var
-        // Full device flow would need interactive terminal
-        std::env::var("GITHUB_COPILOT_TOKEN")
-            .map_err(|_| AgentError::Config(
-                "GITHUB_COPILOT_TOKEN not set. Please set GITHUB_COPILOT_TOKEN environment variable.".into()
-            ))
+        // Check for GITHUB_COPILOT_TOKEN env var first (highest priority)
+        if let Ok(token) = std::env::var("GITHUB_COPILOT_TOKEN") {
+            if !token.is_empty() {
+                return Ok(token);
+            }
+        }
+        
+        // Check for cached token file
+        let token_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".grace")
+            .join("copilot_token");
+        
+        if let Ok(token) = std::fs::read_to_string(&token_path) {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Ok(token);
+            }
+        }
+        
+        // Fallback: require env var
+        Err(AgentError::Config(
+            "GITHUB_COPILOT_TOKEN not set and no cached token found. Run with --copilot to trigger device flow auth.".into()
+        ))
     }
 
     /// Build the Copilot API endpoint URL

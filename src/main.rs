@@ -1302,9 +1302,10 @@ Flags:
   --memory-path <path>   Override memory DB path (default ~/.grace/memory.db)
   --skills-dir <path>    Directory of skills/<name>/SKILL.md (default ./skills)
   --openrouter           Use OpenRouter (HTTPS via reqwest/rustls)
+  --copilot              Use GitHub Copilot (device flow auth)
   --base-url <url>       OpenAI-compatible endpoint (http:// or https://)
   --api-key <key>        Bearer token (default empty; for OpenRouter uses $OPENROUTER_API_KEY)
-  --model <name>         Model id (required for http/openrouter mode)
+  --model <name>         Model id (required for http/openrouter/copilot mode)
   --max-iterations <n>   Tool-call round cap (default 16)
   --system <text>        Optional system prompt
   --tools-dir <path>     Directory of tools/<name>/manifest.json plugins (default ./tools)
