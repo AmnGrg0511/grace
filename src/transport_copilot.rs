@@ -73,24 +73,11 @@ impl CopilotTransport {
             }
         }
         
-        // Check for cached token file
-        let token_path = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".grace")
-            .join("copilot_token");
-        
-        if let Ok(token) = std::fs::read_to_string(&token_path) {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                return Ok(token);
-            }
-        }
-        
         // Trigger device flow
         let device_code = Self::start_device_flow()?;
         
         println!("\n🔐 GitHub Copilot Authentication Required");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Please authorize GitHub Copilot in your browser:");
         println!();
         println!("  1. Open: {}", device_code.verification_uri);
@@ -101,13 +88,17 @@ impl CopilotTransport {
         // Poll for token
         let token = Self::poll_token(&device_code.device_code, device_code.interval)?;
         
-        // Save token to cache file
-        if let Some(parent) = token_path.parent() {
+        // Save token to .env file (like onboarding wizard does)
+        let env_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".grace")
+            .join(".env");
+        if let Some(parent) = env_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&token_path, &token);
+        let _ = std::fs::write(&env_path, format!("GITHUB_COPILOT_TOKEN={}\n", token));
         
-        println!("\n✅ Authentication successful! Token cached for future use.\n");
+        println!("\n✅ Authentication successful! Token saved to ~/.grace/.env for future use.\n");
         
         Ok(token)
     }
@@ -203,22 +194,9 @@ impl CopilotTransport {
             }
         }
         
-        // Check for cached token file
-        let token_path = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".grace")
-            .join("copilot_token");
-        
-        if let Ok(token) = std::fs::read_to_string(&token_path) {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                return Ok(token);
-            }
-        }
-        
-        // Fallback: require env var
+        // Fallback: require env var (dotenv should have loaded .env)
         Err(AgentError::Config(
-            "GITHUB_COPILOT_TOKEN not set and no cached token found. Run with --copilot to trigger device flow auth.".into()
+            "GITHUB_COPILOT_TOKEN not set. Run with --copilot to trigger device flow auth.".into()
         ))
     }
 
