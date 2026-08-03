@@ -271,7 +271,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // terse "missing --model" error. Runs once; picks are persisted to
     // ~/.grace/config.toml and the key to ~/.grace/.env so this never asks
     // twice.
-    if model.is_none() {
+    // Skip onboarding for --copilot since it requires explicit model.
+    if model.is_none() && !copilot {
         let (picked_model, picked_base_url, picked_key) = run_onboarding_wizard()?;
         model = Some(picked_model);
         base_url = Some(picked_base_url);
