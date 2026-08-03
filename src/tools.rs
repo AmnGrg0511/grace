@@ -223,7 +223,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file and return its contents."
+        "Read a text file and return its contents with line count. For large files (>500 lines), falls back to grep search."
     }
 
     fn parameters(&self) -> Value {
@@ -231,6 +231,8 @@ impl Tool for ReadFileTool {
             "type": "object",
             "properties": {
                 "path": str_prop("Absolute or relative path to the file."),
+                "offset": {"type": "integer", "description": "Starting line number (1-indexed, default 1)."},
+                "limit": {"type": "integer", "description": "Max lines to read (default 500, max 2000)."},
             },
             "required": ["path"],
         })
@@ -238,10 +240,37 @@ impl Tool for ReadFileTool {
 
     fn run(&self, args: &Value) -> Result<String> {
         let path = arg_str(args, "path")?;
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(1) as usize;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(500) as usize;
+        
         let allowed = check_path_allowed(&path)?;
+        
+        // Get total line count first
         let content = fs::read_to_string(&allowed)
             .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
-        Ok(content)
+        
+        let total_lines = content.lines().count();
+        
+        // If file is large (>500 lines), only show summary + head/tail
+        if total_lines > 500 {
+            let head: Vec<&str> = content.lines().take(50).collect();
+            let tail: Vec<&str> = content.lines().skip(total_lines.saturating_sub(50)).collect();
+            
+            let mut result = format!("File: {} ({} lines)\n", path, total_lines);
+            result.push_str("=== FIRST 50 LINES ===\n");
+            result.push_str(&head.join("\n"));
+            result.push_str("\n=== LAST 50 LINES ===\n");
+            result.push_str(&tail.join("\n"));
+            result.push_str(&format!("\n... [{} lines omitted] ...", total_lines - head.len() - tail.len()));
+            return Ok(result);
+        }
+        
+        // For smaller files, apply offset/limit
+        let lines: Vec<&str> = content.lines().skip(offset.saturating_sub(1)).take(limit).collect();
+        let shown = lines.len();
+        let mut result = format!("File: {} ({} lines total, showing {} lines from {})\n", path, total_lines, shown, offset);
+        result.push_str(&lines.join("\n"));
+        Ok(result)
     }
 }
 
@@ -282,7 +311,13 @@ impl Tool for WriteFileTool {
         }
         let nbytes = content.len();
         fs::write(&allowed, &content).map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
-        Ok(format!("wrote {nbytes} bytes to {}", path))
+        // Truncate content display for large files
+        let display_content = if content.len() > 200 {
+            format!("{}... [truncated {} bytes]", &content[..200], content.len() - 200)
+        } else {
+            content.to_string()
+        };
+        Ok(format!("wrote {} bytes to {} (content: {})", nbytes, path, display_content))
     }
 }
 

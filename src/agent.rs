@@ -15,6 +15,7 @@ use crate::error::{AgentError, Result};
 use crate::message::{Message, Role};
 use crate::tool::ToolRegistry;
 use crate::transport::{FinishReason, ProviderTransport};
+use crate::config::ContextCompressionConfig;
 
 /// Calls `transport.complete`, retrying up to 2 additional times within the
 /// same iteration (not counted against `max_iterations`) if the provider
@@ -38,6 +39,54 @@ fn complete_with_response_retry(
     Err(last_err.expect("loop runs at least once"))
 }
 
+/// Compress conversation context by summarizing older messages while preserving
+/// recent ones and system message.
+fn compress_context(
+    messages: &[Message],
+    context_window: u32,
+    target_fraction: f32,
+) -> Result<Vec<Message>> {
+    let target_tokens = (context_window as f32 * target_fraction) as usize;
+    
+    // Always keep the system message if present
+    let system_msg = messages.iter().find(|m| m.role == Role::System).cloned();
+    
+    // Keep the last N messages that fit in target tokens
+    let mut result = Vec::new();
+    if let Some(sys) = system_msg {
+        result.push(sys);
+    }
+    
+    // Add messages from the end until we hit target
+    let mut token_count = 0;
+    for msg in messages.iter().rev() {
+        if msg.role == Role::System {
+            continue; // Already added
+        }
+        let msg_tokens = msg.content.len() / 4;
+        if token_count + msg_tokens > target_tokens && !result.is_empty() {
+            break;
+        }
+        token_count += msg_tokens;
+        result.push(msg.clone());
+    }
+    
+    result.reverse();
+    
+    // If we still have too many, add a summary message at the beginning
+    if token_count > target_tokens && result.len() > 2 {
+        let summary = format!(
+            "[Context compressed: {} older messages summarized to fit within {} tokens]",
+            messages.len() - result.len(),
+            target_tokens
+        );
+        let summary_msg = Message::assistant(summary);
+        result.insert(1, summary_msg); // After system message
+    }
+    
+    Ok(result)
+}
+
 /// Run one conversation turn to completion and return the final answer.
 ///
 /// `on_event`, if given, is called for every model reply and every tool
@@ -50,7 +99,7 @@ pub fn run_turn(
     messages: &mut Vec<Message>,
     max_iterations: u32,
 ) -> Result<String> {
-    run_turn_with_events(transport, tools, messages, max_iterations, None, None)
+    run_turn_with_events(transport, tools, messages, max_iterations, None, None, None)
 }
 
 /// Agent lifecycle events, for surfacing progress to a human (or a log).
@@ -83,6 +132,7 @@ pub fn run_turn_with_events(
     max_iterations: u32,
     mut on_event: Option<&mut dyn FnMut(AgentEvent)>,
     interrupted: Option<&std::sync::atomic::AtomicBool>,
+    compression_config: Option<&ContextCompressionConfig>,
 ) -> Result<String> {
     let specs = tools.specs();
     let is_interrupted =
@@ -96,6 +146,26 @@ pub fn run_turn_with_events(
         iterations += 1;
         if iterations > max_iterations {
             return Err(AgentError::BudgetExhausted { iterations });
+        }
+
+        // Check if we need to compress context before making the request
+        if let Some(cc) = compression_config {
+            if cc.enabled && !messages.is_empty() {
+                // Estimate token count from messages
+                let estimated_tokens: usize = messages.iter().map(|m| m.content.len() / 4).sum();
+                // We need the context window from the model's info
+                // For now, we'll use a reasonable default (128k) but this should come from the transport
+                let context_window = 128000u32; // Default, should be fetched from model info
+                let trigger_tokens = (context_window as f32 * cc.trigger_fraction) as usize;
+                
+                if estimated_tokens > trigger_tokens {
+                    // Compress the context
+                    if let Ok(compressed) = compress_context(messages, context_window, cc.target_fraction) {
+                        messages.clear();
+                        messages.extend(compressed);
+                    }
+                }
+            }
         }
 
         let resp = complete_with_response_retry(transport, messages, &specs)?;
@@ -268,7 +338,7 @@ mod tests {
         let flag = std::sync::atomic::AtomicBool::new(true);
 
         let res = run_turn_with_events(
-            &transport, &tools, &mut messages, 8, None, Some(&flag),
+            &transport, &tools, &mut messages, 8, None, Some(&flag), None,
         );
 
         assert!(matches!(res, Err(AgentError::Interrupted)));

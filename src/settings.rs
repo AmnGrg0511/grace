@@ -86,12 +86,6 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         ],
     },
     ProviderPreset {
-        label: "Custom OpenAI-compatible endpoint",
-        base_url: "",
-        env_var: "GRACE_API_KEY",
-        models: &[],
-    },
-    ProviderPreset {
         label: "GitHub Copilot",
         base_url: "https://api.githubcopilot.com",
         env_var: "GITHUB_COPILOT_TOKEN",
@@ -109,6 +103,12 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
                 context_window: 128_000,
             },
         ],
+    },
+    ProviderPreset {
+        label: "Custom OpenAI-compatible endpoint",
+        base_url: "",
+        env_var: "GRACE_API_KEY",
+        models: &[],
     },
 ];
 

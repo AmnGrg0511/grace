@@ -19,7 +19,7 @@
 
 use std::process::ExitCode;
 
-use grace::config::{Config, load_soul};
+use grace::config::{Config, load_soul, ContextCompressionConfig};
 use grace::memory::Memory;
 use grace::message::Message;
 use grace::session::SessionStore;
@@ -372,6 +372,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             &sessions,
             session_id.as_deref(),
             &skin,
+            &config.context_compression,
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -430,6 +431,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         config.max_iterations,
         Some(&mut |event| print_agent_event(event, &skin)),
         Some(interrupted.as_ref()),
+        Some(&config.context_compression),
     )
     .map_err(|e| e.to_string())?;
     if let Some(sid) = &session_id {
@@ -454,6 +456,7 @@ fn run_chat(
     sessions: &SessionStore,
     session_id: Option<&str>,
     skin: &Skin,
+    compression_config: &ContextCompressionConfig,
 ) {
     use std::io::BufRead;
     use std::io::Write;
@@ -518,6 +521,10 @@ fn run_chat(
                 println!("goodbye.");
                 break;
             }
+            if text.starts_with("/help") || text.starts_with("/commands") {
+                print_slash_commands_help();
+                continue;
+            }
             if let Some(rest) = text.strip_prefix("/model") {
                 handle_model_command(transport, rest.trim());
                 continue;
@@ -540,6 +547,7 @@ fn run_chat(
                 text,
                 &skin,
                 &interrupted,
+                compression_config,
             );
         }
         return;
@@ -565,10 +573,14 @@ fn run_chat(
             continue;
         }
         if matches!(text, "/exit" | "/quit") {
-            println!("goodbye.");
-            break;
-        }
-        if let Some(rest) = text.strip_prefix("/model") {
+                println!("goodbye.");
+                break;
+            }
+            if text.starts_with("/help") || text.starts_with("/commands") {
+                print_slash_commands_help();
+                continue;
+            }
+            if let Some(rest) = text.strip_prefix("/model") {
             handle_model_command(transport, rest.trim());
             print!("{}", prompt_label(&skin));
             let _ = std::io::stdout().flush();
@@ -596,6 +608,7 @@ fn run_chat(
             text,
             &skin,
             &interrupted,
+            compression_config,
         );
         print_status_line(&skin, transport, messages, started_at);
         print!("{}", prompt_label(&skin));
@@ -899,6 +912,7 @@ fn run_one_chat_turn(
     text: &str,
     skin: &Skin,
     interrupted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    compression_config: &ContextCompressionConfig,
 ) {
     messages.push(Message::user(text.to_string()));
     if let Some(sid) = session_id {
@@ -914,6 +928,7 @@ fn run_one_chat_turn(
         max_iterations,
         Some(&mut |event| print_agent_event(event, skin)),
         Some(interrupted.as_ref()),
+        Some(compression_config),
     ) {
         Ok(answer) => {
             println!(
@@ -1388,4 +1403,19 @@ fn fish_completions() -> String {
     out.push_str("complete -c grace -l skin -d 'skin name' -a 'solaris royal ocean sakura'\n");
     out.push_str("complete -c grace -l completions -d 'shell' -a 'bash zsh fish'\n");
     out
+}
+
+/// Print available slash commands for the chat REPL.
+fn print_slash_commands_help() {
+    println!("\nAvailable slash commands:");
+    println!("  /exit, /quit          - Exit the chat");
+    println!("  /help, /commands      - Show this help");
+    println!("  /model [name]         - Switch model (interactive picker if no arg)");
+    println!("  /skin [name]          - Switch color skin (interactive picker if no arg)");
+    println!("  /session [name]       - Switch session (interactive picker if no arg)");
+    println!("  /session new          - Start fresh session (no persistence)");
+    println!("  /session new-persist  - Start new persisted session");
+    println!("  /session none         - Disable session persistence");
+    println!("  /session list         - List all sessions");
+    println!();
 }

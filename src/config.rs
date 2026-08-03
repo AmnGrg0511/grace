@@ -106,10 +106,35 @@ pub struct Config {
     pub max_iterations: u32,
     /// Optional system prompt prepended to the conversation.
     pub system_prompt: Option<String>,
+    /// Context compression settings.
+    pub context_compression: ContextCompressionConfig,
 }
 
 /// OpenRouter's OpenAI-compatible base URL preset.
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+/// Context compression configuration.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ContextCompressionConfig {
+    /// Enable automatic context compression when threshold is reached.
+    pub enabled: bool,
+    /// Fraction of context window that triggers compression (0.0 to 1.0).
+    /// e.g., 0.75 means compress when 75% of context window is used.
+    pub trigger_fraction: f32,
+    /// Target fraction after compression (0.0 to 1.0).
+    /// e.g., 0.5 means compress down to 50% of context window.
+    pub target_fraction: f32,
+}
+
+impl Default for ContextCompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trigger_fraction: 0.75,
+            target_fraction: 0.5,
+        }
+    }
+}
 
 impl Config {
     /// Build the configured transport as a `dyn ProviderTransport`.
@@ -234,6 +259,7 @@ impl Config {
             transport,
             max_iterations: max_iterations.max(1),
             system_prompt,
+            context_compression: ContextCompressionConfig::default(),
         })
     }
 }
