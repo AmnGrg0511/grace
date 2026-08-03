@@ -145,22 +145,23 @@ impl CopilotTransport {
             let status = resp.status();
             let text = resp.text().map_err(|e| AgentError::Transport(format!("Failed to read response: {e}")))?;
             
+            // Check for error conditions in text BEFORE trying to parse JSON
+            if text.contains("authorization_pending") {
+                continue;
+            }
+            if text.contains("slow_down") {
+                continue;
+            }
+            if text.contains("expired_token") {
+                return Err(AgentError::Config("Device code expired".into()));
+            }
+            if text.contains("access_denied") {
+                return Err(AgentError::Config("User denied authorization".into()));
+            }
+            
             if !status.is_success() {
                 if attempt % 6 == 0 { // Print every 30 seconds
                     eprintln!("Polling... (attempt {}/{})", attempt + 1, max_attempts);
-                }
-                // Check for specific error conditions in the text
-                if text.contains("authorization_pending") {
-                    continue;
-                }
-                if text.contains("slow_down") {
-                    continue;
-                }
-                if text.contains("expired_token") {
-                    return Err(AgentError::Config("Device code expired".into()));
-                }
-                if text.contains("access_denied") {
-                    return Err(AgentError::Config("User denied authorization".into()));
                 }
                 continue;
             }
