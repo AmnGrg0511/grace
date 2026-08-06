@@ -51,23 +51,20 @@ pub struct Message {
 
 /// An assistant-requested tool invocation, in the API wire shape
 /// (`{id, type: "function", function: {name, arguments}}`).
+///
+/// `type` is always serialized (not skipped when `"function"`) — some
+/// OpenAI-compatible servers (e.g. vLLM) validate it as a required field
+/// even though it never varies in practice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
-    #[serde(
-        rename = "type",
-        default = "function_type",
-        skip_serializing_if = "is_function_type"
-    )]
+    #[serde(rename = "type", default = "function_type")]
     pub kind: String,
     pub function: ToolCallFunction,
 }
 
 fn function_type() -> String {
     "function".to_string()
-}
-fn is_function_type(s: &str) -> bool {
-    s == "function"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,5 +136,37 @@ impl Message {
             name: Some(name.into()),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: some OpenAI-compatible servers (vLLM, observed live
+    /// against a self-hosted deployment) reject a follow-up request after a
+    /// tool call if the wire-format `type` field is missing from the
+    /// echoed-back tool_calls — even though `"function"` is the only value
+    /// that ever appears. `skip_serializing_if` on that field used to omit
+    /// it in exactly that case. Assert it's always present.
+    #[test]
+    fn tool_call_always_serializes_type_field() {
+        let call = ToolCall::new("call_1", "read_file", "{\"path\":\"a.txt\"}");
+        let json = serde_json::to_value(&call).unwrap();
+        assert_eq!(json["type"], "function");
+    }
+
+    #[test]
+    fn assistant_message_with_tool_calls_round_trips() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![ToolCall::new("call_1", "read_file", "{}")],
+            tool_call_id: None,
+            name: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["tool_calls"][0]["type"], "function");
+        assert_eq!(json["tool_calls"][0]["id"], "call_1");
     }
 }

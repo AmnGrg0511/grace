@@ -119,23 +119,6 @@ GRACE_TERMINAL_ALLOW="ls,cat,rg,cargo" grace --chat
 
 ---
 
-## Architecture
-
-```
-Message list ──► ProviderTransport (normalized LLM call)
-                   │  returns content + optional tool_calls
-                   ▼
-              if tool_calls: ToolRegistry executes each
-                   │  results appended as `tool` messages
-                   ▼
-              loop until FinishReason::Stop (or budget exhausted)
-```
-
-23 modules, ~6,600 lines, `#![forbid(unsafe_code)]`. See `docs/minimalism-audit.md`
-for a module-by-module core/polish/bloat classification.
-
----
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test/release instructions.

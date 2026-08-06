@@ -23,10 +23,10 @@ only, CLI based."*
 
 | Module | LOC | Verdict |
 |---|---|---|
-| `markdown.rs` | 586 | Biggest single "nice to have." A CLI for *core developers* doesn't need syntax-highlighted markdown rendering with box-drawing tables — plain text or a much smaller renderer suffices. **Recommend: cut to a ~80-line renderer (bold/italic/code fences only, drop tables+box-drawing+syntect) or make it an opt-in feature flag.** |
-| `skin.rs` + 4 built-in skins | 249 | 4 skins + custom TOML loader is UI polish for a dev tool that's typically read via `less`/logs. **Recommend: cut to one fixed palette (no picker, no custom TOML).** Removes `anstyle-query` dependency surface too. |
-| `completer.rs` | 101 | rustyline tab-completion for slash commands — nice, skippable. **Recommend: keep only if `/`-command surface stays; otherwise cut with the slash-command layer.** |
 | Two-level model/skin/session pickers in `main.rs` (~350 LOC) | — | Onboarding wizard + `/model`, `/skin`, `/session` interactive pickers. A core-developer CLI is more naturally configured via flags/config.toml than an interactive wizard. **Recommend: keep flags/config.toml, cut the multi-step interactive prompts** (or gate behind `--wizard`). |
+
+`markdown.rs`, `skin.rs`, and `completer.rs` are deliberate product choices,
+not bloat — retracted from this list.
 
 ## Bloat (violates "core developers only, CLI based") — recommend cut
 
