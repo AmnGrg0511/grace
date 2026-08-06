@@ -9,11 +9,17 @@ use grace::settings::PROVIDER_PRESETS;
 use grace::skin::{Role, Skin};
 use uuid::Uuid;
 
+use crate::line_reader::LineReader;
+
 pub(crate) const RESET: &str = "\x1b[0m";
 
 /// Interactive REPL. Each line you type is appended as a user message and the
 /// conversation history (including tool calls) is preserved across turns. If
 /// a session id was given, each turn is also persisted to disk immediately.
+///
+/// Owns exactly one [`LineReader`] for the whole session (see that module's
+/// docs for why: two independent stdin readers used to race and steal each
+/// other's lines whenever a picker like `/session` was invoked).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_chat(
     transport: &(dyn grace::transport::ProviderTransport + '_),
@@ -25,9 +31,6 @@ pub(crate) fn run_chat(
     skin: &Skin,
     compression_config: &ContextCompressionConfig,
 ) {
-    use std::io::BufRead;
-    use std::io::Write;
-
     // Owned+mutable so `/skin <name>` can swap it live; `/model <name>` swaps
     // the transport's own interior model instead (see `set_model`).
     let mut skin = *skin;
@@ -38,8 +41,8 @@ pub(crate) fn run_chat(
     // recorded) and returns to the prompt, instead of killing the whole
     // process — installed once for the process, the flag is what the agent
     // loop polls between steps. rustyline handles Ctrl-C at the idle prompt
-    // itself (returns `ReadlineError::Interrupted`, handled below to exit
-    // cleanly) independent of this signal handler.
+    // itself (returns `ReadlineError::Interrupted`, handled inside
+    // `LineReader::read_line`) independent of this signal handler.
     let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let flag = interrupted.clone();
@@ -56,9 +59,6 @@ pub(crate) fn run_chat(
     // a mid-chat model switch without another disk read.
     let mut cached_context_window = grace::settings::Settings::load().default_context_window;
 
-    // Prefer rustyline for arrow-key history/editing; if stdin isn't a real
-    // TTY (piped input, tests) it errors on creation, so fall back to plain
-    // line reading — same behavior as before, just no history in that case.
     let history_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".grace")
@@ -67,108 +67,46 @@ pub(crate) fn run_chat(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    if let Ok(mut rl) = rustyline::Editor::<grace::completer::CommandHelper, rustyline::history::DefaultHistory>::new() {
-        rl.set_helper(Some(grace::completer::CommandHelper));
-        let _ = rl.load_history(&history_path);
-        loop {
-            print_status_line(&skin, transport, messages, started_at, cached_context_window);
-            let readline = rl.readline(&prompt_label(&skin));
-            let line = match readline {
-                Ok(l) => l,
-                // Ctrl-C at an idle prompt: rustyline itself catches it (the
-                // ctrlc handler above only fires while a turn is running, since
-                // this readline() call blocks outside that code path). Just
-                // redraw the prompt instead of exiting the whole session.
-                Err(rustyline::error::ReadlineError::Interrupted) => continue,
-                Err(_) => break,
-            };
-            let text = line.trim();
-            if text.is_empty() {
-                continue;
-            }
-            let _ = rl.add_history_entry(text);
-            let _ = rl.save_history(&history_path);
-            if matches!(text, "/exit" | "/quit") {
-                println!("goodbye.");
-                break;
-            }
-            if text.starts_with("/help") || text.starts_with("/commands") {
-                print_slash_commands_help();
-                continue;
-            }
-            if let Some(rest) = text.strip_prefix("/model") {
-                handle_model_command(transport, rest.trim());
-                cached_context_window = grace::settings::Settings::load().default_context_window;
-                continue;
-            }
-            if let Some(rest) = text.strip_prefix("/skin") {
-                handle_skin_command(rest.trim(), &mut skin);
-                continue;
-            }
-            if let Some(rest) = text.strip_prefix("/session") {
-                handle_session_command(rest.trim(), sessions, messages, &mut current_session);
-                continue;
-            }
-            run_one_chat_turn(
-                transport,
-                tools,
-                messages,
-                max_iterations,
-                sessions,
-                current_session.as_deref(),
-                text,
-                &skin,
-                &interrupted,
-                compression_config,
-            );
-        }
-        return;
-    }
+    // Single stdin owner for the entire interactive session — every picker
+    // below (`/model`, `/skin`, `/session`) takes `&mut reader` instead of
+    // opening its own `std::io::stdin()`.
+    let mut reader = LineReader::new(history_path);
+    let is_rustyline = reader.is_interactive_editor();
 
-    // Fallback: plain stdin, no history (piped input / non-TTY, or a
-    // terminal rustyline couldn't initialize against). Must still print the
-    // prompt glyph explicitly — rustyline normally owns that via its
-    // `readline(prompt)` argument, but this path bypasses rustyline entirely.
-    let stdin = std::io::stdin();
-    print_status_line(&skin, transport, messages, started_at, cached_context_window);
-    print!("{}", prompt_label(&skin));
-    let _ = std::io::stdout().flush();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
+    loop {
+        print_status_line(&skin, transport, messages, started_at, cached_context_window);
+        // rustyline draws its own prompt glyph via readline(prompt); the
+        // plain fallback prints it manually inside LineReader::read_line.
+        let Some(line) = reader.read_line(&prompt_label(&skin)) else {
+            if !is_rustyline {
+                // Plain fallback: blank line before exit for parity with the
+                // old loop's trailing newline behavior on EOF.
+            }
+            break;
         };
         let text = line.trim();
         if text.is_empty() {
-            print!("{}", prompt_label(&skin));
-            let _ = std::io::stdout().flush();
             continue;
         }
         if matches!(text, "/exit" | "/quit") {
-                println!("goodbye.");
-                break;
-            }
-            if text.starts_with("/help") || text.starts_with("/commands") {
-                print_slash_commands_help();
-                continue;
-            }
-            if let Some(rest) = text.strip_prefix("/model") {
-            handle_model_command(transport, rest.trim());
+            println!("goodbye.");
+            break;
+        }
+        if text.starts_with("/help") || text.starts_with("/commands") {
+            print_slash_commands_help();
+            continue;
+        }
+        if let Some(rest) = text.strip_prefix("/model") {
+            handle_model_command(transport, rest.trim(), &mut reader);
             cached_context_window = grace::settings::Settings::load().default_context_window;
-            print!("{}", prompt_label(&skin));
-            let _ = std::io::stdout().flush();
             continue;
         }
         if let Some(rest) = text.strip_prefix("/skin") {
-            handle_skin_command(rest.trim(), &mut skin);
-            print!("{}", prompt_label(&skin));
-            let _ = std::io::stdout().flush();
+            handle_skin_command(rest.trim(), &mut skin, &mut reader);
             continue;
         }
         if let Some(rest) = text.strip_prefix("/session") {
-            handle_session_command(rest.trim(), sessions, messages, &mut current_session);
-            print!("{}", prompt_label(&skin));
-            let _ = std::io::stdout().flush();
+            handle_session_command(rest.trim(), sessions, messages, &mut current_session, &mut reader);
             continue;
         }
         run_one_chat_turn(
@@ -183,9 +121,6 @@ pub(crate) fn run_chat(
             &interrupted,
             compression_config,
         );
-        print_status_line(&skin, transport, messages, started_at, cached_context_window);
-        print!("{}", prompt_label(&skin));
-        let _ = std::io::stdout().flush();
     }
 }
 
@@ -193,7 +128,11 @@ pub(crate) fn run_chat(
 /// (direct switch) mid-chat. Persists to ~/.grace/config.toml so the choice
 /// sticks across restarts (unlike the old session-only behavior).
 /// Only takes effect on transports that own a swappable model (`HttpTransport`).
-fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '_), arg: &str) {
+fn handle_model_command(
+    transport: &(dyn grace::transport::ProviderTransport + '_),
+    arg: &str,
+    reader: &mut LineReader,
+) {
     if transport.current_model().is_none() {
         println!(
             "this transport ({}) has no switchable model.",
@@ -202,7 +141,7 @@ fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '
         return;
     }
     let (picked, ctx) = if arg.is_empty() {
-        match pick_model_interactive() {
+        match pick_model_interactive(reader) {
             Some(result) => result,
             None => return,
         }
@@ -236,16 +175,13 @@ fn handle_model_command(transport: &(dyn grace::transport::ProviderTransport + '
 /// Two-level model picker: providers first, then models for that provider.
 /// Returns `(model_id, optional_context_window)`. Used by `/model` mid-chat.
 /// Returns `None` on unparsable/EOF input (no-op).
-fn pick_model_interactive() -> Option<(String, Option<u32>)> {
-    use std::io::Write;
+fn pick_model_interactive(reader: &mut LineReader) -> Option<(String, Option<u32>)> {
     println!("\nproviders:\n");
     for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
         println!("  {}) {}", i + 1, p.label);
     }
     let n_providers = PROVIDER_PRESETS.len();
-    print!("\nselect a provider [number]: ");
-    let _ = std::io::stdout().flush();
-    let raw = std::io::stdin().lines().next()?.ok()?;
+    let raw = reader.read_line("\nselect a provider [number]: ")?;
     let choice: usize = match raw.trim().parse::<usize>() {
         Ok(n) if n >= 1 && n <= n_providers => n - 1,
         _ => {
@@ -256,14 +192,8 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
     let preset = &PROVIDER_PRESETS[choice];
     if preset.models.is_empty() {
         // Provider with no known models (e.g. "Custom endpoint"): type one.
-        print!("model id: ");
-        let _ = std::io::stdout().flush();
-        let typed = std::io::stdin().lines().next()?.ok()?.trim().to_string();
-        return if typed.is_empty() {
-            None
-        } else {
-            Some((typed, None))
-        };
+        let typed = reader.read_line("model id: ")?.trim().to_string();
+        return if typed.is_empty() { None } else { Some((typed, None)) };
     }
     println!("\n{label} models:\n", label = preset.label);
     for (i, m) in preset.models.iter().enumerate() {
@@ -277,9 +207,7 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
     // Add "other" option for custom model ID
     println!("  {}) other (type a model id)", preset.models.len() + 1);
     let n_models = preset.models.len();
-    print!("\nselect a model [number]: ");
-    let _ = std::io::stdout().flush();
-    let raw = std::io::stdin().lines().next()?.ok()?;
+    let raw = reader.read_line("\nselect a model [number]: ")?;
     match raw.trim().parse::<usize>() {
         Ok(n) if n >= 1 && n <= n_models => Some((
             preset.models[n - 1].id.to_string(),
@@ -287,15 +215,9 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
         )),
         Ok(n) if n == n_models + 1 => {
             // Custom model ID
-            print!("model id: ");
-            let _ = std::io::stdout().flush();
-            let typed = std::io::stdin().lines().next()?.ok()?.trim().to_string();
-            if typed.is_empty() {
-                None
-            } else {
-                Some((typed, None))
-            }
-        },
+            let typed = reader.read_line("model id: ")?.trim().to_string();
+            if typed.is_empty() { None } else { Some((typed, None)) }
+        }
         _ => {
             println!("not a valid choice.");
             None
@@ -306,10 +228,10 @@ fn pick_model_interactive() -> Option<(String, Option<u32>)> {
 /// `/skin` (interactive picker, same as `--select-skin`) or `/skin <name>`
 /// (direct switch) mid-chat. Session-only — use `--select-skin` to persist
 /// a default across runs.
-fn handle_skin_command(arg: &str, skin: &mut Skin) {
+fn handle_skin_command(arg: &str, skin: &mut Skin, reader: &mut LineReader) {
     let names = grace::skin::all_names();
     let picked = if arg.is_empty() {
-        match pick_skin_interactive(&names) {
+        match pick_skin_interactive(&names, reader) {
             Some(n) => n,
             None => return,
         }
@@ -333,12 +255,14 @@ fn handle_skin_command(arg: &str, skin: &mut Skin) {
 /// - `/session` (no arg): interactive picker (lists recent sessions)
 /// - `/session <name>`: switch to that session (loads history)
 /// - `/session new`: start a fresh unnamed session (clears in-memory history)
+/// - `/session new-persist`: start a fresh, immediately-persisted session
 /// - `/session none`: disable session persistence for the rest of the chat
 fn handle_session_command(
     arg: &str,
     sessions: &SessionStore,
     messages: &mut Vec<Message>,
     current_session: &mut Option<String>,
+    reader: &mut LineReader,
 ) {
     if arg.is_empty() {
         // Interactive: list recent sessions and let the user pick.
@@ -363,10 +287,10 @@ fn handle_session_command(
             let preview = preview.chars().take(50).collect::<String>();
             println!("  {}) {}  {}", i + 1, sid, preview);
         }
-        print!("\nselect a session [number, or 0 for new]: ");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        let raw = std::io::stdin().lines().next().and_then(|l| l.ok()).unwrap_or_default();
+        let Some(raw) = reader.read_line("\nselect a session [number, or 0 for new]: ") else {
+            println!("no input — staying on current session.");
+            return;
+        };
         match raw.trim().parse::<usize>() {
             Ok(0) => {
                 messages.clear();
@@ -415,6 +339,23 @@ fn handle_session_command(
             *current_session = None;
             println!("session persistence disabled for this chat.");
         }
+        "list" => {
+            match sessions.list_sessions() {
+                Ok(list) if list.is_empty() => println!("no saved sessions yet."),
+                Ok(list) => {
+                    println!("\nsaved sessions (most recent first):\n");
+                    for sid in &list {
+                        let marker = if current_session.as_deref() == Some(sid.as_str()) {
+                            " (current)"
+                        } else {
+                            ""
+                        };
+                        println!("  {sid}{marker}");
+                    }
+                }
+                Err(e) => println!("error listing sessions: {e}"),
+            }
+        }
         name => {
             match sessions.load(name) {
                 Ok(loaded) => {
@@ -436,8 +377,7 @@ fn handle_session_command(
 /// Shared skin list+preview+select flow, identical presentation to
 /// `--select-skin` so muscle memory carries over between startup and
 /// mid-chat. Returns `None` on unparsable/EOF input (no-op).
-pub(crate) fn pick_skin_interactive(names: &[String]) -> Option<String> {
-    use std::io::Write;
+pub(crate) fn pick_skin_interactive(names: &[String], reader: &mut LineReader) -> Option<String> {
     println!("\navailable skins:\n");
     for (i, name) in names.iter().enumerate() {
         let s = grace::skin::by_name(Some(name));
@@ -459,9 +399,7 @@ pub(crate) fn pick_skin_interactive(names: &[String]) -> Option<String> {
             c = s.style(Role::Code).render(),
         );
     }
-    print!("\nselect a skin [number]: ");
-    let _ = std::io::stdout().flush();
-    let raw = std::io::stdin().lines().next()?.ok()?;
+    let raw = reader.read_line("\nselect a skin [number]: ")?;
     match raw.trim().parse::<usize>() {
         Ok(n) if n >= 1 && n <= names.len() => Some(names[n - 1].clone()),
         _ => {

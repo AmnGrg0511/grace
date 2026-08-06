@@ -4,8 +4,6 @@
 use grace::settings::PROVIDER_PRESETS;
 use grace::transport::ProviderTransport;
 
-use crate::chat::pick_skin_interactive;
-
 /// Interactive first-run picker: provider -> key -> model. Every provider
 /// goes through the exact same three steps — the only branch is *how* step
 /// 2 (the "key") is obtained: typed for a normal HTTP provider, or minted
@@ -182,7 +180,12 @@ pub(crate) fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
         println!("no skins available.");
         return Ok(());
     }
-    let Some(picked) = pick_skin_interactive(&names) else {
+    let history_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".grace")
+        .join("history.txt");
+    let mut reader = crate::line_reader::LineReader::new(history_path);
+    let Some(picked) = crate::chat::pick_skin_interactive(&names, &mut reader) else {
         return Ok(());
     };
 

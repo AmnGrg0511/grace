@@ -190,61 +190,34 @@ impl Config {
 
 /// Helper so `main` can turn CLI flags into a [`Config`].
 impl Config {
-    #[allow(clippy::too_many_arguments)]
     pub fn from_args(
         base_url: Option<String>,
         api_key: Option<String>,
         model: Option<String>,
-        openrouter: bool,
         max_iterations: u32,
         system_prompt: Option<String>,
     ) -> Result<Config> {
-        let transport = if openrouter {
-            let model = model.ok_or_else(|| {
-                AgentError::Config(
-                    "missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into(),
-                )
-            })?;
-            // Prefer explicit --api-key, else the OPENROUTER_API_KEY env var.
-            let api_key = api_key
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-                .map(|k| k.trim().to_string())
-                .filter(|k| !k.is_empty())
-                .ok_or_else(|| {
-                    AgentError::Config(
-                        "missing OpenRouter API key: pass --api-key or set OPENROUTER_API_KEY"
-                            .into(),
-                    )
-                })?;
-            TransportConfig::Http {
-                base_url: OPENROUTER_BASE_URL.to_string(),
-                api_key,
-                model,
-            }
-        } else {
-            let base_url =
-                base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
-            // Fall back to whichever env var the onboarding wizard actually
-            // wrote this key under (~/.grace/.env, loaded into the process
-            // env at startup) — not just OPENROUTER_API_KEY. Without this,
-            // a restarted session with a custom/OpenAI/Copilot base_url
-            // silently sends an empty bearer token (a real regression: the
-            // wizard persists custom keys as GRACE_API_KEY, but this only
-            // ever checked OPENROUTER_API_KEY).
-            let api_key = api_key
-                .or_else(|| std::env::var("GRACE_API_KEY").ok())
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                .or_else(|| std::env::var("GITHUB_COPILOT_TOKEN").ok())
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-                .map(|k| k.trim().to_string())
-                .filter(|k| !k.is_empty())
-                .unwrap_or_default();
-            let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;
-            TransportConfig::Http {
-                base_url,
-                api_key,
-                model,
-            }
+        let base_url = base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
+        // Fall back to whichever env var the onboarding wizard actually
+        // wrote this key under (~/.grace/.env, loaded into the process
+        // env at startup) — not just OPENROUTER_API_KEY. Without this,
+        // a restarted session with a custom/OpenAI/Copilot base_url
+        // silently sends an empty bearer token (a real regression: the
+        // wizard persists custom keys as GRACE_API_KEY, but this only
+        // ever checked OPENROUTER_API_KEY).
+        let api_key = api_key
+            .or_else(|| std::env::var("GRACE_API_KEY").ok())
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .or_else(|| std::env::var("GITHUB_COPILOT_TOKEN").ok())
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .unwrap_or_default();
+        let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;
+        let transport = TransportConfig::Http {
+            base_url,
+            api_key,
+            model,
         };
         Ok(Config {
             transport,

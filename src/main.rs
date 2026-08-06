@@ -26,6 +26,7 @@ use grace::session::SessionStore;
 
 mod cli;
 mod chat;
+mod line_reader;
 mod wizard;
 
 fn main() -> ExitCode {
@@ -92,7 +93,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut api_key: Option<String> = None;
     let mut model: Option<String> = None;
     let mut chat = false;
-    let mut openrouter = false;
     let mut max_iterations: u32 = 256;
     let mut system_prompt: Option<String> = None;
     let mut remember: Option<String> = None;
@@ -128,7 +128,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 i += 2;
             }
             "--openrouter" => {
-                openrouter = true;
+                // Sugar for `--base-url https://openrouter.ai/api/v1` —
+                // OpenRouter is just another Http provider, same as
+                // Copilot/OpenAI/custom; this flag only saves typing the
+                // URL, it does not create a separate code path downstream.
+                base_url = Some(grace::config::OPENROUTER_BASE_URL.to_string());
                 i += 1;
             }
             "--chat" => {
@@ -306,14 +310,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         if api_key.is_none() {
             api_key = Some(picked_key);
         }
-        openrouter = false; // base_url is now explicit, no preset needed
     }
 
     let config = Config::from_args(
         base_url,
         api_key,
         model,
-        openrouter,
         max_iterations,
         system_prompt,
     )
