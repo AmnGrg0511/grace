@@ -223,12 +223,19 @@ impl Config {
         } else {
             let base_url =
                 base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
-            // Fall back to OPENROUTER_API_KEY (or any generic key already in
-            // the environment via ~/.grace/.env) — not just the
-            // --openrouter preset branch. Without this, config.toml-driven
-            // custom base URLs silently send an empty bearer token.
+            // Fall back to whichever env var the onboarding wizard actually
+            // wrote this key under (~/.grace/.env, loaded into the process
+            // env at startup) — not just OPENROUTER_API_KEY. Without this,
+            // a restarted session with a custom/OpenAI/Copilot base_url
+            // silently sends an empty bearer token (a real regression: the
+            // wizard persists custom keys as GRACE_API_KEY, but this only
+            // ever checked OPENROUTER_API_KEY).
             let api_key = api_key
+                .or_else(|| std::env::var("GRACE_API_KEY").ok())
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                .or_else(|| std::env::var("GITHUB_COPILOT_TOKEN").ok())
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+                .filter(|k| !k.is_empty())
                 .unwrap_or_default();
             let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;
             TransportConfig::Http {
