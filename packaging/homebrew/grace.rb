@@ -5,21 +5,21 @@ class Grace < Formula
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.9/grace-aarch64-apple-darwin.tar.gz"
-      sha256 "4027550bc62edac39d42a12a8e172ef2adcaba28c21da97b0be3713cea501f5c"
+      url "https://github.com/AmnGrg0511/grace/releases/download/v0.2.0/grace-aarch64-apple-darwin.tar.gz"
+      sha256 "6a6308c90f6375bf380fc4cec56d0ea03c6c240968047668d17e09314dd303e0"
     else
-      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.9/grace-x86_64-apple-darwin.tar.gz"
-      sha256 "be00959a548f2323ef9e82cbbe8da82e11ea3f9a1fc02fade64c08116e565938"
+      url "https://github.com/AmnGrg0511/grace/releases/download/v0.2.0/grace-x86_64-apple-darwin.tar.gz"
+      sha256 "148683027c97174184a0368abf5a47f4da1c096ba53172426ceb01999ad37826"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.9/grace-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "bfa5ec272344546169fa66c5e66762ba3204661a77df5618995861a52b9ac502"
+      url "https://github.com/AmnGrg0511/grace/releases/download/v0.2.0/grace-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "898ab366d42460cb1aad6320b3e1c7f07a6778282986627f4df661b6ca35bab2"
     else
-      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.9/grace-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "bcf6a5ae9588c547007f1294d37843f1e53f544426569846a95fbedc7fc3c3ee"
+      url "https://github.com/AmnGrg0511/grace/releases/download/v0.2.0/grace-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "52acf5e10758721176fd7bb7cda08df5ff388b0384f58a509f29a7da454c5ccd"
     end
   end
 
