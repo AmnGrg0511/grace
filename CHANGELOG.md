@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.1
+
+**Fixed**
+- `--chat` default session id collided across unrelated terminals (all
+  landed in the same session); now derived from the controlling tty so
+  concurrent terminals never share a session. Live-verified against a real
+  endpoint with two concurrently running named sessions.
+- GitHub Copilot: removed as a special-cased transport and CLI flag
+  entirely. Picking "GitHub Copilot" in onboarding now runs the OAuth
+  device flow as the picker's key-entry step and wires the result up as an
+  ordinary `Http` transport (base_url + bearer token) — identical code path
+  to every other provider from that point on. No `--copilot` flag exists
+  anywhere in the CLI surface.
+- Onboarding model selection now queries the provider's live `/models`
+  endpoint (context windows included) instead of only showing the
+  hardcoded preset list; falls back to presets if the live call fails.
+  Live-verified against a real self-hosted endpoint (11 real models
+  returned, not presets).
+
 ## v0.2.0
 
 **Fixed**
