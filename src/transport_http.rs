@@ -272,24 +272,31 @@ impl ProviderTransport for HttpTransport {
         match req.send() {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    let json: Value = resp.json().map_err(|e| AgentError::Transport(format!("Failed to parse models response: {e}")))?;
-                    let empty_vec = Vec::new();
-                    let models = json.get("data").and_then(Value::as_array).unwrap_or(&empty_vec);
-                    let result: Vec<ModelInfo> = models.iter().filter_map(|m| {
-                        let id = m.get("id")?.as_str()?;
-                        let name = m.get("name").and_then(Value::as_str).unwrap_or(id);
-                        let context_window = m.get("context_window").and_then(Value::as_u64).map(|v| v as u32);
-                        let max_output_tokens = m.get("max_output_tokens").and_then(Value::as_u64).map(|v| v as u32);
-                        Some(ModelInfo {
-                            id: id.to_string(),
-                            name: name.to_string(),
-                            context_window,
-                            max_output_tokens,
-                            provider: "openai-http".to_string(),
-                        })
-                    }).collect();
-                    if !result.is_empty() {
-                        return Ok(result);
+                    // A malformed/non-JSON 200 body (e.g. an HTML error
+                    // page from a misconfigured proxy) must fall through to
+                    // the empty-list fallback below, not hard-fail the
+                    // whole call — this endpoint is best-effort by design.
+                    if let Ok(json) = resp.json::<Value>() {
+                        let empty_vec = Vec::new();
+                        let models = json.get("data").and_then(Value::as_array).unwrap_or(&empty_vec);
+                        let result: Vec<ModelInfo> = models.iter().filter_map(|m| {
+                            let id = m.get("id")?.as_str()?;
+                            let name = m.get("name").and_then(Value::as_str).unwrap_or(id);
+                            let context_window = m.get("context_window").and_then(Value::as_u64).map(|v| v as u32);
+                            let max_output_tokens = m.get("max_output_tokens").and_then(Value::as_u64).map(|v| v as u32);
+                            Some(ModelInfo {
+                                id: id.to_string(),
+                                name: name.to_string(),
+                                context_window,
+                                max_output_tokens,
+                                provider: "openai-http".to_string(),
+                            })
+                        }).collect();
+                        if !result.is_empty() {
+                            return Ok(result);
+                        }
+                    } else {
+                        eprintln!("[grace] warning: {models_url} returned a non-JSON 200 response");
                     }
                 }
             }

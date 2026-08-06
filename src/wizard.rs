@@ -22,15 +22,20 @@ use crate::chat::pick_skin_interactive;
 pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::error::Error>> {
     use std::io::Write;
     let mut stdin_lines = std::io::stdin().lines();
-    let mut prompt_read = |label: &str| -> String {
+    // Returns `None` on real EOF (piped/closed stdin) so callers can bail
+    // out with a clear error instead of looping forever re-prompting on an
+    // input source that will never produce another line — e.g. `grace`
+    // run under a non-interactive script/CI with no stdin attached.
+    let mut prompt_read = |label: &str| -> Option<String> {
         print!("{label}");
         let _ = std::io::stdout().flush();
-        stdin_lines
-            .next()
-            .and_then(|l| l.ok())
-            .unwrap_or_default()
-            .trim()
-            .to_string()
+        Some(stdin_lines.next()?.ok()?.trim().to_string())
+    };
+    let no_stdin = || -> Box<dyn std::error::Error> {
+        "no model/provider configured and stdin is not interactive (EOF) — \
+         run `grace --base-url <url> --api-key <key> --model <id>` non-interactively, \
+         or run once from a real terminal to complete onboarding"
+            .into()
     };
 
     println!(
@@ -40,7 +45,9 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
         println!("  {}) {}", i + 1, p.label);
     }
     let choice: usize = loop {
-        let raw = prompt_read("\nselect a provider [number]: ");
+        let Some(raw) = prompt_read("\nselect a provider [number]: ") else {
+            return Err(no_stdin());
+        };
         match raw.parse::<usize>() {
             Ok(n) if n >= 1 && n <= PROVIDER_PRESETS.len() => break n - 1,
             _ => println!("enter a number between 1 and {}", PROVIDER_PRESETS.len()),
@@ -53,6 +60,7 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
         preset.base_url.to_string()
     } else {
         prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
+            .ok_or_else(no_stdin)?
     };
 
     // Step 2, "the key": every provider gets asked for one. A normal HTTP
@@ -62,15 +70,14 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
     let api_key = if is_copilot {
         grace::transport_copilot::get_or_create_token()?
     } else {
-        std::env::var(preset.env_var)
-            .ok()
-            .filter(|k| !k.is_empty())
-            .unwrap_or_else(|| {
-                prompt_read(&format!(
-                    "API key for {} (or set ${} and re-run): ",
-                    preset.label, preset.env_var
-                ))
-            })
+        match std::env::var(preset.env_var).ok().filter(|k| !k.is_empty()) {
+            Some(k) => k,
+            None => prompt_read(&format!(
+                "API key for {} (or set ${} and re-run): ",
+                preset.label, preset.env_var
+            ))
+            .ok_or_else(no_stdin)?,
+        }
     };
 
     // Step 3: ask the provider itself what models it has, rather than
@@ -96,14 +103,14 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
         }
         println!("  {}) other (type a model id)", live_models.len() + 1);
         loop {
-            let raw = prompt_read("\nselect a model [number]: ");
+            let raw = prompt_read("\nselect a model [number]: ").ok_or_else(no_stdin)?;
             if let Ok(n) = raw.parse::<usize>() {
                 if n >= 1 && n <= live_models.len() {
                     let m = &live_models[n - 1];
                     break (m.id.clone(), m.context_window);
                 }
                 if n == live_models.len() + 1 {
-                    let typed = prompt_read("model id: ");
+                    let typed = prompt_read("model id: ").ok_or_else(no_stdin)?;
                     let ctx = crate::chat::fetch_context_window(&typed, &base_url, &api_key);
                     break (typed, ctx);
                 }
@@ -120,14 +127,14 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
         }
         println!("  {}) other (type a model id)", preset.models.len() + 1);
         loop {
-            let raw = prompt_read("\nselect a model [number]: ");
+            let raw = prompt_read("\nselect a model [number]: ").ok_or_else(no_stdin)?;
             if let Ok(n) = raw.parse::<usize>() {
                 if n >= 1 && n <= preset.models.len() {
                     let m = &preset.models[n - 1];
                     break (m.id.to_string(), Some(m.context_window));
                 }
                 if n == preset.models.len() + 1 {
-                    let typed = prompt_read("model id: ");
+                    let typed = prompt_read("model id: ").ok_or_else(no_stdin)?;
                     let ctx = crate::chat::fetch_context_window(&typed, &base_url, &api_key);
                     break (typed, ctx);
                 }
@@ -135,7 +142,7 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
             println!("enter a valid number");
         }
     } else {
-        (prompt_read("model id: "), None)
+        (prompt_read("model id: ").ok_or_else(no_stdin)?, None)
     };
 
     // Persist: model + base_url + context window go to config.toml; the

@@ -208,6 +208,7 @@ impl Config {
             // Prefer explicit --api-key, else the OPENROUTER_API_KEY env var.
             let api_key = api_key
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+                .map(|k| k.trim().to_string())
                 .filter(|k| !k.is_empty())
                 .ok_or_else(|| {
                     AgentError::Config(
@@ -235,6 +236,7 @@ impl Config {
                 .or_else(|| std::env::var("OPENAI_API_KEY").ok())
                 .or_else(|| std::env::var("GITHUB_COPILOT_TOKEN").ok())
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+                .map(|k| k.trim().to_string())
                 .filter(|k| !k.is_empty())
                 .unwrap_or_default();
             let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;

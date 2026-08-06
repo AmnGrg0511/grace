@@ -111,15 +111,20 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 i += 2;
             }
             "--base-url" => {
-                base_url = args.get(i + 1).cloned();
+                // Trimmed: a copy-pasted URL/key with a trailing newline or
+                // space (common when piping from a password manager or
+                // shell var) would otherwise reach the HTTP client verbatim
+                // and fail with an opaque connection/auth error instead of
+                // just working.
+                base_url = args.get(i + 1).map(|s| s.trim().to_string());
                 i += 2;
             }
             "--api-key" => {
-                api_key = args.get(i + 1).cloned();
+                api_key = args.get(i + 1).map(|s| s.trim().to_string());
                 i += 2;
             }
             "--model" => {
-                model = args.get(i + 1).cloned();
+                model = args.get(i + 1).map(|s| s.trim().to_string());
                 i += 2;
             }
             "--openrouter" => {
