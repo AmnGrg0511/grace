@@ -12,6 +12,63 @@ use crate::transport::{
 };
 use serde_json::{json, Value};
 
+/// Best-effort API fetch to discover a model's context window. Covers
+/// OpenRouter (GET /api/v1/models) and OpenAI (GET /v1/models/{id});
+/// everything else returns `None` silently. Lives in the transport layer
+/// (not `main.rs`) since it's an HTTP call against the same providers
+/// `HttpTransport` talks to — CLI code shouldn't own network calls.
+pub fn fetch_context_window(model: &str, base_url: &str, api_key: &str) -> Option<u32> {
+    // OpenRouter: list endpoint returns context_length per model.
+    if base_url.contains("openrouter") {
+        let url = format!(
+            "{}/api/v1/models",
+            base_url.trim_end_matches("/v1").trim_end_matches('/')
+        );
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).bearer_auth(api_key).send().ok()?;
+        let data: serde_json::Value = resp.json().ok()?;
+        let arr = data.get("data").and_then(|d| d.as_array())?;
+        for entry in arr {
+            let id = entry.get("id").and_then(|v| v.as_str())?;
+            if id == model {
+                return entry
+                    .get("context_length")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+            }
+            // Also match on model family prefix (e.g. "anthropic/claude-sonnet-4-*")
+            if model.starts_with(id) || id.starts_with(model) {
+                return entry
+                    .get("context_length")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+            }
+        }
+        return None;
+    }
+    // OpenAI: the models/{id} endpoint returns max_context_window for some.
+    if base_url.contains("openai.com") {
+        let url = format!(
+            "{}/models/{}",
+            base_url.trim_end_matches('/'),
+            crate::transport::urlencoding(model)
+        );
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).bearer_auth(api_key).send().ok()?;
+        let data: serde_json::Value = resp.json().ok()?;
+        if let Some(ctx) = data.pointer("/max_context_window") {
+            return ctx.as_u64().map(|n| n as u32);
+        }
+    }
+    None
+}
+
 /// A transport that POSTs to an OpenAI-compatible `/chat/completions`.
 pub struct HttpTransport {
     client: reqwest::blocking::Client,

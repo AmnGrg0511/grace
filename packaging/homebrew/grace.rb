@@ -5,21 +5,21 @@ class Grace < Formula
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.0/grace-aarch64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_ACTUAL_SHA256"
+      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.9/grace-aarch64-apple-darwin.tar.gz"
+      sha256 "4027550bc62edac39d42a12a8e172ef2adcaba28c21da97b0be3713cea501f5c"
     else
-      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.0/grace-x86_64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_ACTUAL_SHA256"
+      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.9/grace-x86_64-apple-darwin.tar.gz"
+      sha256 "be00959a548f2323ef9e82cbbe8da82e11ea3f9a1fc02fade64c08116e565938"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.0/grace-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "REPLACE_WITH_ACTUAL_SHA256"
+      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.9/grace-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "bfa5ec272344546169fa66c5e66762ba3204661a77df5618995861a52b9ac502"
     else
-      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.0/grace-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "REPLACE_WITH_ACTUAL_SHA256"
+      url "https://github.com/AmnGrg0511/grace/releases/download/v0.1.9/grace-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "bcf6a5ae9588c547007f1294d37843f1e53f544426569846a95fbedc7fc3c3ee"
     end
   end
 

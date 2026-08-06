@@ -3,15 +3,16 @@
 use crate::error::{AgentError, Result};
 use crate::message::Message;
 use crate::transport::{
-    parse_openai_message, tools_to_json, FinishReason, ModelInfo, ModelResponse, ProviderTransport, ToolSpec,
+    parse_openai_message, tools_to_json, ModelInfo, ModelResponse, ProviderTransport, ToolSpec,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// GitHub Copilot OAuth device flow response.
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct DeviceCodeResponse {
     device_code: String,
     user_code: String,
@@ -22,6 +23,7 @@ struct DeviceCodeResponse {
 
 /// GitHub OAuth token response.
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct TokenResponse {
     access_token: Option<String>,
     token_type: String,
@@ -32,17 +34,9 @@ struct TokenResponse {
     error_description: Option<String>,
 }
 
-/// GitHub Copilot model from /models endpoint.
-#[derive(Deserialize, Debug, Clone)]
-struct CopilotModel {
-    id: String,
-    name: String,
-}
-
 /// GitHub Copilot transport using device flow authentication.
 pub struct CopilotTransport {
     client: reqwest::blocking::Client,
-    api_key: String,
     model: RefCell<String>,
     base_url: String,
 }
@@ -50,15 +44,15 @@ pub struct CopilotTransport {
 impl CopilotTransport {
     /// Create a new Copilot transport with device flow authentication.
     pub fn new(_model: impl Into<String>) -> Result<Self> {
-        // Try to get token from environment
-        let api_key = Self::get_or_create_token()?;
-        
+        // Ensure a token is available (device flow if needed); the token is
+        // re-fetched per request via get_access_token(), not cached here.
+        Self::get_or_create_token()?;
+
         Ok(Self {
             client: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
                 .map_err(|e| AgentError::Transport(format!("HTTP client error: {e}")))?,
-            api_key,
             model: RefCell::new("gpt-4o".to_string()),
             base_url: "https://api.githubcopilot.com".to_string(),
         })
@@ -105,9 +99,6 @@ impl CopilotTransport {
 
     /// Start device flow authentication.
     fn start_device_flow() -> Result<DeviceCodeResponse> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
         let resp = reqwest::blocking::Client::new()
             .post("https://github.com/login/device/code")
             .header("Accept", "application/json")
@@ -119,7 +110,6 @@ impl CopilotTransport {
 
     /// Poll for token after device flow started.
     fn poll_token(device_code: &str, _interval: u64) -> Result<String> {
-        let client = reqwest::blocking::Client::new();
         let max_attempts = 120; // 10 minutes max
         for attempt in 0..max_attempts {
             std::thread::sleep(Duration::from_secs(5));
@@ -225,7 +215,7 @@ impl ProviderTransport for CopilotTransport {
         };
 
         let token = self.get_access_token()?;
-        
+
         let args = json!({
             "model": model,
             "messages": messages,
@@ -236,12 +226,10 @@ impl ProviderTransport for CopilotTransport {
         });
 
         let url = self.endpoint("/chat/completions");
-        let token = std::env::var("GITHUB_COPILOT_TOKEN")
-            .map_err(|_| AgentError::Config("GITHUB_COPILOT_TOKEN not set".into()))?;
 
         let resp = self.client
-            .post(self.endpoint("/chat/completions"))
-            .header("Authorization", format!("Bearer {}", std::env::var("GITHUB_COPILOT_TOKEN").unwrap()))
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json")
             .json(&args)
             .send()
@@ -302,9 +290,7 @@ impl CopilotTransport {
                     .map(|v| v as u32)
                     .or_else(|| {
                         // Default context windows based on model name
-                        if id.contains("gpt-4o") {
-                            Some(128000)
-                        } else if id.contains("gpt-4-turbo") {
+                        if id.contains("gpt-4o") || id.contains("gpt-4-turbo") {
                             Some(128000)
                         } else if id.contains("gpt-3.5") {
                             Some(16384)

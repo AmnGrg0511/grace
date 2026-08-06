@@ -9,6 +9,13 @@ use crate::message::Message;
 use serde::Serialize;
 use serde_json::Value;
 
+/// Encode '/' and other URI-unfriendly chars for model-id path segments.
+pub fn urlencoding(s: &str) -> String {
+    s.replace('/', "%2F")
+        .replace('.', "%2E")
+        .replace(':', "%3A")
+}
+
 /// The set of tools, in the OpenAI tool-spec shape, that the model may call.
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
