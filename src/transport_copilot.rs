@@ -1,14 +1,20 @@
-//! GitHub Copilot transport — device flow authentication + OpenAI-compatible API.
+//! GitHub Copilot OAuth device flow — mints a bearer token the same way a
+//! normal provider's API key would be typed in, except this one is fetched
+//! via browser authorization instead of pasted. Once minted, Copilot is
+//! wired up as a plain [`crate::config::TransportConfig::Http`] pointed at
+//! `https://api.githubcopilot.com` — there is no separate Copilot transport
+//! or CLI flag; the *only* difference from any other provider is how this
+//! one function obtains the key.
 
 use crate::error::{AgentError, Result};
-use crate::message::Message;
-use crate::transport::{
-    parse_openai_message, tools_to_json, ModelInfo, ModelResponse, ProviderTransport, ToolSpec,
-};
+use crate::transport::ModelInfo;
 use serde::Deserialize;
-use serde_json::{json, Value};
-use std::cell::RefCell;
+use serde_json::Value;
 use std::time::Duration;
+
+/// GitHub Copilot's OpenAI-compatible base URL — a plain HTTP preset like
+/// any other provider's.
+pub const BASE_URL: &str = "https://api.githubcopilot.com";
 
 /// GitHub Copilot OAuth device flow response.
 #[derive(Deserialize)]
@@ -34,341 +40,154 @@ struct TokenResponse {
     error_description: Option<String>,
 }
 
-/// GitHub Copilot transport using device flow authentication.
-pub struct CopilotTransport {
-    client: reqwest::blocking::Client,
-    model: RefCell<String>,
-    base_url: String,
+/// Get a Copilot bearer token, running the OAuth device flow (browser +
+/// one-time code) if none is cached yet. This is the "key" step for
+/// Copilot — same conceptual step every other provider has, just backed by
+/// OAuth instead of manual paste. Returns the token; the caller persists it
+/// to `~/.grace/.env` exactly like a typed API key.
+pub fn get_or_create_token() -> Result<String> {
+    if let Ok(token) = std::env::var("GITHUB_COPILOT_TOKEN") {
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+
+    let device_code = start_device_flow()?;
+
+    println!("\n🔐 GitHub Copilot Authentication Required");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Please authorize GitHub Copilot in your browser:");
+    println!();
+    println!("  1. Open: {}", device_code.verification_uri);
+    println!("  2. Enter code: {}", device_code.user_code);
+    println!();
+    println!("Waiting for authorization... (press Ctrl+C to cancel)");
+
+    let token = poll_token(&device_code.device_code)?;
+    println!("\n✅ Authentication successful!\n");
+    Ok(token)
 }
 
-impl CopilotTransport {
-    /// Create a new Copilot transport with device flow authentication.
-    pub fn new(_model: impl Into<String>) -> Result<Self> {
-        // Ensure a token is available (device flow if needed); the token is
-        // re-fetched per request via get_access_token(), not cached here.
-        Self::get_or_create_token()?;
+fn start_device_flow() -> Result<DeviceCodeResponse> {
+    let resp = reqwest::blocking::Client::new()
+        .post("https://github.com/login/device/code")
+        .header("Accept", "application/json")
+        .form(&[("client_id", "Iv1.b507a08c87ecfe98"), ("scope", "copilot")])
+        .send()?
+        .json::<DeviceCodeResponse>()?;
+    Ok(resp)
+}
 
-        Ok(Self {
-            client: reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .map_err(|e| AgentError::Transport(format!("HTTP client error: {e}")))?,
-            model: RefCell::new("gpt-4o".to_string()),
-            base_url: "https://api.githubcopilot.com".to_string(),
-        })
-    }
-
-    /// Get or create GitHub Copilot token using device flow
-    fn get_or_create_token() -> Result<String> {
-        // First check for GITHUB_COPILOT_TOKEN env var
-        if let Ok(token) = std::env::var("GITHUB_COPILOT_TOKEN") {
-            if !token.is_empty() {
-                return Ok(token);
-            }
-        }
-        
-        // Trigger device flow
-        let device_code = Self::start_device_flow()?;
-        
-        println!("\n🔐 GitHub Copilot Authentication Required");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Please authorize GitHub Copilot in your browser:");
-        println!();
-        println!("  1. Open: {}", device_code.verification_uri);
-        println!("  2. Enter code: {}", device_code.user_code);
-        println!();
-        println!("Waiting for authorization... (press Ctrl+C to cancel)");
-        
-        // Poll for token
-        let token = Self::poll_token(&device_code.device_code, device_code.interval)?;
-        
-        // Save token to .env file (like onboarding wizard does)
-        let env_path = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".grace")
-            .join(".env");
-        if let Some(parent) = env_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&env_path, format!("GITHUB_COPILOT_TOKEN={}\n", token));
-        
-        println!("\n✅ Authentication successful! Token saved to ~/.grace/.env for future use.\n");
-        
-        Ok(token)
-    }
-
-    /// Start device flow authentication.
-    fn start_device_flow() -> Result<DeviceCodeResponse> {
+fn poll_token(device_code: &str) -> Result<String> {
+    let max_attempts = 120; // 10 minutes max
+    for attempt in 0..max_attempts {
+        std::thread::sleep(Duration::from_secs(5));
         let resp = reqwest::blocking::Client::new()
-            .post("https://github.com/login/device/code")
+            .post("https://github.com/login/oauth/access_token")
             .header("Accept", "application/json")
-            .form(&[("client_id", "Iv1.b507a08c87ecfe98"), ("scope", "copilot")])
-            .send()?
-            .json::<DeviceCodeResponse>()?;
-        Ok(resp)
-    }
+            .form(&[
+                ("client_id", "Iv1.b507a08c87ecfe98"),
+                ("device_code", device_code),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ])
+            .send()?;
 
-    /// Poll for token after device flow started.
-    fn poll_token(device_code: &str, _interval: u64) -> Result<String> {
-        let max_attempts = 120; // 10 minutes max
-        for attempt in 0..max_attempts {
-            std::thread::sleep(Duration::from_secs(5));
-            let resp = reqwest::blocking::Client::new()
-                .post("https://github.com/login/oauth/access_token")
-                .header("Accept", "application/json")
-                .form(&[
-                    ("client_id", "Iv1.b507a08c87ecfe98"),
-                    ("device_code", device_code),
-                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                ])
-                .send()?;
-            
-            let status = resp.status();
-            let text = resp.text().map_err(|e| AgentError::Transport(format!("Failed to read response: {e}")))?;
-            
-            // Check for error conditions in text BEFORE trying to parse JSON
-            if text.contains("authorization_pending") {
-                continue;
-            }
-            if text.contains("slow_down") {
-                continue;
-            }
-            if text.contains("expired_token") {
-                return Err(AgentError::Config("Device code expired".into()));
-            }
-            if text.contains("access_denied") {
-                return Err(AgentError::Config("User denied authorization".into()));
-            }
-            
-            if !status.is_success() {
-                if attempt % 6 == 0 { // Print every 30 seconds
-                    eprintln!("Polling... (attempt {}/{})", attempt + 1, max_attempts);
-                }
-                continue;
-            }
-            
-            // Try to parse as JSON
-            let token_resp: TokenResponse = serde_json::from_str(&text)
-                .map_err(|e| AgentError::Transport(format!("Failed to parse token response: {e}. Raw: {}", Self::truncate(&text, 200))))?;
-            
-            if let Some(token) = token_resp.access_token {
-                if !token.is_empty() {
-                    return Ok(token);
-                }
-            }
-            
-            if let Some(err) = &token_resp.error {
-                if err == "authorization_pending" {
-                    continue;
-                }
-                if err == "slow_down" {
-                    continue;
-                }
-                if err == "expired_token" {
-                    return Err(AgentError::Config("Device code expired".into()));
-                }
-                if err == "access_denied" {
-                    return Err(AgentError::Config("User denied authorization".into()));
-                }
-            }
+        let status = resp.status();
+        let text = resp
+            .text()
+            .map_err(|e| AgentError::Transport(format!("Failed to read response: {e}")))?;
+
+        if text.contains("authorization_pending") || text.contains("slow_down") {
+            continue;
         }
-        Err(AgentError::Config("Device flow timed out".into()))
-    }
-    
-    /// Get or create access token (with caching)
-    fn get_access_token(&self) -> Result<String> {
-        // Check for GITHUB_COPILOT_TOKEN env var first (highest priority)
-        if let Ok(token) = std::env::var("GITHUB_COPILOT_TOKEN") {
+        if text.contains("expired_token") {
+            return Err(AgentError::Config("Device code expired".into()));
+        }
+        if text.contains("access_denied") {
+            return Err(AgentError::Config("User denied authorization".into()));
+        }
+        if !status.is_success() {
+            if attempt % 6 == 0 {
+                eprintln!("Polling... (attempt {}/{})", attempt + 1, max_attempts);
+            }
+            continue;
+        }
+
+        let token_resp: TokenResponse = serde_json::from_str(&text).map_err(|e| {
+            AgentError::Transport(format!(
+                "Failed to parse token response: {e}. Raw: {}",
+                truncate(&text, 200)
+            ))
+        })?;
+
+        if let Some(token) = token_resp.access_token {
             if !token.is_empty() {
                 return Ok(token);
             }
         }
-        
-        // Fallback: require env var (dotenv should have loaded .env)
-        Err(AgentError::Config(
-            "GITHUB_COPILOT_TOKEN not set. Run with --copilot to trigger device flow auth.".into()
-        ))
-    }
-
-    /// Build the Copilot API endpoint URL
-    fn endpoint(&self, path: &str) -> String {
-        format!("{}{}", self.base_url.trim_end_matches('/'), path)
-    }
-}
-
-impl ProviderTransport for CopilotTransport {
-    fn name(&self) -> &str {
-        "github-copilot"
-    }
-
-    fn complete(
-        &self,
-        messages: &[Message],
-        tools: &[ToolSpec],
-        _model: &str,
-    ) -> Result<ModelResponse> {
-        let model_owned = self.model.borrow().clone();
-        let model = if model_owned.is_empty() {
-            "gpt-4o"
-        } else {
-            &model_owned
-        };
-
-        let token = self.get_access_token()?;
-
-        let args = json!({
-            "model": model,
-            "messages": messages,
-            "temperature": 0.0,
-            "tools": tools_to_json(tools),
-            "tool_choice": if !tools.is_empty() { json!("auto") } else { json!(null) },
-            "stream": false,
-        });
-
-        let url = self.endpoint("/chat/completions");
-
-        let resp = self.client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .json(&args)
-            .send()
-            .map_err(|e| AgentError::Transport(format!("Copilot request failed: {e}")))?
-            .json::<Value>()
-            .map_err(|e| AgentError::Transport(format!("Failed to parse Copilot response: {e}")))?;
-
-        // Parse OpenAI-compatible response
-        parse_openai_message(&resp, None)
-    }
-
-    fn set_model(&self, model: &str) {
-        *self.model.borrow_mut() = model.to_string();
-    }
-
-    fn current_model(&self) -> Option<String> {
-        let m = self.model.borrow();
-        if m.is_empty() { None } else { Some(m.clone()) }
-    }
-
-    fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        // Try to fetch models from Copilot API, fall back to known models
-        match self.fetch_models_from_api() {
-            Ok(models) => Ok(models),
-            Err(_) => Ok(self.known_models()),
-        }
-    }
-}
-
-impl CopilotTransport {
-    /// Fetch models from GitHub Copilot API
-    fn fetch_models_from_api(&self) -> Result<Vec<ModelInfo>> {
-        let token = self.get_access_token()?;
-        let url = self.endpoint("/models");
-        
-        let resp = self.client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Accept", "application/json")
-            .send()
-            .map_err(|e| AgentError::Transport(format!("Copilot models request failed: {e}")))?
-            .json::<Value>()
-            .map_err(|e| AgentError::Transport(format!("Failed to parse Copilot models response: {e}")))?;
-
-        // Parse the models array from the response
-        let models = resp["data"].as_array()
-            .ok_or_else(|| AgentError::Transport("Invalid models response format".into()))?;
-        
-        let mut result = Vec::new();
-        for model in models {
-            if let (Some(id), Some(name)) = (
-                model["id"].as_str(),
-                model["name"].as_str(),
-            ) {
-                // Try to get context window from capabilities or use defaults
-                let context_window = model["capabilities"]["context_window"]
-                    .as_u64()
-                    .map(|v| v as u32)
-                    .or_else(|| {
-                        // Default context windows based on model name
-                        if id.contains("gpt-4o") || id.contains("gpt-4-turbo") {
-                            Some(128000)
-                        } else if id.contains("gpt-3.5") {
-                            Some(16384)
-                        } else {
-                            Some(8192)
-                        }
-                    });
-                
-                let max_output_tokens = model["capabilities"]["max_output_tokens"]
-                    .as_u64()
-                    .map(|v| v as u32)
-                    .or_else(|| {
-                        if id.contains("gpt-4o") && !id.contains("mini") {
-                            Some(16384)
-                        } else if id.contains("gpt-4-turbo") {
-                            Some(4096)
-                        } else if id.contains("gpt-4o-mini") {
-                            Some(16384)
-                        } else {
-                            Some(4096)
-                        }
-                    });
-
-                result.push(ModelInfo {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    context_window,
-                    max_output_tokens,
-                    provider: "github-copilot".to_string(),
-                });
+        match token_resp.error.as_deref() {
+            Some("authorization_pending") | Some("slow_down") => continue,
+            Some("expired_token") => return Err(AgentError::Config("Device code expired".into())),
+            Some("access_denied") => {
+                return Err(AgentError::Config("User denied authorization".into()))
             }
-        }
-        
-        if result.is_empty() {
-            return Err(AgentError::Transport("No models found in Copilot response".into()));
-        }
-        
-        Ok(result)
-    }
-
-    /// Known Copilot models as fallback
-    fn known_models(&self) -> Vec<ModelInfo> {
-        vec![
-            ModelInfo {
-                id: "gpt-4o".to_string(),
-                name: "GPT-4o".to_string(),
-                context_window: Some(128000),
-                max_output_tokens: Some(16384),
-                provider: "github-copilot".to_string(),
-            },
-            ModelInfo {
-                id: "gpt-4o-mini".to_string(),
-                name: "GPT-4o mini".to_string(),
-                context_window: Some(128000),
-                max_output_tokens: Some(16384),
-                provider: "github-copilot".to_string(),
-            },
-            ModelInfo {
-                id: "gpt-4-turbo".to_string(),
-                name: "GPT-4 Turbo".to_string(),
-                context_window: Some(128000),
-                max_output_tokens: Some(4096),
-                provider: "github-copilot".to_string(),
-            },
-        ]
-    }
-
-    fn truncate(s: &str, max: usize) -> String {
-        if s.len() <= max {
-            s.to_string()
-        } else {
-            format!("{}... [truncated {} bytes]", &s[..max], s.len() - max)
+            _ => {}
         }
     }
+    Err(AgentError::Config("Device flow timed out".into()))
 }
 
-impl Default for CopilotTransport {
-    fn default() -> Self {
-        Self::new("gpt-4o").expect("Failed to create CopilotTransport")
+/// Fetch Copilot's live model list via its `/models` endpoint. Its response
+/// shape nests context window/max-output under `capabilities`, unlike the
+/// flat shape most OpenAI-compatible providers use, so this can't share
+/// `HttpTransport::list_models` — kept here since it's Copilot-specific.
+pub fn fetch_models(token: &str) -> Result<Vec<ModelInfo>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| AgentError::Transport(format!("HTTP client error: {e}")))?;
+    let resp = client
+        .get(format!("{BASE_URL}/models"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|e| AgentError::Transport(format!("Copilot models request failed: {e}")))?
+        .json::<Value>()
+        .map_err(|e| AgentError::Transport(format!("Failed to parse Copilot models response: {e}")))?;
+
+    let models = resp["data"]
+        .as_array()
+        .ok_or_else(|| AgentError::Transport("Invalid models response format".into()))?;
+
+    let mut result = Vec::new();
+    for model in models {
+        let (Some(id), Some(name)) = (model["id"].as_str(), model["name"].as_str()) else {
+            continue;
+        };
+        let context_window = model["capabilities"]["context_window"]
+            .as_u64()
+            .map(|v| v as u32);
+        let max_output_tokens = model["capabilities"]["max_output_tokens"]
+            .as_u64()
+            .map(|v| v as u32);
+        result.push(ModelInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            context_window,
+            max_output_tokens,
+            provider: "github-copilot".to_string(),
+        });
+    }
+    if result.is_empty() {
+        return Err(AgentError::Transport("No models found in Copilot response".into()));
+    }
+    Ok(result)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}... [truncated {} bytes]", &s[..max], s.len() - max)
     }
 }

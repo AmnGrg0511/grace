@@ -60,14 +60,13 @@ pub fn load_soul() -> String {
 /// How the agent reaches a model.
 #[derive(Debug, Clone)]
 pub enum TransportConfig {
-    /// Real OpenAI-compatible endpoint (any base_url, including OpenRouter's).
+    /// Real OpenAI-compatible endpoint (any base_url, including OpenRouter's
+    /// and GitHub Copilot's — Copilot is just an `Http` transport whose key
+    /// happens to be minted via OAuth device flow instead of pasted; see
+    /// `transport_copilot::get_or_create_token`).
     Http {
         base_url: String,
         api_key: String,
-        model: String,
-    },
-    /// GitHub Copilot via device flow authentication.
-    Copilot {
         model: String,
     },
 }
@@ -87,11 +86,6 @@ impl TransportConfig {
                 base_url.clone(),
                 "--api-key".to_string(),
                 api_key.clone(),
-                "--model".to_string(),
-                model.clone(),
-            ],
-            TransportConfig::Copilot { model } => vec![
-                "--copilot".to_string(),
                 "--model".to_string(),
                 model.clone(),
             ],
@@ -149,9 +143,6 @@ impl Config {
                 api_key.clone(),
                 model.clone(),
             ))),
-            TransportConfig::Copilot { model } => Ok(Box::new(
-                crate::transport_copilot::CopilotTransport::new(model)?,
-            )),
         }
     }
 
@@ -159,7 +150,6 @@ impl Config {
     pub fn model(&self) -> &str {
         match &self.transport {
             TransportConfig::Http { model, .. } => model,
-            TransportConfig::Copilot { model } => model,
         }
     }
 
@@ -206,18 +196,10 @@ impl Config {
         api_key: Option<String>,
         model: Option<String>,
         openrouter: bool,
-        copilot: bool,
         max_iterations: u32,
         system_prompt: Option<String>,
     ) -> Result<Config> {
-        let transport = if copilot {
-            let model = model.ok_or_else(|| {
-                AgentError::Config(
-                    "missing --model (Copilot needs e.g. gpt-4o)".into(),
-                )
-            })?;
-            TransportConfig::Copilot { model }
-        } else if openrouter {
+        let transport = if openrouter {
             let model = model.ok_or_else(|| {
                 AgentError::Config(
                     "missing --model (OpenRouter needs e.g. openai/gpt-4o-mini)".into(),

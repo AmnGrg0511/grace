@@ -2,27 +2,24 @@
 //! standalone skin picker (`--select-skin`).
 
 use grace::settings::PROVIDER_PRESETS;
+use grace::transport::ProviderTransport;
 
 use crate::chat::pick_skin_interactive;
 
-/// What the onboarding wizard resolved to, for `main` to wire up.
-pub(crate) enum WizardOutcome {
-    /// Real OpenAI-compatible endpoint: model, base_url, api_key.
-    Http(String, String, String),
-    /// GitHub Copilot: device-flow auth already ran inside the wizard, so
-    /// by the time this is returned the token is already on disk. Just
-    /// the model remains to wire up.
-    Copilot(String),
-}
-
-/// Interactive first-run picker: provider -> auth -> model. Persists the
-/// choice to `~/.grace/config.toml` (model/base_url/provider) and
+/// Interactive first-run picker: provider -> key -> model. Every provider
+/// goes through the exact same three steps — the only branch is *how* step
+/// 2 (the "key") is obtained: typed for a normal HTTP provider, or minted
+/// via OAuth device flow for GitHub Copilot. Once the key exists, Copilot
+/// is wired up exactly like any other provider (base_url + api_key), no
+/// separate flag or code path downstream. Step 3 asks the provider's real
+/// `/models` endpoint for the live list + context windows, falling back to
+/// the built-in preset list only if that call fails.
+///
+/// Persists the choice to `~/.grace/config.toml` (model/base_url) and
 /// `~/.grace/.env` (the key, so it's never asked twice and never lives in
-/// shell history). For GitHub Copilot, runs the OAuth device flow directly
-/// (no separate `--copilot` invocation needed) and persists
-/// `default_provider = "copilot"` so future bare `grace` runs pick it up
-/// automatically.
-pub(crate) fn run_onboarding_wizard() -> Result<WizardOutcome, Box<dyn std::error::Error>> {
+/// shell history). Returns (model, base_url, api_key) to wire up for *this*
+/// invocation.
+pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::error::Error>> {
     use std::io::Write;
     let mut stdin_lines = std::io::stdin().lines();
     let mut prompt_read = |label: &str| -> String {
@@ -52,76 +49,77 @@ pub(crate) fn run_onboarding_wizard() -> Result<WizardOutcome, Box<dyn std::erro
     let preset = &PROVIDER_PRESETS[choice];
     let is_copilot = preset.label == "GitHub Copilot";
 
-    // GitHub Copilot has no static API key and no separate CLI dance to
-    // remember: picking it here runs the OAuth device flow immediately
-    // (browser + one-time code), same as `CopilotTransport::new` would do
-    // on first use — then persists the pick so future bare `grace` runs
-    // reconstruct Copilot automatically, no `--copilot` typed by hand.
-    if is_copilot {
-        let model = if preset.models.is_empty() {
-            prompt_read("model id: ")
-        } else {
-            println!();
-            for (i, m) in preset.models.iter().enumerate() {
-                println!("  {}) {} (context: {})", i + 1, m.id, m.context_window);
-            }
-            println!("  {}) other (type a model id)", preset.models.len() + 1);
-            loop {
-                let raw = prompt_read("\nselect a model [number]: ");
-                if let Ok(n) = raw.parse::<usize>() {
-                    if n >= 1 && n <= preset.models.len() {
-                        break preset.models[n - 1].id.to_string();
-                    }
-                    if n == preset.models.len() + 1 {
-                        break prompt_read("model id: ");
-                    }
-                }
-                println!("enter a valid number");
-            }
-        };
-
-        // Runs (or reuses) the OAuth device flow and writes the token to
-        // ~/.grace/.env itself — this IS the authorization step, done right
-        // here in the picker instead of deferred to a later --copilot run.
-        grace::transport_copilot::CopilotTransport::new(&model)?;
-
-        let mut settings = grace::settings::Settings::load();
-        settings.default_model = Some(model.clone());
-        settings.default_provider = Some("copilot".to_string());
-        if let Err(e) = settings.save() {
-            eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
-        }
-        println!("\nsaved — future runs of grace will use Copilot automatically.\n");
-        return Ok(WizardOutcome::Copilot(model));
-    }
-
-    let base_url = if preset.base_url.is_empty() {
-        prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
-    } else {
+    let base_url = if is_copilot || !preset.base_url.is_empty() {
         preset.base_url.to_string()
+    } else {
+        prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
     };
 
-    // Prefer an already-set env var (e.g. exported this shell session) so we
-    // don't re-ask for a key the user already has available.
-    let api_key = std::env::var(preset.env_var)
-        .ok()
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| {
-            prompt_read(&format!(
-                "API key for {} (or set ${} and re-run): ",
-                preset.label, preset.env_var
-            ))
-        });
-
-    let (model, ctx_window) = if preset.models.is_empty() {
-        (prompt_read("model id: "), None)
+    // Step 2, "the key": every provider gets asked for one. A normal HTTP
+    // provider's key is typed in (or read from an already-exported env
+    // var). Copilot's "key" is minted via OAuth device flow instead — same
+    // conceptual step, just non-interactive input.
+    let api_key = if is_copilot {
+        grace::transport_copilot::get_or_create_token()?
     } else {
+        std::env::var(preset.env_var)
+            .ok()
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| {
+                prompt_read(&format!(
+                    "API key for {} (or set ${} and re-run): ",
+                    preset.label, preset.env_var
+                ))
+            })
+    };
+
+    // Step 3: ask the provider itself what models it has, rather than
+    // trusting only the hard-coded preset list. Falls back to the preset
+    // (or free-typed input) if the live call fails or returns nothing.
+    let live_models: Vec<grace::transport::ModelInfo> = if is_copilot {
+        grace::transport_copilot::fetch_models(&api_key).unwrap_or_default()
+    } else if !base_url.is_empty() {
+        grace::transport_http::HttpTransport::new(base_url.clone(), api_key.clone())
+            .list_models()
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let (model, ctx_window) = if !live_models.is_empty() {
         println!();
+        for (i, m) in live_models.iter().enumerate() {
+            match m.context_window {
+                Some(ctx) => println!("  {}) {} (context: {ctx})", i + 1, m.id),
+                None => println!("  {}) {}", i + 1, m.id),
+            }
+        }
+        println!("  {}) other (type a model id)", live_models.len() + 1);
+        loop {
+            let raw = prompt_read("\nselect a model [number]: ");
+            if let Ok(n) = raw.parse::<usize>() {
+                if n >= 1 && n <= live_models.len() {
+                    let m = &live_models[n - 1];
+                    break (m.id.clone(), m.context_window);
+                }
+                if n == live_models.len() + 1 {
+                    let typed = prompt_read("model id: ");
+                    let ctx = crate::chat::fetch_context_window(&typed, &base_url, &api_key);
+                    break (typed, ctx);
+                }
+            }
+            println!("enter a valid number");
+        }
+    } else if !preset.models.is_empty() {
+        println!(
+            "\n(couldn't reach {}'s /models endpoint — showing known models)",
+            preset.label
+        );
         for (i, m) in preset.models.iter().enumerate() {
             println!("  {}) {} (context: {})", i + 1, m.id, m.context_window);
         }
         println!("  {}) other (type a model id)", preset.models.len() + 1);
-        let picked: (String, Option<u32>) = loop {
+        loop {
             let raw = prompt_read("\nselect a model [number]: ");
             if let Ok(n) = raw.parse::<usize>() {
                 if n >= 1 && n <= preset.models.len() {
@@ -135,8 +133,9 @@ pub(crate) fn run_onboarding_wizard() -> Result<WizardOutcome, Box<dyn std::erro
                 }
             }
             println!("enter a valid number");
-        };
-        picked
+        }
+    } else {
+        (prompt_read("model id: "), None)
     };
 
     // Persist: model + base_url + context window go to config.toml; the
@@ -145,7 +144,6 @@ pub(crate) fn run_onboarding_wizard() -> Result<WizardOutcome, Box<dyn std::erro
     settings.default_model = Some(model.clone());
     settings.default_base_url = Some(base_url.clone());
     settings.default_context_window = ctx_window;
-    settings.default_provider = None;
     if let Err(e) = settings.save() {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
     }
@@ -164,7 +162,7 @@ pub(crate) fn run_onboarding_wizard() -> Result<WizardOutcome, Box<dyn std::erro
     }
     println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");
 
-    Ok(WizardOutcome::Http(model, base_url, api_key))
+    Ok((model, base_url, api_key))
 }
 
 /// Interactive skin picker: same list+preview flow as `/skin` mid-chat

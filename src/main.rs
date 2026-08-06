@@ -93,7 +93,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut model: Option<String> = None;
     let mut chat = false;
     let mut openrouter = false;
-    let mut copilot = false;
     let mut max_iterations: u32 = 256;
     let mut system_prompt: Option<String> = None;
     let mut remember: Option<String> = None;
@@ -125,10 +124,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
             "--openrouter" => {
                 openrouter = true;
-                i += 1;
-            }
-            "--copilot" => {
-                copilot = true;
                 i += 1;
             }
             "--chat" => {
@@ -296,30 +291,17 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // model and no resolvable API key anywhere (config, CLI, known env
     // vars), stop and run the interactive picker instead of failing with a
     // terse "missing --model" error. Runs once; picks are persisted to
-    // ~/.grace/config.toml (plus the key to ~/.grace/.env, or Copilot's
-    // device-flow token) so this never asks twice.
-    //
-    // A prior Copilot pick auto-applies here (no `--copilot` typed by
-    // hand): `default_provider = "copilot"` in config.toml means every
-    // bare `grace` run reconstructs the Copilot transport automatically.
-    if settings.default_provider.as_deref() == Some("copilot") {
-        copilot = true;
-    }
-    if model.is_none() && !copilot {
-        match wizard::run_onboarding_wizard()? {
-            wizard::WizardOutcome::Http(picked_model, picked_base_url, picked_key) => {
-                model = Some(picked_model);
-                base_url = Some(picked_base_url);
-                if api_key.is_none() {
-                    api_key = Some(picked_key);
-                }
-                openrouter = false; // base_url is now explicit, no preset needed
-            }
-            wizard::WizardOutcome::Copilot(picked_model) => {
-                model = Some(picked_model);
-                copilot = true;
-            }
+    // ~/.grace/config.toml (plus the key to ~/.grace/.env — including
+    // Copilot's OAuth-minted token, same file, same shape as any other
+    // provider's key) so this never asks twice.
+    if model.is_none() {
+        let (picked_model, picked_base_url, picked_key) = wizard::run_onboarding_wizard()?;
+        model = Some(picked_model);
+        base_url = Some(picked_base_url);
+        if api_key.is_none() {
+            api_key = Some(picked_key);
         }
+        openrouter = false; // base_url is now explicit, no preset needed
     }
 
     let config = Config::from_args(
@@ -327,7 +309,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         api_key,
         model,
         openrouter,
-        copilot,
         max_iterations,
         system_prompt,
     )
@@ -436,11 +417,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 api_key,
                 model,
             } => (base_url.clone(), api_key.clone(), model.clone()),
-            grace::config::TransportConfig::Copilot { model, .. } => {
-                let token = std::env::var("GITHUB_COPILOT_TOKEN")
-                    .map_err(|_| "GITHUB_COPILOT_TOKEN not set".to_string())?;
-                ("https://api.githubcopilot.com".to_string(), token, model.clone())
-            }
         };
 
         print!("\n--- answer (streaming) ---\n");
