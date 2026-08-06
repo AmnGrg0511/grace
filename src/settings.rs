@@ -25,6 +25,12 @@ pub struct Settings {
     /// Name of the color skin to use (see [`crate::skin`]). `None` (or an
     /// unrecognized name) falls back to the default "solaris" skin.
     pub skin: Option<String>,
+    /// Set to `Some("copilot")` when the onboarding picker chose GitHub
+    /// Copilot, so a bare `grace` (no flags) on a later run reconstructs
+    /// the Copilot transport automatically instead of needing `--copilot`
+    /// typed by hand every time. Any other value (or `None`) means the
+    /// normal `default_base_url`/key-based HTTP transport applies.
+    pub default_provider: Option<String>,
 }
 
 /// A model Grace can suggest during onboarding, with its context window (for

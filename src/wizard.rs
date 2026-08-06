@@ -5,11 +5,24 @@ use grace::settings::PROVIDER_PRESETS;
 
 use crate::chat::pick_skin_interactive;
 
-/// Interactive first-run picker: provider -> API key -> model. Persists the
-/// choice to `~/.grace/config.toml` (model/base_url) and `~/.grace/.env`
-/// (the key, so it's never asked twice and never lives in shell history).
-/// Returns (model, base_url, api_key) to use for *this* invocation.
-pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::error::Error>> {
+/// What the onboarding wizard resolved to, for `main` to wire up.
+pub(crate) enum WizardOutcome {
+    /// Real OpenAI-compatible endpoint: model, base_url, api_key.
+    Http(String, String, String),
+    /// GitHub Copilot: device-flow auth already ran inside the wizard, so
+    /// by the time this is returned the token is already on disk. Just
+    /// the model remains to wire up.
+    Copilot(String),
+}
+
+/// Interactive first-run picker: provider -> auth -> model. Persists the
+/// choice to `~/.grace/config.toml` (model/base_url/provider) and
+/// `~/.grace/.env` (the key, so it's never asked twice and never lives in
+/// shell history). For GitHub Copilot, runs the OAuth device flow directly
+/// (no separate `--copilot` invocation needed) and persists
+/// `default_provider = "copilot"` so future bare `grace` runs pick it up
+/// automatically.
+pub(crate) fn run_onboarding_wizard() -> Result<WizardOutcome, Box<dyn std::error::Error>> {
     use std::io::Write;
     let mut stdin_lines = std::io::stdin().lines();
     let mut prompt_read = |label: &str| -> String {
@@ -37,45 +50,68 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
         }
     };
     let preset = &PROVIDER_PRESETS[choice];
-
-    // GitHub Copilot has no static API key: it authenticates via OAuth
-    // device flow (browser + one-time code), driven by `CopilotTransport`
-    // itself on first use. Asking for a key here would be asking for
-    // something the user doesn't have and can't get — skip straight past
-    // it and let `--copilot` trigger the device flow later.
     let is_copilot = preset.label == "GitHub Copilot";
 
-    let base_url = if is_copilot || preset.base_url.is_empty() {
-        if is_copilot {
-            preset.base_url.to_string()
+    // GitHub Copilot has no static API key and no separate CLI dance to
+    // remember: picking it here runs the OAuth device flow immediately
+    // (browser + one-time code), same as `CopilotTransport::new` would do
+    // on first use — then persists the pick so future bare `grace` runs
+    // reconstruct Copilot automatically, no `--copilot` typed by hand.
+    if is_copilot {
+        let model = if preset.models.is_empty() {
+            prompt_read("model id: ")
         } else {
-            prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
+            println!();
+            for (i, m) in preset.models.iter().enumerate() {
+                println!("  {}) {} (context: {})", i + 1, m.id, m.context_window);
+            }
+            println!("  {}) other (type a model id)", preset.models.len() + 1);
+            loop {
+                let raw = prompt_read("\nselect a model [number]: ");
+                if let Ok(n) = raw.parse::<usize>() {
+                    if n >= 1 && n <= preset.models.len() {
+                        break preset.models[n - 1].id.to_string();
+                    }
+                    if n == preset.models.len() + 1 {
+                        break prompt_read("model id: ");
+                    }
+                }
+                println!("enter a valid number");
+            }
+        };
+
+        // Runs (or reuses) the OAuth device flow and writes the token to
+        // ~/.grace/.env itself — this IS the authorization step, done right
+        // here in the picker instead of deferred to a later --copilot run.
+        grace::transport_copilot::CopilotTransport::new(&model)?;
+
+        let mut settings = grace::settings::Settings::load();
+        settings.default_model = Some(model.clone());
+        settings.default_provider = Some("copilot".to_string());
+        if let Err(e) = settings.save() {
+            eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
         }
+        println!("\nsaved — future runs of grace will use Copilot automatically.\n");
+        return Ok(WizardOutcome::Copilot(model));
+    }
+
+    let base_url = if preset.base_url.is_empty() {
+        prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
     } else {
         preset.base_url.to_string()
     };
 
     // Prefer an already-set env var (e.g. exported this shell session) so we
-    // don't re-ask for a key the user already has available. Copilot never
-    // prompts for one — it authenticates via device flow instead.
-    let api_key = if is_copilot {
-        println!(
-            "\nGitHub Copilot doesn't use a static API key — you'll authorize \
-             once via a device code in your browser the first time grace runs \
-             with --copilot. No key needed here.\n"
-        );
-        String::new()
-    } else {
-        std::env::var(preset.env_var)
-            .ok()
-            .filter(|k| !k.is_empty())
-            .unwrap_or_else(|| {
-                prompt_read(&format!(
-                    "API key for {} (or set ${} and re-run): ",
-                    preset.label, preset.env_var
-                ))
-            })
-    };
+    // don't re-ask for a key the user already has available.
+    let api_key = std::env::var(preset.env_var)
+        .ok()
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| {
+            prompt_read(&format!(
+                "API key for {} (or set ${} and re-run): ",
+                preset.label, preset.env_var
+            ))
+        });
 
     let (model, ctx_window) = if preset.models.is_empty() {
         (prompt_read("model id: "), None)
@@ -109,15 +145,9 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
     settings.default_model = Some(model.clone());
     settings.default_base_url = Some(base_url.clone());
     settings.default_context_window = ctx_window;
+    settings.default_provider = None;
     if let Err(e) = settings.save() {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
-    }
-    // Copilot's token is written by the device-flow itself (see
-    // `transport_copilot::get_or_create_token`), not here — writing an
-    // empty key would clobber an already-authenticated token on a rerun.
-    if is_copilot {
-        println!("\nsaved — run grace --copilot --model {model} to authenticate.\n");
-        return Ok((model, base_url, api_key));
     }
     let env_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -134,7 +164,7 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
     }
     println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");
 
-    Ok((model, base_url, api_key))
+    Ok(WizardOutcome::Http(model, base_url, api_key))
 }
 
 /// Interactive skin picker: same list+preview flow as `/skin` mid-chat

@@ -296,17 +296,30 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // model and no resolvable API key anywhere (config, CLI, known env
     // vars), stop and run the interactive picker instead of failing with a
     // terse "missing --model" error. Runs once; picks are persisted to
-    // ~/.grace/config.toml and the key to ~/.grace/.env so this never asks
-    // twice.
-    // Skip onboarding for --copilot since it requires explicit model.
+    // ~/.grace/config.toml (plus the key to ~/.grace/.env, or Copilot's
+    // device-flow token) so this never asks twice.
+    //
+    // A prior Copilot pick auto-applies here (no `--copilot` typed by
+    // hand): `default_provider = "copilot"` in config.toml means every
+    // bare `grace` run reconstructs the Copilot transport automatically.
+    if settings.default_provider.as_deref() == Some("copilot") {
+        copilot = true;
+    }
     if model.is_none() && !copilot {
-        let (picked_model, picked_base_url, picked_key) = wizard::run_onboarding_wizard()?;
-        model = Some(picked_model);
-        base_url = Some(picked_base_url);
-        if api_key.is_none() {
-            api_key = Some(picked_key);
+        match wizard::run_onboarding_wizard()? {
+            wizard::WizardOutcome::Http(picked_model, picked_base_url, picked_key) => {
+                model = Some(picked_model);
+                base_url = Some(picked_base_url);
+                if api_key.is_none() {
+                    api_key = Some(picked_key);
+                }
+                openrouter = false; // base_url is now explicit, no preset needed
+            }
+            wizard::WizardOutcome::Copilot(picked_model) => {
+                model = Some(picked_model);
+                copilot = true;
+            }
         }
-        openrouter = false; // base_url is now explicit, no preset needed
     }
 
     let config = Config::from_args(
