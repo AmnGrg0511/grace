@@ -39,6 +39,26 @@ fn main() -> ExitCode {
     }
 }
 
+/// Auto session id for `--chat` runs with no explicit `--session`: derived
+/// from the controlling tty so distinct terminals don't collide on a shared
+/// "default" session, while a given terminal still resumes its own history
+/// across restarts (the tty path stays stable within one terminal). Falls
+/// back to a plain "default" when there's no real tty (piped stdin, CI,
+/// non-Unix) — a single shared session in that case is the correct
+/// behavior, since there's no "which terminal" to disambiguate.
+fn default_session_id() -> String {
+    #[cfg(unix)]
+    {
+        if let Ok(path) = std::fs::read_link("/proc/self/fd/0") {
+            let s = path.to_string_lossy();
+            if s.starts_with("/dev/") {
+                return format!("default-{}", s.replace('/', "-"));
+            }
+        }
+    }
+    "default".to_string()
+}
+
 /// Load `KEY=value` lines from `~/.grace/.env` into the process environment
 /// (only if not already set — real env always wins). This is where the
 /// onboarding wizard persists API keys so they survive across invocations
@@ -257,11 +277,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     // Every chat gets a session id so history/session_search actually has
     // something to find — without this, plain `grace --chat` (no explicit
-    // `--session`) persisted nothing at all, and every `--search-sessions`/
-    // `session_search` call legitimately came back empty. `--session <id>`
-    // still overrides for named/multiple sessions.
+    // `--session`) persisted nothing at all. `--session <id>` still
+    // overrides for named/deliberately-shared sessions.
+    //
+    // The auto id is derived from the controlling tty (not a bare
+    // "default"), so two *different* terminals running `grace --chat`
+    // simultaneously each get their own history instead of silently
+    // reading/appending to the same "default" session — a real
+    // cross-terminal contamination bug found via live testing (terminal B
+    // could answer questions about facts only ever told to terminal A).
+    // Re-running in the *same* terminal still resumes its own history,
+    // since the tty path is stable across restarts of that terminal.
     if chat && session_id.is_none() {
-        session_id = Some("default".to_string());
+        session_id = Some(default_session_id());
     }
 
     // Onboarding: if we're headed for a real network transport but have no
@@ -443,3 +471,21 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     );
     Ok(ExitCode::SUCCESS)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_session_id_is_deterministic_and_nonempty() {
+        // Under test, stdin is not a tty (it's piped/redirected), so this
+        // exercises the "default" fallback path — but the important
+        // invariant either way is: same process env -> same id every call
+        // (a session name that changes turn-to-turn would defeat resuming).
+        let a = default_session_id();
+        let b = default_session_id();
+        assert_eq!(a, b);
+        assert!(!a.is_empty());
+    }
+}
+

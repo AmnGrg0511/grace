@@ -38,23 +38,44 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
     };
     let preset = &PROVIDER_PRESETS[choice];
 
-    let base_url = if preset.base_url.is_empty() {
-        prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
+    // GitHub Copilot has no static API key: it authenticates via OAuth
+    // device flow (browser + one-time code), driven by `CopilotTransport`
+    // itself on first use. Asking for a key here would be asking for
+    // something the user doesn't have and can't get — skip straight past
+    // it and let `--copilot` trigger the device flow later.
+    let is_copilot = preset.label == "GitHub Copilot";
+
+    let base_url = if is_copilot || preset.base_url.is_empty() {
+        if is_copilot {
+            preset.base_url.to_string()
+        } else {
+            prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
+        }
     } else {
         preset.base_url.to_string()
     };
 
     // Prefer an already-set env var (e.g. exported this shell session) so we
-    // don't re-ask for a key the user already has available.
-    let api_key = std::env::var(preset.env_var)
-        .ok()
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| {
-            prompt_read(&format!(
-                "API key for {} (or set ${} and re-run): ",
-                preset.label, preset.env_var
-            ))
-        });
+    // don't re-ask for a key the user already has available. Copilot never
+    // prompts for one — it authenticates via device flow instead.
+    let api_key = if is_copilot {
+        println!(
+            "\nGitHub Copilot doesn't use a static API key — you'll authorize \
+             once via a device code in your browser the first time grace runs \
+             with --copilot. No key needed here.\n"
+        );
+        String::new()
+    } else {
+        std::env::var(preset.env_var)
+            .ok()
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| {
+                prompt_read(&format!(
+                    "API key for {} (or set ${} and re-run): ",
+                    preset.label, preset.env_var
+                ))
+            })
+    };
 
     let (model, ctx_window) = if preset.models.is_empty() {
         (prompt_read("model id: "), None)
@@ -90,6 +111,13 @@ pub(crate) fn run_onboarding_wizard() -> Result<(String, String, String), Box<dy
     settings.default_context_window = ctx_window;
     if let Err(e) = settings.save() {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
+    }
+    // Copilot's token is written by the device-flow itself (see
+    // `transport_copilot::get_or_create_token`), not here — writing an
+    // empty key would clobber an already-authenticated token on a rerun.
+    if is_copilot {
+        println!("\nsaved — run grace --copilot --model {model} to authenticate.\n");
+        return Ok((model, base_url, api_key));
     }
     let env_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))

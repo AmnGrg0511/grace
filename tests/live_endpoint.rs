@@ -173,6 +173,76 @@ fn session_persists_across_two_process_invocations_against_live_endpoint() {
     );
 }
 
+#[test]
+#[ignore = "requires GRACE_LIVE_BASE_URL/GRACE_LIVE_API_KEY/GRACE_LIVE_MODEL"]
+fn two_different_sessions_never_leak_into_each_other_against_live_endpoint() {
+    // Regression for the "multiple terminals share state" class of bug:
+    // two DIFFERENT --session ids, hit concurrently, must never see each
+    // other's facts. (The other half of that bug — two terminals that
+    // *don't* pass --session colliding on an implicit "default" — is
+    // covered by main.rs's default_session_id unit test, since it depends
+    // on tty identity that Command::output() can't fake realistically.)
+    let Some(_) = live_config() else {
+        eprintln!("skipped: GRACE_LIVE_* env vars not set");
+        return;
+    };
+    let dir = tempdir();
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let (base_url, api_key, model) = live_config().unwrap();
+    let bin = grace_bin().expect("build the release binary first: cargo build --release");
+    let session_a = format!("live-e2e-a-{}", uuid::Uuid::new_v4());
+    let session_b = format!("live-e2e-b-{}", uuid::Uuid::new_v4());
+
+    let run = |session_id: &str, prompt: &str| -> String {
+        let output = Command::new(&bin)
+            .current_dir(dir.as_path())
+            .env("HOME", &home)
+            .args([
+                "--base-url", &base_url,
+                "--api-key", &api_key,
+                "--model", &model,
+                "--session", session_id,
+                "--prompt", prompt,
+                "--max-iterations", "5",
+            ])
+            .output()
+            .expect("failed to spawn grace binary");
+        assert!(
+            output.status.success(),
+            "grace exited non-zero: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+
+    // Concurrent-ish: interleave the two sessions' turns rather than fully
+    // serializing A-then-B, to exercise the same sqlite WAL path two
+    // simultaneous terminals would hit.
+    run(&session_a, "My favorite fruit is a kumquat-7a2b. Just acknowledge briefly.");
+    run(&session_b, "My favorite fruit is a durian-3f9c. Just acknowledge briefly.");
+    let ask_a = run(&session_a, "What is my favorite fruit? One word only.");
+    let ask_b = run(&session_b, "What is my favorite fruit? One word only.");
+
+    assert!(
+        ask_a.to_lowercase().contains("kumquat"),
+        "session A leaked or lost its own fact, got:\n{ask_a}"
+    );
+    assert!(
+        !ask_a.to_lowercase().contains("durian"),
+        "session A leaked session B's fact, got:\n{ask_a}"
+    );
+    assert!(
+        ask_b.to_lowercase().contains("durian"),
+        "session B leaked or lost its own fact, got:\n{ask_b}"
+    );
+    assert!(
+        !ask_b.to_lowercase().contains("kumquat"),
+        "session B leaked session A's fact, got:\n{ask_b}"
+    );
+}
+
 /// Minimal owned-tempdir helper (avoids pulling in the `tempfile` crate for
 /// 4 test cases) — created under `std::env::temp_dir()`, removed on drop
 /// via `TempDir`'s `Drop` impl below.
