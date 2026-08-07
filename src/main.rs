@@ -40,24 +40,32 @@ fn main() -> ExitCode {
     }
 }
 
-/// Auto session id for `--chat` runs with no explicit `--session`: derived
-/// from the controlling tty so distinct terminals don't collide on a shared
-/// "default" session, while a given terminal still resumes its own history
-/// across restarts (the tty path stays stable within one terminal). Falls
-/// back to a plain "default" when there's no real tty (piped stdin, CI,
-/// non-Unix) — a single shared session in that case is the correct
-/// behavior, since there's no "which terminal" to disambiguate.
-fn default_session_id() -> String {
-    #[cfg(unix)]
-    {
-        if let Ok(path) = std::fs::read_link("/proc/self/fd/0") {
-            let s = path.to_string_lossy();
-            if s.starts_with("/dev/") {
-                return format!("default-{}", s.replace('/', "-"));
+/// Default session for a bare `grace --chat` (no `--session` given): the
+/// most recently active session not already open in another terminal (see
+/// `session::SessionLock`), so two terminals never silently collide on the
+/// same history. If every existing session is currently locked elsewhere —
+/// or there are none yet — mints a fresh short id instead, with a clear
+/// message explaining why (rather than silently creating one, which used to
+/// look identical to "resuming your usual session").
+///
+/// Superseded the old tty-path-derived id (`/proc/self/fd/0` readlink):
+/// that avoided cross-terminal collision but meant closing and reopening a
+/// terminal orphaned its history under a new, unguessable tty path, and it
+/// never surfaced a real session title — just a raw, meaningless id.
+fn pick_or_create_default_session(sessions: &grace::session::SessionStore) -> String {
+    match grace::session::pick_default_session(sessions) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            let all_locked = !sessions.list_sessions().unwrap_or_default().is_empty();
+            if all_locked {
+                println!(
+                    "[grace] every existing session is already open in another terminal — starting a new session."
+                );
             }
+            chat::short_session_id()
         }
+        Err(_) => chat::short_session_id(),
     }
-    "default".to_string()
 }
 
 /// Load `KEY=value` lines from `~/.grace/.env` into the process environment
@@ -102,6 +110,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut tools_dir: Option<String> = None;
     let mut stream = false;
     let mut skin_override: Option<String> = None;
+    let mut verbose = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -126,6 +135,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             "--model" => {
                 model = args.get(i + 1).map(|s| s.trim().to_string());
                 i += 2;
+            }
+            "--verbose" | "-v" => {
+                verbose = true;
+                i += 1;
             }
             "--openrouter" => {
                 // Sugar for `--base-url https://openrouter.ai/api/v1` —
@@ -163,8 +176,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     println!("no sessions yet — use --session <id> --chat to start one.");
                 } else {
                     println!("sessions (most recently active first):");
-                    for id in ids {
-                        println!("  {id}");
+                    let titles = sessions.get_titles(&ids).unwrap_or_default();
+                    for id in &ids {
+                        match titles.get(id) {
+                            Some(title) => println!("  {id}  —  {title}"),
+                            None => println!("  {id}"),
+                        }
                     }
                 }
                 return Ok(ExitCode::SUCCESS);
@@ -284,17 +301,20 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // `--session`) persisted nothing at all. `--session <id>` still
     // overrides for named/deliberately-shared sessions.
     //
-    // The auto id is derived from the controlling tty (not a bare
-    // "default"), so two *different* terminals running `grace --chat`
-    // simultaneously each get their own history instead of silently
-    // reading/appending to the same "default" session — a real
-    // cross-terminal contamination bug found via live testing (terminal B
-    // could answer questions about facts only ever told to terminal A).
-    // Re-running in the *same* terminal still resumes its own history,
-    // since the tty path is stable across restarts of that terminal.
+    // Picks the most recently active session that isn't already open in
+    // another terminal (see `session::SessionLock`) — so re-running `grace
+    // --chat` naturally resumes wherever you left off, while two terminals
+    // never silently collide on the same history. Falls back to a fresh
+    // session (with a clear message) only when every existing session is
+    // currently in use elsewhere, or there are none yet.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let sessions = std::sync::Arc::new(
+        SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?,
+    );
     if chat && session_id.is_none() {
-        session_id = Some(default_session_id());
+        session_id = Some(pick_or_create_default_session(&sessions));
     }
+
 
     // Onboarding: if we're headed for a real network transport but have no
     // model and no resolvable API key anywhere (config, CLI, known env
@@ -332,13 +352,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let _ = grace::default_skills::ensure_default_skills();
     let tools_root = tools_dir.unwrap_or_else(|| "tools".to_string());
     let skills = grace::skill::SkillStore::new(&skills_root);
-    // Shared, not `Sync` (SQLite `Connection` isn't) — fine since Grace is
-    // single-threaded; Arc here is just for cheap ownership sharing between
-    // the direct session-store call sites and the session_search tool.
-    #[allow(clippy::arc_with_non_send_sync)]
-    let sessions = std::sync::Arc::new(
-        SessionStore::open(SessionStore::default_path()).map_err(|e| e.to_string())?,
-    );
     let mut tools = Config::build_registry_with_plugins(skills_root, tools_root);
     tools.register(Box::new(grace::delegate_tool::DelegateTool::for_transport(
         &config.transport,
@@ -380,14 +393,20 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     );
 
     // Session persistence: if --session is given, resume prior history and
-    // persist new turns as they happen (survives process restarts).
+    // persist new turns as they happen (survives process restarts). The
+    // cross-terminal lock itself is owned by `chat::run_chat` (so mid-chat
+    // `/session` switches release/reacquire it correctly); one-shot
+    // `--prompt` runs don't hold it at all since there's no long-lived
+    // terminal occupancy to protect against.
     if let Some(sid) = &session_id {
         let prior = sessions.load(sid).map_err(|e| e.to_string())?;
         if !prior.is_empty() {
-            println!(
-                "[grace] resumed session '{sid}' ({} prior turns)",
-                prior.len()
-            );
+            let label = sessions
+                .get_title(sid)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| sid.clone());
+            println!("[grace] resumed \"{label}\" ({} prior turns)", prior.len());
         }
         messages.extend(prior);
     }
@@ -402,6 +421,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             session_id.as_deref(),
             &skin,
             &config.context_compression,
+            verbose,
+            &memory,
+            &skills,
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -453,7 +475,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         &tools,
         &mut messages,
         config.max_iterations,
-        Some(&mut |event| chat::print_agent_event(event, &skin)),
+        Some(&mut |event| chat::print_agent_event(event, &skin, verbose)),
         Some(interrupted.as_ref()),
         Some(&config.context_compression),
     )
@@ -473,15 +495,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_session_id_is_deterministic_and_nonempty() {
-        // Under test, stdin is not a tty (it's piped/redirected), so this
-        // exercises the "default" fallback path — but the important
-        // invariant either way is: same process env -> same id every call
-        // (a session name that changes turn-to-turn would defeat resuming).
-        let a = default_session_id();
-        let b = default_session_id();
-        assert_eq!(a, b);
+    fn short_session_id_is_short_and_nonempty() {
+        // The old tty-derived default_session_id() is gone — new sessions
+        // now get chat::short_session_id()'s compact `s-xxxx` form instead
+        // (see pick_or_create_default_session). Guard the shape here so a
+        // future regression back to a long/empty id is caught.
+        let a = chat::short_session_id();
         assert!(!a.is_empty());
+        assert!(a.starts_with("s-"));
+        assert!(a.len() < 12, "expected a short id, got {a:?}");
+    }
+
+    #[test]
+    fn pick_or_create_default_session_returns_new_id_when_no_sessions_exist() {
+        let path = std::env::temp_dir().join(format!(
+            "grace_main_test_pick_default_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let sessions = SessionStore::open(&path).unwrap();
+        let picked = pick_or_create_default_session(&sessions);
+        assert!(picked.starts_with("s-"));
+        let _ = std::fs::remove_file(&path);
     }
 }
 
