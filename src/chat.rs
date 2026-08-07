@@ -7,11 +7,31 @@ use grace::message::Message;
 use grace::session::SessionStore;
 use grace::settings::PROVIDER_PRESETS;
 use grace::skin::{Role, Skin};
-use uuid::Uuid;
 
 use crate::line_reader::LineReader;
 
 pub(crate) const RESET: &str = "\x1b[0m";
+
+/// A short, readable session id — e.g. `s-4kq9`. Full UUIDs are needless
+/// noise for something the user only ever sees in a picker (never types by
+/// hand for these auto-created sessions); a 4-char base36 suffix still has
+/// ~1.6M combinations, plenty to avoid collision in one user's session
+/// store while actually fitting on one line next to a title.
+pub(crate) fn short_session_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut n = nanos;
+    let mut suffix = [0u8; 4];
+    for slot in suffix.iter_mut().rev() {
+        *slot = ALPHABET[(n % ALPHABET.len() as u128) as usize];
+        n /= ALPHABET.len() as u128;
+    }
+    format!("s-{}", std::str::from_utf8(&suffix).unwrap())
+}
 
 /// Interactive REPL. Each line you type is appended as a user message and the
 /// conversation history (including tool calls) is preserved across turns. If
@@ -30,12 +50,23 @@ pub(crate) fn run_chat(
     session_id: Option<&str>,
     skin: &Skin,
     compression_config: &ContextCompressionConfig,
+    verbose: bool,
+    memory: &grace::memory::Memory,
+    skills: &grace::skill::SkillStore,
 ) {
     // Owned+mutable so `/skin <name>` can swap it live; `/model <name>` swaps
     // the transport's own interior model instead (see `set_model`).
     let mut skin = *skin;
     // Owned so `/session <name>` can switch mid-chat.
     let mut current_session: Option<String> = session_id.map(|s| s.to_string());
+    // Cross-terminal lock for whichever session is active — re-claimed on
+    // every `/session` switch (see `handle_session_command`) so switching
+    // away from a session releases it for other terminals immediately,
+    // rather than holding the original --session lock for the whole process.
+    let mut session_lock: Option<grace::session::SessionLock> =
+        current_session.as_deref().and_then(|s| grace::session::SessionLock::acquire(s).ok());
+    // `/verbose` toggles this mid-chat; starts from `--verbose`/`-v`.
+    let mut verbose = verbose;
 
     // Ctrl-C mid-turn cancels the current turn (tool calls already run stay
     // recorded) and returns to the prompt, instead of killing the whole
@@ -51,7 +82,7 @@ pub(crate) fn run_chat(
         });
     }
 
-    println!("chat mode — type a message, '/exit' to leave, '/model [name]' to switch models, '/skin [name]' to retheme, '/session' to switch sessions.\n");
+    println!("chat mode — type a message, '/exit' to leave, '/model [name]' to switch models, '/skin [name]' to retheme, '/session' to switch sessions, '/verbose' to toggle tool output.\n");
 
     let started_at = std::time::Instant::now();
     // Loaded once per chat session (not re-read from disk every turn) —
@@ -62,7 +93,14 @@ pub(crate) fn run_chat(
     let history_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".grace")
-        .join("history.txt");
+        .join(match session_id {
+            // Scope up-arrow history to the active session from the very
+            // start, not just after a mid-chat `/session` switch — starting
+            // `grace --chat --session <id>` should already show that
+            // session's own past inputs, not the global stack's.
+            Some(sid) => format!("history_{sid}.txt"),
+            None => "history.txt".to_string(),
+        });
     if let Some(parent) = history_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -70,7 +108,7 @@ pub(crate) fn run_chat(
     // Single stdin owner for the entire interactive session — every picker
     // below (`/model`, `/skin`, `/session`) takes `&mut reader` instead of
     // opening its own `std::io::stdin()`.
-    let mut reader = LineReader::new(history_path);
+    let mut reader = LineReader::new(history_path, skin);
     let is_rustyline = reader.is_interactive_editor();
 
     loop {
@@ -103,12 +141,36 @@ pub(crate) fn run_chat(
         }
         if let Some(rest) = text.strip_prefix("/skin") {
             handle_skin_command(rest.trim(), &mut skin, &mut reader);
+            reader.set_skin(skin);
             continue;
         }
         if let Some(rest) = text.strip_prefix("/session") {
-            handle_session_command(rest.trim(), sessions, messages, &mut current_session, &mut reader);
+            handle_session_command(rest.trim(), sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock);
             continue;
         }
+        if text.starts_with("/verbose") {
+            verbose = !verbose;
+            println!(
+                "tool output {} (read_file/run_terminal bodies {}; patch diffs always show).",
+                if verbose { "shown" } else { "hidden" },
+                if verbose { "visible" } else { "hidden" }
+            );
+            continue;
+        }
+        // Pre-flight recall: same mechanism one-shot mode gets at startup,
+        // but re-run on EVERY turn here since chat is long-lived and each
+        // message may need different facts/skills/sessions surfaced. Without
+        // this, chat mode never saw memory/skills recall at all — only the
+        // durable-facts block from session start, which is what caused
+        // "I have to explicitly ask it to load a skill" (recall's whole
+        // point is to surface a matching skill without being asked).
+        let recall_hint = grace::recall::as_prompt_block(&grace::recall::recall(
+            text,
+            memory,
+            skills,
+            Some(sessions),
+            5,
+        ));
         run_one_chat_turn(
             transport,
             tools,
@@ -117,9 +179,11 @@ pub(crate) fn run_chat(
             sessions,
             current_session.as_deref(),
             text,
+            recall_hint.as_deref(),
             &skin,
             &interrupted,
             compression_config,
+            verbose,
         );
     }
 }
@@ -140,14 +204,57 @@ fn handle_model_command(
         );
         return;
     }
-    let (picked, ctx) = if arg.is_empty() {
+    let (picked, ctx, new_endpoint) = if arg.is_empty() {
         match pick_model_interactive(reader) {
             Some(result) => result,
             None => return,
         }
     } else {
-        (arg.to_string(), None)
+        (arg.to_string(), None, None)
     };
+
+    // A different provider was picked: re-point the transport at its
+    // base_url/api_key instead of silently keeping the old endpoint with a
+    // model id it was never meant for (the original bug: /model listed
+    // providers but only ever swapped the model string, so picking
+    // "OpenAI" mid-OpenRouter-session sent OpenAI model ids to OpenRouter
+    // with the OpenRouter key and never asked for anything).
+    if let Some((base_url, env_var)) = new_endpoint {
+        let same_endpoint = transport.current_base_url().as_deref() == Some(base_url.as_str());
+        if !same_endpoint {
+            let key = std::env::var(env_var)
+                .ok()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .or_else(|| {
+                    reader
+                        .read_line(&format!("API key for this provider (${env_var} not set): "))
+                        .map(|k| k.trim().to_string())
+                        .filter(|k| !k.is_empty())
+                });
+            let Some(key) = key else {
+                println!("no key provided — staying on current provider.");
+                return;
+            };
+            transport.set_endpoint(&base_url, &key);
+            let mut settings = grace::settings::Settings::load();
+            settings.default_base_url = Some(base_url.clone());
+            if let Err(e) = settings.save() {
+                eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
+            }
+            let env_path = dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".grace")
+                .join(".env");
+            if let Some(parent) = env_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&env_path, format!("{env_var}={key}\n")) {
+                eprintln!("[grace] warning: could not save {}: {e}", env_path.display());
+            }
+        }
+    }
+
     transport.set_model(&picked);
     if let Some(m) = transport.current_model() {
         let mut settings = grace::settings::Settings::load();
@@ -173,9 +280,13 @@ fn handle_model_command(
 }
 
 /// Two-level model picker: providers first, then models for that provider.
-/// Returns `(model_id, optional_context_window)`. Used by `/model` mid-chat.
-/// Returns `None` on unparsable/EOF input (no-op).
-fn pick_model_interactive(reader: &mut LineReader) -> Option<(String, Option<u32>)> {
+/// `PickedModel` = `(model_id, optional_context_window, optional (base_url,
+/// env_var) when a different provider than the transport's current one
+/// was picked)`. Used by `/model` mid-chat. Returns `None` on
+/// unparsable/EOF input (no-op).
+type PickedModel = (String, Option<u32>, Option<(String, &'static str)>);
+
+fn pick_model_interactive(reader: &mut LineReader) -> Option<PickedModel> {
     println!("\nproviders:\n");
     for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
         println!("  {}) {}", i + 1, p.label);
@@ -190,10 +301,15 @@ fn pick_model_interactive(reader: &mut LineReader) -> Option<(String, Option<u32
         }
     };
     let preset = &PROVIDER_PRESETS[choice];
+    let endpoint = if preset.base_url.is_empty() {
+        None
+    } else {
+        Some((preset.base_url.to_string(), preset.env_var))
+    };
     if preset.models.is_empty() {
         // Provider with no known models (e.g. "Custom endpoint"): type one.
         let typed = reader.read_line("model id: ")?.trim().to_string();
-        return if typed.is_empty() { None } else { Some((typed, None)) };
+        return if typed.is_empty() { None } else { Some((typed, None, endpoint)) };
     }
     println!("\n{label} models:\n", label = preset.label);
     for (i, m) in preset.models.iter().enumerate() {
@@ -212,11 +328,12 @@ fn pick_model_interactive(reader: &mut LineReader) -> Option<(String, Option<u32
         Ok(n) if n >= 1 && n <= n_models => Some((
             preset.models[n - 1].id.to_string(),
             Some(preset.models[n - 1].context_window),
+            endpoint,
         )),
         Ok(n) if n == n_models + 1 => {
             // Custom model ID
             let typed = reader.read_line("model id: ")?.trim().to_string();
-            if typed.is_empty() { None } else { Some((typed, None)) }
+            if typed.is_empty() { None } else { Some((typed, None, endpoint)) }
         }
         _ => {
             println!("not a valid choice.");
@@ -263,7 +380,27 @@ fn handle_session_command(
     messages: &mut Vec<Message>,
     current_session: &mut Option<String>,
     reader: &mut LineReader,
+    memory: &grace::memory::Memory,
+    session_lock: &mut Option<grace::session::SessionLock>,
 ) {
+    // `sessions.load()` never returns a system message (see session.rs —
+    // only user/assistant rows are persisted), and every `messages.clear()`
+    // below wipes whatever system message was already in memory. Without
+    // this, `/session new`/`/session <name>` silently dropped the persona +
+    // durable-facts block for the rest of the process: the model would
+    // answer with no identity and no memory of facts told to it in an
+    // *earlier* session, even though `--remember` had genuinely saved them.
+    // Re-derive fresh every time rather than caching it once, since
+    // `--remember` can add facts mid-process (via a different terminal) and
+    // a stale cached block would miss those.
+    let fresh_system = || {
+        let mut sp = grace::config::load_soul();
+        if let Ok(Some(block)) = memory.as_prompt_block() {
+            sp.push_str(&block);
+        }
+        Message::system(sp)
+    };
+
     if arg.is_empty() {
         // Interactive: list recent sessions and let the user pick.
         let session_list = match sessions.list_sessions() {
@@ -278,14 +415,23 @@ fn handle_session_command(
             return;
         }
         println!("\nsaved sessions (most recent first):\n");
+        let titles = sessions.get_titles(&session_list).unwrap_or_default();
         for (i, sid) in session_list.iter().enumerate() {
-            let preview = sessions
-                .load(sid)
-                .ok()
-                .and_then(|m| m.first().map(|m| m.content.clone()))
-                .unwrap_or_default();
-            let preview = preview.chars().take(50).collect::<String>();
-            println!("  {}) {}  {}", i + 1, sid, preview);
+            // Prefer the auto-generated title (a real description of what
+            // the chat is about) over the raw id — the id itself is never
+            // shown here at all now, since a bare UUID/tty-path conveyed
+            // nothing and the old "first message" preview was almost
+            // always just "hi".
+            let label = titles.get(sid).cloned().unwrap_or_else(|| {
+                sessions
+                    .load(sid)
+                    .ok()
+                    .and_then(|m| m.first().map(|m| m.content.clone()))
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.chars().take(50).collect())
+                    .unwrap_or_else(|| "(untitled)".to_string())
+            });
+            println!("  {}) {}", i + 1, label);
         }
         let Some(raw) = reader.read_line("\nselect a session [number, or 0 for new]: ") else {
             println!("no input — staying on current session.");
@@ -294,22 +440,29 @@ fn handle_session_command(
         match raw.trim().parse::<usize>() {
             Ok(0) => {
                 messages.clear();
-                let new_id = Uuid::new_v4().to_string();
+                messages.push(fresh_system());
+                let new_id = short_session_id();
                 // Persist the empty session immediately so it survives restarts
                 if let Err(e) = sessions.append(&new_id, &Message::user("")) {
                     println!("warning: could not persist new session: {e}");
                 }
                 *current_session = Some(new_id.clone());
-                println!("started fresh persisted session: {new_id}.");
+                *session_lock = grace::session::SessionLock::acquire(&new_id).ok();
+                reader.set_history_scope(Some(&new_id));
+                println!("started fresh session: {new_id}.");
             }
             Ok(n) if n >= 1 && n <= session_list.len() => {
                 let sid = &session_list[n - 1];
                 match sessions.load(sid) {
                     Ok(loaded) => {
                         messages.clear();
+                        messages.push(fresh_system());
                         messages.extend(loaded);
                         *current_session = Some(sid.clone());
-                        println!("switched to session \"{sid}\" ({} messages loaded).", messages.len());
+                        *session_lock = grace::session::SessionLock::acquire(sid).ok();
+                        reader.set_history_scope(Some(sid));
+                        let label = titles.get(sid).cloned().unwrap_or_else(|| sid.clone());
+                        println!("switched to session \"{label}\" ({} messages loaded).", messages.len());
                     }
                     Err(e) => println!("error loading session: {e}"),
                 }
@@ -322,13 +475,19 @@ fn handle_session_command(
     match arg {
         "new" => {
             messages.clear();
+            messages.push(fresh_system());
             *current_session = None;
+            *session_lock = None;
+            reader.set_history_scope(None);
             println!("started a fresh session (no persistence).");
         }
         "new-persist" => {
-            let new_id = uuid::Uuid::new_v4().to_string();
+            let new_id = short_session_id();
             messages.clear();
+            messages.push(fresh_system());
             *current_session = Some(new_id.clone());
+            *session_lock = grace::session::SessionLock::acquire(&new_id).ok();
+            reader.set_history_scope(Some(&new_id));
             // Persist the empty session immediately
             if let Err(e) = sessions.append(&new_id, &Message::user("")) {
                 println!("warning: could not persist new session: {e}");
@@ -337,6 +496,8 @@ fn handle_session_command(
         }
         "none" => {
             *current_session = None;
+            *session_lock = None;
+            reader.set_history_scope(None);
             println!("session persistence disabled for this chat.");
         }
         "list" => {
@@ -344,13 +505,15 @@ fn handle_session_command(
                 Ok(list) if list.is_empty() => println!("no saved sessions yet."),
                 Ok(list) => {
                     println!("\nsaved sessions (most recent first):\n");
+                    let titles = sessions.get_titles(&list).unwrap_or_default();
                     for sid in &list {
                         let marker = if current_session.as_deref() == Some(sid.as_str()) {
                             " (current)"
                         } else {
                             ""
                         };
-                        println!("  {sid}{marker}");
+                        let label = titles.get(sid).cloned().unwrap_or_else(|| sid.clone());
+                        println!("  {label}{marker}");
                     }
                 }
                 Err(e) => println!("error listing sessions: {e}"),
@@ -360,14 +523,20 @@ fn handle_session_command(
             match sessions.load(name) {
                 Ok(loaded) => {
                     messages.clear();
+                    messages.push(fresh_system());
                     messages.extend(loaded);
                     *current_session = Some(name.to_string());
+                    *session_lock = grace::session::SessionLock::acquire(name).ok();
+                    reader.set_history_scope(Some(name));
                     println!("switched to session \"{name}\" ({} messages loaded).", messages.len());
                 }
                 Err(e) => {
                     println!("session \"{name}\" not found ({}). Starting fresh.", e);
                     messages.clear();
+                    messages.push(fresh_system());
                     *current_session = Some(name.to_string());
+                    *session_lock = grace::session::SessionLock::acquire(name).ok();
+                    reader.set_history_scope(Some(name));
                 }
             }
         }
@@ -421,12 +590,27 @@ pub(crate) fn run_one_chat_turn(
     sessions: &SessionStore,
     session_id: Option<&str>,
     text: &str,
+    recall_hint: Option<&str>,
     skin: &Skin,
     interrupted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     compression_config: &ContextCompressionConfig,
+    verbose: bool,
 ) {
-    messages.push(Message::user(text.to_string()));
+    // Snapshot turn count BEFORE appending — drives auto-(re)titling below.
+    // History alternates user/assistant, so history_len/2 is the 0-based
+    // index of the turn about to happen.
+    let turn_index = session_id
+        .and_then(|sid| sessions.load(sid).ok())
+        .map(|h| h.len() / 2)
+        .unwrap_or(0);
+    messages.push(Message::user(match recall_hint {
+        Some(hint) => format!("{text}\n{hint}"),
+        None => text.to_string(),
+    }));
     if let Some(sid) = session_id {
+        // Persist the clean user text (no recall noise) — recall is
+        // re-derived fresh on replay/resume, so baking it into disk history
+        // would only duplicate and stale-date it.
         let _ = sessions.append(sid, &Message::user(text.to_string()));
     }
     // Clear any interrupt latched from a previous turn before starting a new
@@ -437,7 +621,7 @@ pub(crate) fn run_one_chat_turn(
         tools,
         messages,
         max_iterations,
-        Some(&mut |event| print_agent_event(event, skin)),
+        Some(&mut |event| print_agent_event(event, skin, verbose)),
         Some(interrupted.as_ref()),
         Some(compression_config),
     ) {
@@ -450,7 +634,40 @@ pub(crate) fn run_one_chat_turn(
                 grace::markdown::render_terminal(&answer, skin)
             );
             if let Some(sid) = session_id {
-                let _ = sessions.append(sid, &Message::assistant(answer));
+                let _ = sessions.append(sid, &Message::assistant(answer.clone()));
+                // Auto-(re)title: retitle at turn 1 (first real content),
+                // then again at 5 and 15 as the topic usually solidifies,
+                // then every 20 turns after that for long sessions that
+                // drift — cheap (one extra completion call, no tools) and
+                // keeps the `/session` picker's summary from freezing on
+                // "hi" forever. Best-effort: a failed call just leaves the
+                // previous title in place.
+                let should_retitle = matches!(turn_index, 0 | 4 | 14) || (turn_index > 14 && turn_index.is_multiple_of(20));
+                if should_retitle {
+                    if let Some(model) = transport.current_model() {
+                        // Summarize the whole conversation so far, not just
+                        // this turn — the picker title should reflect what
+                        // the *session* is about, not just its latest message.
+                        let transcript = sessions
+                            .load(sid)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter(|m| !m.content.is_empty())
+                            .map(|m| format!("{:?}: {}", m.role, m.content))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        // Cap what we send — a long-running session's full
+                        // history isn't needed to name it, and this keeps
+                        // the retitle call itself cheap regardless of turn
+                        // count. Tail-biased: the recent topic usually
+                        // matters more than the opener by the time we're
+                        // retitling at turn 15+.
+                        let transcript: String = transcript.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
+                        if let Some(title) = grace::session::generate_title(transport, &model, &transcript) {
+                            let _ = sessions.set_title(sid, &title);
+                        }
+                    }
+                }
             }
         }
         Err(grace::error::AgentError::Interrupted) => {
@@ -480,7 +697,17 @@ pub(crate) fn run_one_chat_turn(
 /// (see [`grace::skin`]) — nothing here is hardcoded, so switching skins
 /// restyles every surface at once. Colors auto-disable when stdout isn't a
 /// real terminal (checked once via [`no_color`]).
-pub(crate) fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
+/// Whether a tool's result body should be printed: `patch` (diffs) always
+/// shows since seeing the diff is the point; every other tool
+/// (read_file/run_terminal/etc.) is noise by default, gated behind
+/// `--verbose`/`/verbose`. Pulled out as its own function (not inlined in
+/// `print_agent_event`) so it's directly unit-testable without touching
+/// stdout at all.
+fn should_show_tool_output(tool_name: &str, verbose: bool) -> bool {
+    verbose || tool_name == "patch"
+}
+
+pub(crate) fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin, verbose: bool) {
     let no_color = no_color();
     let dim = |s: &str| if no_color { s.to_string() } else { format!("\x1b[2m{s}\x1b[0m") };
 
@@ -498,11 +725,19 @@ pub(crate) fn print_agent_event(event: grace::agent::AgentEvent, skin: &Skin) {
             let bullet = skin.paint(Role::ToolBullet, "●");
             println!("{} {}{}({})", bullet, dim(""), name, compact);
         }
-        grace::agent::AgentEvent::ToolCallEnd { name: _, result, elapsed } => {
-            let rendered = grace::markdown::render_terminal(result, skin);
-            for (i, line) in rendered.lines().enumerate() {
-                let prefix = if i == 0 { "  ⎿ " } else { "    " };
-                println!("{}{}{}", skin.paint(Role::ToolDim, ""), prefix, line);
+        grace::agent::AgentEvent::ToolCallEnd { name, result, elapsed } => {
+            // Tool output is noisy by default — `patch` is the one tool
+            // whose result (a diff) is the point of looking at it, so it
+            // always shows; everything else (read_file/run_terminal/etc.)
+            // is hidden unless `--verbose`/`/verbose` is on. The one-line
+            // "call + timing" summary below still always prints, so you
+            // always see *that* something ran, just not its full body.
+            if should_show_tool_output(name, verbose) {
+                let rendered = grace::markdown::render_terminal(result, skin);
+                for (i, line) in rendered.lines().enumerate() {
+                    let prefix = if i == 0 { "  ⎿ " } else { "    " };
+                    println!("{}{}{}", skin.paint(Role::ToolDim, ""), prefix, line);
+                }
             }
             let tokens = estimate_tokens(result);
             let secs = elapsed.as_secs_f64();
@@ -619,5 +854,25 @@ fn print_slash_commands_help() {
     println!("  /session new-persist  - Start new persisted session");
     println!("  /session none         - Disable session persistence");
     println!("  /session list         - List all sessions");
+    println!("  /verbose              - Toggle tool-output visibility (patch diffs always show)");
     println!();
+}
+
+#[cfg(test)]
+mod verbose_gate_tests {
+    use super::should_show_tool_output;
+
+    #[test]
+    fn non_patch_tools_hidden_unless_verbose() {
+        assert!(!should_show_tool_output("read_file", false));
+        assert!(!should_show_tool_output("run_terminal", false));
+        assert!(should_show_tool_output("read_file", true));
+        assert!(should_show_tool_output("run_terminal", true));
+    }
+
+    #[test]
+    fn patch_always_shown_regardless_of_verbose() {
+        assert!(should_show_tool_output("patch", false));
+        assert!(should_show_tool_output("patch", true));
+    }
 }
