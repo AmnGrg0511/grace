@@ -18,7 +18,54 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::os::unix::process::CommandExt;
 use std::sync::{Arc, Mutex, OnceLock};
+
+// ---- process-group signalling ----------------------------------------------
+// `Command::process_group` (std, stable since 1.64) puts the child in a new
+// process group without any unsafe pre_exec/setsid FFI. To kill the whole
+// group on timeout we shell out to the `kill` binary rather than calling
+// libc's kill(2) directly — this crate forbids unsafe code, and spawning a
+// process is not unsafe.
+
+/// Send SIGKILL to an entire process group (negative pid == group signal).
+fn killpg(pgid: i32) {
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{pgid}"))
+        .status();
+}
+
+/// Read `r` to EOF, but if `deadline` is set, give up after it (returning
+/// whatever was read so far) rather than blocking indefinitely — used after
+/// a timeout-kill where a stray descendant could otherwise still be holding
+/// the write end of the pipe open. Takes ownership of `r` (rather than a
+/// borrow) so the read can be handed to a helper thread and simply
+/// abandoned — no unsafe aliasing — if it overruns the deadline.
+fn read_bounded<R: std::io::Read + Send + 'static>(r: R, deadline: Option<std::time::Duration>) -> Vec<u8> {
+    match deadline {
+        None => {
+            let mut r = r;
+            let mut buf = Vec::new();
+            let _ = r.read_to_end(&mut buf);
+            buf
+        }
+        Some(d) => {
+            // std::io::Read has no built-in timeout; run the blocking read
+            // on a helper thread and abandon it (not join) if it overruns —
+            // it dies with the process, no leak beyond one dangling read
+            // that unblocks the moment the last pipe writer exits.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new().spawn(move || {
+                let mut r = r;
+                let mut local = Vec::new();
+                let _ = r.read_to_end(&mut local);
+                let _ = tx.send(local);
+            });
+            rx.recv_timeout(d).unwrap_or_default()
+        }
+    }
+}
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -208,14 +255,27 @@ impl TerminalTool {
     /// Run `cmd`, killing it if it outlives `timeout()`. Polls
     /// `try_wait()` rather than blocking on `.output()`, since a blocking
     /// wait gives no way to intervene once the timeout has elapsed.
+    ///
+    /// `cmd` is spawned as the leader of its own process group (`setsid`)
+    /// so a timeout kill reaches the whole tree, not just the immediate
+    /// `sh`. Without this, a pipeline/background job (`find / | grep ...`,
+    /// `sleep 30 &`) leaves orphaned grandchildren holding the stdout pipe
+    /// open — `sh` dies on schedule but the subsequent `read_to_end` then
+    /// blocks forever waiting for EOF that never comes, silently hanging
+    /// well past the timeout that was supposed to bound this call.
     /// Returns (stdout, stderr, exit_code, timed_out).
     fn run_with_timeout(mut cmd: Command) -> Result<SpawnResult> {
-        use std::io::Read;
+        use std::os::unix::process::CommandExt;
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // New process group, with this child as its leader (pid == pgid,
+        // via process_group(0)). Lets us signal the whole group on timeout
+        // instead of just the top-level `sh`.
+        cmd.process_group(0);
         let mut child = cmd
             .spawn()
             .map_err(|e| AgentError::Tool(format!("failed to spawn 'sh': {e}")))?;
+        let pgid = child.id() as i32;
         let mut out = child.stdout.take();
         let mut err = child.stderr.take();
         let deadline = Self::timeout().map(|d| std::time::Instant::now() + d);
@@ -229,6 +289,10 @@ impl TerminalTool {
             }
             if let Some(dl) = deadline {
                 if std::time::Instant::now() >= dl {
+                    // SIGKILL the whole group (negative pid), not just the
+                    // direct child — reaches pipeline stages and any
+                    // backgrounded (`cmd &`) descendants too.
+                    killpg(pgid);
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
@@ -237,16 +301,22 @@ impl TerminalTool {
             std::thread::sleep(poll);
         };
         let timed_out = status.is_none();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if let Some(mut o) = out.take() {
-            let _ = o.read_to_end(&mut stdout);
-        }
-        if let Some(mut e) = err.take() {
-            let _ = e.read_to_end(&mut stderr);
-        }
+        // After a timeout kill, a lingering pipe writer (rare, but possible
+        // if a grandchild dodged the group signal) must not re-hang this
+        // read — cap it with its own short, bounded read instead of a
+        // blocking read_to_end.
+        let read_deadline = std::time::Duration::from_millis(500);
+        let stdout = out
+            .take()
+            .map(|o| read_bounded(o, timed_out.then_some(read_deadline)))
+            .unwrap_or_default();
+        let stderr = err
+            .take()
+            .map(|e| read_bounded(e, timed_out.then_some(read_deadline)))
+            .unwrap_or_default();
         Ok((stdout, stderr, status.and_then(|s| s.code()), timed_out))
     }
+
 
     /// Cap: past this many bytes a command's output can blow the model's
     /// whole context window in one tool result (real incident: `p4 changes`
@@ -293,9 +363,14 @@ impl TerminalTool {
         if let Some(dir) = Self::allow_dir() {
             cmd.current_dir(dir);
         }
+        // Same process-group leadership as run_with_timeout: a pipeline or
+        // `cmd &` background job under `sh` must fully die on timeout, not
+        // leave orphaned descendants running past it.
+        cmd.process_group(0);
         let child = cmd
             .spawn()
             .map_err(|e| AgentError::Tool(format!("failed to spawn background command: {e}")))?;
+        let pgid = child.id() as i32;
         let job = Arc::new(BgJob {
             output_path: output_path.clone(),
             result: Mutex::new(None),
@@ -316,6 +391,7 @@ impl TerminalTool {
                 }
                 if let Some(dl) = deadline {
                     if std::time::Instant::now() >= dl {
+                        killpg(pgid);
                         if let Some(c) = guard.as_mut() {
                             let _ = c.kill();
                             let _ = c.wait();
@@ -714,6 +790,58 @@ mod tools_hardening_tests {
             "command should have been killed near the 1s timeout, took {elapsed:?}"
         );
         assert!(out.contains("TIMED OUT"), "output was: {out}");
+    }
+
+    #[test]
+    fn timeout_kills_whole_pipeline_not_just_direct_sh_child() {
+        // Real bug hit in production: a pipeline/background-job command
+        // (e.g. `find / -iname '*skill*' | grep ...`, or `cmd &`) leaves
+        // orphaned grandchildren running after the direct `sh` is killed —
+        // and those orphans keep the stdout pipe's write end open, so the
+        // subsequent read blocks forever waiting for EOF that never comes.
+        // The whole tool call then hangs well past its configured timeout.
+        // Fix: spawn `sh` as its own process-group leader and SIGKILL the
+        // group (not just the child) on timeout.
+        let _g = ENV_GUARD.lock().unwrap();
+        std::env::set_var("GRACE_TERMINAL_TIMEOUT", "1");
+        let tool = TerminalTool;
+        let start = std::time::Instant::now();
+        // `sleep 30 &` backgrounds a grandchild sh won't wait on directly;
+        // `wait` then blocks sh itself until timeout kills it — but without
+        // group-kill the backgrounded sleep survives and holds the pipe.
+        // Print the backgrounded sleep's own pid so the assertion below can
+        // check precisely whether that pid (not just "some sleep 30
+        // somewhere on a shared host") is still alive.
+        let out = tool
+            .run(&json!({"command": "sleep 30 & echo BGPID=$!; sleep 30; wait"}))
+            .unwrap();
+        let elapsed = start.elapsed();
+        std::env::remove_var("GRACE_TERMINAL_TIMEOUT");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "call should return near the 1s timeout, not hang on orphaned children; took {elapsed:?}"
+        );
+        assert!(out.contains("TIMED OUT"), "output was: {out}");
+        // Note: a killed process's stdout up to the kill point IS still
+        // captured (cap_output/read_bounded read whatever was written
+        // before EOF), so BGPID=<pid> should be present in `out` even
+        // though the overall run timed out.
+        let bg_pid = out
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("BGPID="))
+            .map(|s| s.trim().to_string());
+        if let Some(pid) = bg_pid {
+            // Give the group-kill a moment to land, then confirm that
+            // specific backgrounded sleep is actually dead — not a blanket
+            // `pgrep sleep` (a shared host may have unrelated sleeps from
+            // other users/tests running concurrently).
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
+            assert!(!alive, "backgrounded sleep pid {pid} survived the group-kill");
+        }
+        // If BGPID wasn't captured (e.g. output truncated before the kill
+        // landed), the elapsed-time + TIMED OUT assertions above already
+        // prove the core regression (hang past timeout) didn't recur.
     }
 
     #[test]
