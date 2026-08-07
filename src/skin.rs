@@ -56,7 +56,13 @@ impl Skin {
             return text.to_string();
         }
         let style = self.style(role);
-        format!("{}{}{}", style.render(), text, Style::new().render())
+        // anstyle's `Style::new().render()` (no attributes set) renders to
+        // an EMPTY string, not a reset escape — using it as "the reset"
+        // left every painted color bleeding into all subsequent unstyled
+        // output (e.g. the plain-text /model provider list appearing
+        // orange because the prior status-line paint() was never closed).
+        // `anstyle::Reset` is the actual `\x1b[0m` sequence.
+        format!("{}{}{}", style.render(), text, anstyle::Reset.render())
     }
 }
 

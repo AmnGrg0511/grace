@@ -83,6 +83,20 @@ pub trait ProviderTransport {
         None
     }
 
+    /// Re-point this transport at a different provider endpoint, for
+    /// `/model` mid-chat picking a provider other than the one it started
+    /// with. `HttpTransport` overrides this to actually swap `base_url`
+    /// and `api_key`; transports with a fixed endpoint keep the default
+    /// no-op.
+    fn set_endpoint(&self, _base_url: &str, _api_key: &str) {}
+
+    /// Current base_url, if this transport has a swappable one (used by
+    /// `/model` to detect "you picked a different provider than the one
+    /// this session is currently wired to").
+    fn current_base_url(&self) -> Option<String> {
+        None
+    }
+
     /// Fetch available models from the provider.
     /// Default implementation returns empty list - providers should override.
     fn list_models(&self) -> Result<Vec<ModelInfo>> {

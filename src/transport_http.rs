@@ -72,9 +72,12 @@ pub fn fetch_context_window(model: &str, base_url: &str, api_key: &str) -> Optio
 /// A transport that POSTs to an OpenAI-compatible `/chat/completions`.
 pub struct HttpTransport {
     client: reqwest::blocking::Client,
-    base_url: String,
-    api_key: String,
-    /// Model id owned by the transport (the loop passes `""`; see `complete`).
+    /// `RefCell` so `/model` can re-point the transport at a different
+    /// provider mid-chat (see `set_endpoint`) — same single-threaded
+    /// rationale as `model` below.
+    base_url: std::cell::RefCell<String>,
+    api_key: std::cell::RefCell<String>,
+    /// Model id owned by the transport (the loop passes "", see `complete`).
     /// `RefCell` so `/model` can hot-swap it mid-chat via `&self` — Grace is
     /// single-threaded, so no `Sync` requirement, `RefCell` is enough.
     model: std::cell::RefCell<String>,
@@ -85,7 +88,7 @@ pub struct HttpTransport {
 impl HttpTransport {
     /// Generic OpenAI-compatible endpoint. `model` defaults to empty and must
     /// be supplied by the caller via [`HttpTransport::with_model`] for real
-    /// use; the agent loop passes `""`, so the transport must own the model.
+    /// use; the agent loop passes "", so the transport must own the model.
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self::with_model(base_url, api_key, "")
     }
@@ -103,8 +106,8 @@ impl HttpTransport {
             .unwrap_or_default();
         Self {
             client,
-            base_url: base_url.into(),
-            api_key: api_key.into(),
+            base_url: std::cell::RefCell::new(base_url.into()),
+            api_key: std::cell::RefCell::new(api_key.into()),
             model: std::cell::RefCell::new(model.into()),
             chat_path: String::from("/chat/completions"),
         }
@@ -117,7 +120,8 @@ impl HttpTransport {
     }
 
     fn endpoint(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
+        let base = self.base_url.borrow();
+        let base = base.trim_end_matches('/');
         format!("{base}{}", self.chat_path)
     }
 
@@ -132,9 +136,11 @@ impl HttpTransport {
         let mut last_err = None;
         for attempt in 1..=MAX_ATTEMPTS {
             let mut req = self.client.post(self.endpoint()).json(body);
-            if !self.api_key.is_empty() {
-                req = req.bearer_auth(&self.api_key);
+            let api_key = self.api_key.borrow();
+            if !api_key.is_empty() {
+                req = req.bearer_auth(&*api_key);
             }
+            drop(api_key);
             match req.send() {
                 Ok(resp) => {
                     let status = resp.status();
@@ -259,14 +265,25 @@ impl ProviderTransport for HttpTransport {
         }
     }
 
+    fn set_endpoint(&self, base_url: &str, api_key: &str) {
+        *self.base_url.borrow_mut() = base_url.to_string();
+        *self.api_key.borrow_mut() = api_key.to_string();
+    }
+
+    fn current_base_url(&self) -> Option<String> {
+        Some(self.base_url.borrow().clone())
+    }
+
     fn list_models(&self) -> Result<Vec<ModelInfo>> {
         // Try to fetch models from the provider's /models endpoint
         let client = reqwest::blocking::Client::new();
-        let models_url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let base_url = self.base_url.borrow().clone();
+        let models_url = format!("{}/models", base_url.trim_end_matches('/'));
         
         let mut req = client.get(&models_url);
-        if !self.api_key.is_empty() {
-            req = req.bearer_auth(&self.api_key);
+        let api_key = self.api_key.borrow().clone();
+        if !api_key.is_empty() {
+            req = req.bearer_auth(&api_key);
         }
         
         match req.send() {

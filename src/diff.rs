@@ -25,7 +25,7 @@ pub fn unified_snippet(old: &str, new: &str, context: usize) -> String {
                         ChangeTag::Insert => Style::new().fg_color(Some(Color::from(RgbColor(100, 255, 100)))),
                         ChangeTag::Equal => Style::new().fg_color(Some(Color::from(RgbColor(150, 150, 150)))),
                     };
-                    let reset = Style::new().render();
+                    let reset = anstyle::Reset.render();
                     out.push_str(&format!("{}{}{}{}\n", style.render(), sign, line, reset));
                 } else {
                     out.push_str(&format!("{sign}{line}\n"));
