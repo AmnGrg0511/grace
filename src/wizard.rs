@@ -184,7 +184,7 @@ pub(crate) fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".grace")
         .join("history.txt");
-    let mut reader = crate::line_reader::LineReader::new(history_path);
+    let mut reader = crate::line_reader::LineReader::new(history_path, grace::skin::SOLARIS);
     let Some(picked) = crate::chat::pick_skin_interactive(&names, &mut reader) else {
         return Ok(());
     };

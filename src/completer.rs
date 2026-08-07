@@ -2,14 +2,24 @@
 //!
 //! When the user types `/` and hits Tab, rustyline calls our `Completer`
 //! which returns matching slash-commands. The `Hinter` shows the same
-//! candidates as a dim hint. The `Highlighter` paints the prompt.
+//! candidates as a dim hint. The `Highlighter` paints the whole typed line
+//! in the active skin's prompt color — this is deliberate, not a side
+//! effect of `Skin::paint`'s reset fix: before that fix, `paint()` left an
+//! unclosed color escape after printing the prompt glyph, which happened to
+//! bleed into whatever the user typed next (accidentally orange in
+//! Solaris). Closing that leak (correct, since it was also bleeding into
+//! unrelated output like the `/model` provider list) killed the typed-text
+//! color as a side effect, since nothing was ever coloring it on purpose.
+//! This `Highlighter` is that on-purpose replacement.
 
+use crate::skin::{Role, Skin};
 use rustyline::completion::Completer;
 use rustyline::hint::Hinter;
 use rustyline::highlight::Highlighter;
 use rustyline::validate::Validator;
 use rustyline::Context;
 use rustyline::Result;
+use std::borrow::Cow;
 
 /// All `/` commands available in chat mode.
 const SLASH_COMMANDS: &[&str] = &[
@@ -18,10 +28,14 @@ const SLASH_COMMANDS: &[&str] = &[
     "/model",
     "/skin",
     "/session",
+    "/verbose",
 ];
 
-/// Rustyline helper that provides `/`-command tab completion and hints.
-pub struct CommandHelper;
+/// Rustyline helper that provides `/`-command tab completion, hints, and
+/// skin-colored input-line highlighting.
+pub struct CommandHelper {
+    pub skin: Skin,
+}
 
 impl Completer for CommandHelper {
     type Candidate = String;
@@ -61,7 +75,21 @@ impl Hinter for CommandHelper {
     }
 }
 
-impl Highlighter for CommandHelper {}
+impl Highlighter for CommandHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        if line.is_empty() {
+            return Cow::Borrowed(line);
+        }
+        Cow::Owned(self.skin.paint(Role::Prompt, line))
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
+        // Re-run `highlight` on every keystroke, not just at submit — this
+        // is what makes typed characters appear colored as you type rather
+        // than only after pressing Enter.
+        true
+    }
+}
 
 impl Validator for CommandHelper {}
 
@@ -73,7 +101,7 @@ mod tests {
 
     #[test]
     fn completes_slash_commands() {
-        let helper = CommandHelper;
+        let helper = CommandHelper { skin: crate::skin::SOLARIS };
         let hist = rustyline::history::DefaultHistory::new();
         let ctx = rustyline::Context::new(&hist);
         let (start, candidates) = helper.complete("/e", 2, &ctx).unwrap();
@@ -83,7 +111,7 @@ mod tests {
 
     #[test]
     fn no_completion_for_non_slash() {
-        let helper = CommandHelper;
+        let helper = CommandHelper { skin: crate::skin::SOLARIS };
         let hist = rustyline::history::DefaultHistory::new();
         let ctx = rustyline::Context::new(&hist);
         let (_, candidates) = helper.complete("hello", 5, &ctx).unwrap();
@@ -92,7 +120,7 @@ mod tests {
 
     #[test]
     fn hints_partial_command() {
-        let helper = CommandHelper;
+        let helper = CommandHelper { skin: crate::skin::SOLARIS };
         let hist = rustyline::history::DefaultHistory::new();
         let ctx = rustyline::Context::new(&hist);
         let hint = helper.hint("/se", 3, &ctx);
