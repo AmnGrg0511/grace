@@ -85,6 +85,78 @@ Grace is ~5,400 lines of Rust across 22 modules. The core is a ReAct loop:
 - `~/.grace/memory.db` — SQLite durable facts
 - `~/.grace/skills/` — this directory
 - `~/.grace/history.txt` — rustyline chat history
+
+## How to add a custom skin (no rebuild needed)
+
+Skins are user-facing color palettes — no Rust code required:
+
+1. Create `~/.grace/skins/<name>.toml` with 3-byte RGB arrays for every role:
+   ```toml
+   name = "midnight"
+   prompt = [80, 90, 200]
+   answer = [120, 140, 255]
+   thinking = [100, 100, 110]
+   tool_bullet = [255, 200, 0]
+   tool_name = [220, 220, 230]
+   tool_dim = [90, 90, 100]
+   code = [140, 200, 255]
+   ```
+   `prompt_glyph`/`answer_glyph` are optional (default `❯`/`◆`).
+2. Select it: `grace --skin midnight`, or `/skin` mid-chat, or set
+   `skin = "midnight"` in `~/.grace/config.toml` to persist it.
+3. Malformed TOML is skipped silently at load — if it doesn't show up in
+   `/skin`'s picker, re-check the TOML syntax (all 7 RGB fields required).
+
+To add a new *built-in* skin instead (ships with every install), that IS a
+code change: add a `pub const NAME: Skin = Skin { ... };` to `src/skin.rs`
+and append it to the `ALL` slice — requires a rebuild + release.
+
+## How to add a new tool WITHOUT writing Rust (plugin tools, no rebuild)
+
+`./tools/<name>/manifest.json` (relative to the cwd `grace` was launched
+in; override with `--tools-dir <path>` or `tools_dir` in `config.toml`) is
+discovered automatically at startup — no code, no rebuild:
+
+```json
+{
+  "name": "weather",
+  "description": "Get current weather for a city.",
+  "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+  "command": "./run.sh"
+}
+```
+
+`command` (resolved relative to the manifest's own directory, or absolute)
+is invoked with the JSON-serialized arguments as a single `argv[1]` —
+write any executable (shell script, Python, compiled binary) that reads
+that JSON string and prints its result to stdout. Verify with
+`grace --chat` and ask a question that should trigger it; if it doesn't
+appear, check the manifest is valid JSON and `command` is executable
+(`chmod +x`).
+
+## How to add a new tool IN RUST (built-in, requires rebuild)
+
+Tools are Rust structs implementing the `Tool` trait (`src/tool.rs`):
+
+1. In `src/tools.rs` (or a new module), define a struct and implement `Tool`:
+   ```rust
+   struct MyTool;
+   impl Tool for MyTool {
+       fn name(&self) -> &str { "my_tool" }
+       fn description(&self) -> &str { "What it does, when to call it." }
+       fn parameters(&self) -> Value { json!({"type":"object","properties":{...},"required":[...]}) }
+       fn run(&self, args: &Value) -> Result<String> { /* side effect, return short string */ }
+   }
+   ```
+2. Register it: add `registry.register(Box::new(MyTool));` to
+   `register_builtins()` in `tools.rs` (for a default built-in) or wherever
+   the registry is built in `main.rs`/`config.rs` (for something conditional,
+   e.g. plugin-style tools like `delegate_tool.rs`/`plugin_tool.rs`).
+3. Rebuild: `CARGO_TARGET_DIR=/calypto/scratch/amagar24/grace-target cargo build --release`
+   then reinstall (`cp` the binary to `~/.local/bin/grace`) — a new tool
+   is NOT hot-loadable, unlike a skin or a skill.
+4. Verify: `grace --chat` then ask a question that should trigger the
+   tool; confirm it appears in the tool-call tree with the right name.
 "#;
 
 const MEMORY_UPDATE: &str = r#"---
