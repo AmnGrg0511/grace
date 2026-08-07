@@ -336,8 +336,13 @@ pub fn pick_default_session(sessions: &SessionStore) -> Result<Option<String>> {
 /// picker falls back to the previous title (or the raw session id).
 pub fn generate_title(transport: &dyn crate::transport::ProviderTransport, model: &str, transcript: &str) -> Option<String> {
     let prompt = format!(
-        "Summarize this conversation as a 3-6 word title (no punctuation, \
-         no quotes, plain text only — just the title):\n\n{transcript}"
+        "Write a specific 3-6 word title for this conversation, distinct \
+         enough that it wouldn't be confused with a different conversation. \
+         Base it on the concrete topic, question, or task the user raised — \
+         if the exchange so far is just a greeting with no real topic yet \
+         (e.g. \"hi\" / \"hello\"), title it using the user's exact opening \
+         words instead of a generic summary like \"assistant greets user\". \
+         No punctuation, no quotes, plain text only — just the title:\n\n{transcript}"
     );
     let messages = [Message::user(prompt)];
     let resp = transport.complete(&messages, &[], model).ok()?;

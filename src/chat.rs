@@ -416,22 +416,41 @@ fn handle_session_command(
         }
         println!("\nsaved sessions (most recent first):\n");
         let titles = sessions.get_titles(&session_list).unwrap_or_default();
+        let labels: Vec<String> = session_list
+            .iter()
+            .map(|sid| {
+                titles.get(sid).cloned().unwrap_or_else(|| {
+                    sessions
+                        .load(sid)
+                        .ok()
+                        .and_then(|m| m.first().map(|m| m.content.clone()))
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.chars().take(50).collect())
+                        .unwrap_or_else(|| "(untitled)".to_string())
+                })
+            })
+            .collect();
+        // Identical titles are common (a "hi"-only opener always titles the
+        // same way) and made entries impossible to tell apart in the
+        // picker. Disambiguate any label that repeats by suffixing the
+        // short session id — unique labels are left exactly as generated.
+        let mut counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for l in &labels {
+            *counts.entry(l.as_str()).or_insert(0) += 1;
+        }
         for (i, sid) in session_list.iter().enumerate() {
-            // Prefer the auto-generated title (a real description of what
-            // the chat is about) over the raw id — the id itself is never
-            // shown here at all now, since a bare UUID/tty-path conveyed
-            // nothing and the old "first message" preview was almost
-            // always just "hi".
-            let label = titles.get(sid).cloned().unwrap_or_else(|| {
-                sessions
-                    .load(sid)
-                    .ok()
-                    .and_then(|m| m.first().map(|m| m.content.clone()))
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.chars().take(50).collect())
-                    .unwrap_or_else(|| "(untitled)".to_string())
-            });
-            println!("  {}) {}", i + 1, label);
+            let label = &labels[i];
+            let disambiguated = if counts.get(label.as_str()).copied().unwrap_or(0) > 1 {
+                format!("{label} ({sid})")
+            } else {
+                label.clone()
+            };
+            let lock_marker = if grace::session::SessionLock::is_held(sid) {
+                " [open in another terminal]"
+            } else {
+                ""
+            };
+            println!("  {}) {}{}", i + 1, disambiguated, lock_marker);
         }
         let Some(raw) = reader.read_line("\nselect a session [number, or 0 for new]: ") else {
             println!("no input — staying on current session.");
@@ -453,6 +472,18 @@ fn handle_session_command(
             }
             Ok(n) if n >= 1 && n <= session_list.len() => {
                 let sid = &session_list[n - 1];
+                if grace::session::SessionLock::is_held(sid) {
+                    println!(
+                        "session is open in another terminal — switching here would co-own it (concurrent writes may interleave). switch anyway? [y/N]"
+                    );
+                    match reader.read_line("") {
+                        Some(ans) if ans.trim().eq_ignore_ascii_case("y") => {}
+                        _ => {
+                            println!("staying on current session.");
+                            return;
+                        }
+                    }
+                }
                 match sessions.load(sid) {
                     Ok(loaded) => {
                         messages.clear();
@@ -520,6 +551,18 @@ fn handle_session_command(
             }
         }
         name => {
+            if grace::session::SessionLock::is_held(name) {
+                println!(
+                    "session \"{name}\" is open in another terminal — switching here would co-own it (concurrent writes may interleave). switch anyway? [y/N]"
+                );
+                match reader.read_line("") {
+                    Some(ans) if ans.trim().eq_ignore_ascii_case("y") => {}
+                    _ => {
+                        println!("staying on current session.");
+                        return;
+                    }
+                }
+            }
             match sessions.load(name) {
                 Ok(loaded) => {
                     messages.clear();
