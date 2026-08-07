@@ -7,14 +7,24 @@
 //! one function obtains the key.
 
 use crate::error::{AgentError, Result};
-use crate::transport::ModelInfo;
+use crate::transport::{FinishReason, ModelInfo, ModelResponse, ProviderTransport, ToolSpec};
+use crate::message::Message;
 use serde::Deserialize;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::time::Duration;
 
 /// GitHub Copilot's OpenAI-compatible base URL — a plain HTTP preset like
 /// any other provider's.
 pub const BASE_URL: &str = "https://api.githubcopilot.com";
+
+/// The long-lived OAuth device-flow token is NOT the Copilot API bearer —
+/// GitHub requires exchanging it for a short-lived (~25min) session token
+/// via this endpoint on every refresh. Feeding the OAuth token straight to
+/// `api.githubcopilot.com` is exactly what silently expired and produced
+/// 404s after a few minutes; this exchange (and the auto-refresh wrapper
+/// below) is the actual fix.
+const TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 
 /// GitHub Copilot OAuth device flow response.
 #[derive(Deserialize)]
@@ -189,5 +199,230 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}... [truncated {} bytes]", &s[..max], s.len() - max)
+    }
+}
+
+/// A minted session token plus when it expires (Unix seconds), so the
+/// transport can tell "still good" from "must refresh" without another
+/// round-trip.
+struct SessionToken {
+    value: String,
+    expires_at: u64,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Exchange the long-lived OAuth token for a short-lived Copilot API
+/// session token. This step was missing entirely before — Grace was
+/// sending the OAuth token itself as the bearer, which `api.githubcopilot.com`
+/// accepts only briefly before every subsequent call 404s. Response shape:
+/// `{"token": "...", "expires_at": <unix_secs>, ...}`.
+fn exchange_for_session_token(oauth_token: &str) -> Result<SessionToken> {
+    let resp = reqwest::blocking::Client::new()
+        .get(TOKEN_EXCHANGE_URL)
+        .header("Authorization", format!("token {oauth_token}"))
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|e| AgentError::Transport(format!("Copilot token exchange failed: {e}")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .map_err(|e| AgentError::Transport(format!("failed to read token exchange body: {e}")))?;
+    if !status.is_success() {
+        return Err(AgentError::Config(format!(
+            "Copilot session-token exchange returned {status} — the OAuth token is likely \
+             stale or revoked; delete GITHUB_COPILOT_TOKEN from ~/.grace/.env and re-run to \
+             re-authenticate. Raw: {}",
+            truncate(&text, 300)
+        )));
+    }
+    let data: Value = serde_json::from_str(&text)
+        .map_err(|e| AgentError::Transport(format!("invalid token exchange JSON: {e}")))?;
+    let value = data
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AgentError::Transport("token exchange response missing 'token'".into()))?
+        .to_string();
+    // Default to a conservative 20-minute lifetime if the field is absent —
+    // GitHub's real tokens run ~25min, better to refresh a bit early than late.
+    let expires_at = data
+        .get("expires_at")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| now_unix() + 1200);
+    Ok(SessionToken { value, expires_at })
+}
+
+/// Wraps [`crate::transport_http::HttpTransport`]-equivalent behavior for
+/// Copilot specifically, because Copilot needs one extra thing no other
+/// provider does: the bearer it sends must be refreshed via
+/// [`exchange_for_session_token`] roughly every 25 minutes, transparently,
+/// with no user-visible re-auth prompt. The long-lived OAuth token (from
+/// `get_or_create_token`, persisted in `~/.grace/.env`) is kept only to mint
+/// fresh session tokens — it is never sent to the chat endpoint itself.
+pub struct CopilotTransport {
+    client: reqwest::blocking::Client,
+    oauth_token: String,
+    session: RefCell<Option<SessionToken>>,
+    model: RefCell<String>,
+}
+
+impl CopilotTransport {
+    pub fn new(oauth_token: impl Into<String>, model: impl Into<String>) -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
+        Self {
+            client,
+            oauth_token: oauth_token.into(),
+            session: RefCell::new(None),
+            model: RefCell::new(model.into()),
+        }
+    }
+
+    /// Returns a session token guaranteed to be valid for at least 60 more
+    /// seconds, refreshing via [`exchange_for_session_token`] if the cached
+    /// one is missing or about to expire. This is what makes token refresh
+    /// invisible to the user — no re-prompt, no manual re-auth, just a
+    /// silent exchange call before whichever request needed it.
+    fn valid_session_token(&self) -> Result<String> {
+        {
+            let cached = self.session.borrow();
+            if let Some(tok) = cached.as_ref() {
+                if tok.expires_at > now_unix() + 60 {
+                    return Ok(tok.value.clone());
+                }
+            }
+        }
+        let fresh = exchange_for_session_token(&self.oauth_token)?;
+        let value = fresh.value.clone();
+        *self.session.borrow_mut() = Some(fresh);
+        Ok(value)
+    }
+}
+
+impl ProviderTransport for CopilotTransport {
+    fn name(&self) -> &str {
+        "github-copilot"
+    }
+
+    fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        _model: &str,
+    ) -> Result<ModelResponse> {
+        let model_owned = self.model.borrow().clone();
+        let model = if model_owned.is_empty() {
+            "gpt-4o"
+        } else {
+            model_owned.as_str()
+        };
+        let msg_json: Vec<Value> = messages
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+            .collect();
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": msg_json,
+            "temperature": 0.0,
+        });
+        if !tools.is_empty() {
+            body["tools"] = crate::transport::tools_to_json(tools);
+            body["tool_choice"] = Value::String("auto".to_string());
+        }
+
+        // One retry after a fresh token exchange if the first attempt gets
+        // 401/404 — covers the case where the cached token expired early
+        // (clock skew, GitHub shortening the window under load) without
+        // making every call pay for two round-trips in the common case.
+        let mut token = self.valid_session_token()?;
+        let mut resp = self
+            .client
+            .post(format!("{BASE_URL}/chat/completions"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .map_err(|e| AgentError::Transport(format!("Copilot request failed: {e}")))?;
+        if resp.status().as_u16() == 401 || resp.status().as_u16() == 404 {
+            *self.session.borrow_mut() = None;
+            token = self.valid_session_token()?;
+            resp = self
+                .client
+                .post(format!("{BASE_URL}/chat/completions"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .map_err(|e| AgentError::Transport(format!("Copilot request failed: {e}")))?;
+        }
+        let status = resp.status();
+        let text = resp
+            .text()
+            .map_err(|e| AgentError::Transport(format!("failed to read response body: {e}")))?;
+        if !status.is_success() {
+            return Err(AgentError::Transport(format!(
+                "Copilot returned {status}: {}",
+                truncate(&text, 500)
+            )));
+        }
+        let parsed: Value = serde_json::from_str(&text).map_err(|e| {
+            AgentError::Transport(format!(
+                "invalid JSON response (status {status}): {e}. Raw: {}",
+                truncate(&text, 500)
+            ))
+        })?;
+        if let Some(err) = parsed.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider returned an error")
+                .to_string();
+            return Err(AgentError::Response(format!("provider error: {msg}")));
+        }
+        let choice = parsed
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|c| c.first())
+            .ok_or_else(|| AgentError::Response("no choices in response".into()))?;
+        let msg = choice.get("message").cloned().unwrap_or(Value::Null);
+        let finish_reason_str = choice.get("finish_reason").and_then(Value::as_str);
+        let mut result = crate::transport::parse_openai_message(&msg, finish_reason_str)?;
+        if !result.tool_calls.is_empty() {
+            result.finish_reason = FinishReason::ToolCalls;
+        }
+        Ok(result)
+    }
+
+    fn set_model(&self, model: &str) {
+        *self.model.borrow_mut() = model.to_string();
+    }
+
+    fn current_model(&self) -> Option<String> {
+        let m = self.model.borrow();
+        if m.is_empty() {
+            None
+        } else {
+            Some(m.clone())
+        }
+    }
+
+    fn set_endpoint(&self, _base_url: &str, _api_key: &str) {
+        // Copilot's endpoint is fixed; `/model <provider>` switching to a
+        // different provider replaces the whole transport upstream instead.
+    }
+
+    fn current_base_url(&self) -> Option<String> {
+        Some(BASE_URL.to_string())
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let token = self.valid_session_token()?;
+        fetch_models(&token)
     }
 }

@@ -138,11 +138,23 @@ impl Config {
                 base_url,
                 api_key,
                 model,
-            } => Ok(Box::new(crate::transport_http::HttpTransport::with_model(
-                base_url.clone(),
-                api_key.clone(),
-                model.clone(),
-            ))),
+            } => {
+                // Copilot needs its OAuth token exchanged for a short-lived
+                // session token, auto-refreshed — see `transport_copilot`
+                // for why a plain `HttpTransport` silently 404s after ~25min.
+                if base_url.trim_end_matches('/') == crate::transport_copilot::BASE_URL {
+                    Ok(Box::new(crate::transport_copilot::CopilotTransport::new(
+                        api_key.clone(),
+                        model.clone(),
+                    )))
+                } else {
+                    Ok(Box::new(crate::transport_http::HttpTransport::with_model(
+                        base_url.clone(),
+                        api_key.clone(),
+                        model.clone(),
+                    )))
+                }
+            }
         }
     }
 
