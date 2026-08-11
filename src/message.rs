@@ -151,7 +151,7 @@ mod tests {
     /// it in exactly that case. Assert it's always present.
     #[test]
     fn tool_call_always_serializes_type_field() {
-        let call = ToolCall::new("call_1", "read_file", "{\"path\":\"a.txt\"}");
+        let call = ToolCall::new("call_1", "read", "{\"path\":\"a.txt\"}");
         let json = serde_json::to_value(&call).unwrap();
         assert_eq!(json["type"], "function");
     }
@@ -161,7 +161,7 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: String::new(),
-            tool_calls: vec![ToolCall::new("call_1", "read_file", "{}")],
+            tool_calls: vec![ToolCall::new("call_1", "read", "{}")],
             tool_call_id: None,
             name: None,
         };

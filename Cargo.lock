@@ -428,6 +428,7 @@ dependencies = [
  "serde_json",
  "similar",
  "syntect",
+ "thiserror 2.0.19",
  "toml",
  "unicode-width 0.2.2",
  "uuid",

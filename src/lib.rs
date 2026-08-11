@@ -1,8 +1,8 @@
 //! `grace` — a minimal, vendor-neutral ReAct agent core.
 //!
-//! This is the irreducible spine of an agent, written in
-//! Rust with best practices, preferring official/native crates (`reqwest`,
-//! `serde`/`serde_json`) over hand-rolled reimplementations of TCP/TLS/JSON.
+//! The irreducible spine of an agent, written in Rust, preferring official
+//! crates (`reqwest`, `serde`) over hand-rolled reimplementations of
+//! TCP/TLS/JSON.
 //!
 //! ```text
 //! Message list  ──►  ProviderTransport (normalized LLM call)
@@ -14,43 +14,59 @@
 //!                  loop until FinishReason::Stop (or budget exhausted)
 //! ```
 //!
-//! Modules:
+//! # Layering
+//!
+//! Dependencies point strictly downward; a cycle here is a design bug.
+//!
+//! ```text
+//!   ui  ────────────────┐
+//!   config ─────────────┤
+//!   core (agent engine) ┤──►  transport ──►  message
+//!   tools ──────────────┤          │
+//!   memory/session/     │          ▼
+//!   skill/recall  ──────┴───────► util
+//! ```
+//!
 //! - [`message`] — the unified conversation record (the source of truth).
-//! - [`transport`] — [`ProviderTransport`](transport::ProviderTransport) trait + OpenAI-compatible transports.
-//! - [`tool`] — [`Tool`](tool::Tool) trait + [`ToolRegistry`](tool::ToolRegistry).
-//! - [`tools`] — the bundled built-in tools (terminal, file read/write, patch).
-//! - [`agent`] — the ReAct loop.
-//! - [`config`] — runtime configuration.
+//! - [`transport`] — the `ProviderTransport` seam and its implementations.
+//! - [`tools`] — the `Tool` trait, the registry, and every built-in tool.
+//! - [`core`] — the ReAct loop, context compression, and sub-agent delegation.
+//! - [`config`] — runtime configuration, settings, and the persona.
 //! - [`memory`] — durable SQLite-backed facts.
-//! - [`session`] — chat history with FTS5 search.
+//! - [`session`] — chat history with FTS5 search and cross-terminal locking.
 //! - [`skill`] — filesystem-convention skill loading.
-//! - [`recall`] — pre-flight recall (injects past context).
-//! - [`markdown`] — pulldown-cmark + syntect rendering.
-//! - [`skin`] — 4 built-in color skins + custom skins from TOML.
-//! - [`error`] — the single error type.
+//! - [`recall`] — pre-flight recall (injects relevant past context).
+//! - [`ui`] — the REPL, markdown rendering, skins, and onboarding.
+//! - [`util`] — the error type, token estimation, and diffing.
 
 #![forbid(unsafe_code)]
-#![allow(missing_docs)] // inline comments document intent; public API is small
+#![allow(missing_docs)] // inline comments document intent; the public API is small
 
-pub mod agent;
-pub mod completer;
 pub mod config;
-pub mod default_skills;
-pub mod delegate_tool;
-pub mod diff;
-pub mod error;
-pub mod markdown;
+pub mod core;
 pub mod memory;
 pub mod message;
-pub mod plugin_tool;
 pub mod recall;
 pub mod session;
-pub mod settings;
 pub mod skill;
-pub mod skin;
-pub mod tool;
 pub mod tools;
 pub mod transport;
-pub mod transport_http;
-pub mod transport_copilot;
-pub mod transport_stream;
+pub mod ui;
+pub mod util;
+
+// ---- Convenience re-exports -------------------------------------------------
+// The types a caller embedding Grace needs most often, so the common case is
+// `use grace::{Agent-ish things}` rather than six deep paths.
+
+pub use config::{Config, Settings};
+pub use core::{
+    run_turn, run_turn_with_options, AgentEvent, ContextCompressionConfig, Delegation, SubTask,
+    TurnOptions, TurnOutcome,
+};
+pub use memory::Memory;
+pub use message::{Message, Role, ToolCall};
+pub use session::SessionStore;
+pub use skill::SkillStore;
+pub use tools::{Tool, ToolRegistry};
+pub use transport::{FinishReason, ModelResponse, ProviderTransport, ToolSpec};
+pub use util::{AgentError, Result};
