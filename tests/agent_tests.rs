@@ -279,6 +279,7 @@ fn a_compression_event_is_emitted_so_the_user_learns_history_was_dropped() {
             before_tokens,
             after_tokens,
             dropped_messages,
+            summary: _,
         } = e
         {
             *observed.borrow_mut() = Some((before_tokens, after_tokens, dropped_messages));

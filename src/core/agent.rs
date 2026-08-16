@@ -130,13 +130,15 @@ pub fn run_turn_with_options(
         budget.consume()?;
 
         if let Some(compressor) = &compressor {
-            if let Some(outcome) = compressor.compress_in_place(messages) {
+            if let Some(result) = compressor.compress_in_place_with_model(messages, transport) {
+                let summary_text = result.summary.as_deref();
                 emit(
                     &mut options.on_event,
                     AgentEvent::ContextCompressed {
-                        before_tokens: outcome.before_tokens,
-                        after_tokens: outcome.after_tokens,
-                        dropped_messages: outcome.dropped_messages,
+                        before_tokens: result.outcome.before_tokens,
+                        after_tokens: result.outcome.after_tokens,
+                        dropped_messages: result.outcome.dropped_messages,
+                        summary: summary_text,
                     },
                 );
             }

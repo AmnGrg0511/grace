@@ -521,26 +521,33 @@ fn run_one_shot(
 
     let interrupted = std::sync::atomic::AtomicBool::new(false);
     let mut stream_state = crate::ui::chat::StreamState::default();
-    let mut sink = |event: crate::core::AgentEvent<'_>| {
-        crate::ui::chat::print_agent_event(event, skin, args.verbose, &mut stream_state);
-    };
 
     // `--stream` is no longer a separate code path that skips the tool loop.
     // It is a flag on the same loop, so a streamed run can still call tools —
     // the old one-shot-only streaming silently dropped that ability.
-    let options = crate::core::TurnOptions::new()
-        .with_events(&mut sink)
-        .with_interrupt(&interrupted)
-        .with_compression(&config.context_compression)
-        .streaming(args.stream);
+    let outcome = {
+        let mut sink = |event: crate::core::AgentEvent<'_>| {
+            crate::ui::chat::print_agent_event(event, skin, args.verbose, &mut stream_state);
+        };
+        let options = crate::core::TurnOptions::new()
+            .with_events(&mut sink)
+            .with_interrupt(&interrupted)
+            .with_compression(&config.context_compression)
+            .streaming(args.stream);
+        crate::core::run_turn_with_options(
+            transport,
+            tools,
+            messages,
+            config.max_iterations,
+            options,
+        )?
+    };
 
-    let outcome = crate::core::run_turn_with_options(
-        transport,
-        tools,
-        messages,
-        config.max_iterations,
-        options,
-    )?;
+    // The agent emits no terminal event after its last ContentFragment, so a
+    // trailing line that arrived without a newline would stay buffered. Flush
+    // it here, before printing anything else for the turn.  (The closure that
+    // held the mutable borrow on stream_state has gone out of scope.)
+    crate::ui::chat::flush_stream_to_stdout(&mut stream_state, skin);
 
     if let Some(sid) = session_id {
         let _ = sessions.append(sid, &Message::assistant(outcome.answer.clone()));

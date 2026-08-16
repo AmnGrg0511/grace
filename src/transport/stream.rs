@@ -203,6 +203,27 @@ mod tests {
     }
 
     #[test]
+    fn qwen_thinking_stream_extracts_content_after_reasoning() {
+        // Shape of vLLM/Qwen reasoning gateways: role chunk with empty
+        // content, then `delta.reasoning` chunks (no content field), then
+        // content chunks, a stop chunk, an empty-choices usage chunk, [DONE].
+        let sse = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"qwen-3.8-27b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null}],\"usage\":{\"prompt_tokens\":10,\"total_tokens\":10,\"completion_tokens\":0}}\n\
+                   data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"qwen-3.8-27b\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"Let\"},\"logprobs\":null}],\"usage\":{\"prompt_tokens\":10,\"total_tokens\":11,\"completion_tokens\":1}}\n\
+                   data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"qwen-3.8-27b\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\\n\"},\"logprobs\":null}],\"usage\":{\"prompt_tokens\":10,\"total_tokens\":12,\"completion_tokens\":2}}\n\
+                   data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"qwen-3.8-27b\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"PONG\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"total_tokens\":16,\"completion_tokens\":6}}\n\
+                   data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"qwen-3.8-27b\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"total_tokens\":16,\"completion_tokens\":6},\"system_fingerprint\":\"vllm-0.27.1\"}\n\
+                   data: [DONE]\n";
+        let mut collected = String::new();
+        let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |frag| {
+            collected.push_str(frag);
+        })
+        .unwrap();
+        assert_eq!(collected, "\n\nPONG");
+        assert_eq!(response.content, "\n\nPONG");
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
     fn concatenates_tool_call_arguments_across_chunks() {
         let sse = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\"}}]}}]}\n\
                     data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"echo hi\\\"}\"}}]}}]}\n\

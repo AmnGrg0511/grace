@@ -37,6 +37,8 @@ pub enum AgentEvent<'a> {
         before_tokens: usize,
         after_tokens: usize,
         dropped_messages: usize,
+        /// Optional model-generated summary of the elided portion.
+        summary: Option<&'a str>,
     },
 
     /// A sub-agent was spawned by the `delegate` tool.

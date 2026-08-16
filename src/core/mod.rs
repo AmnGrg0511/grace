@@ -18,7 +18,9 @@ pub mod delegation;
 pub mod lifecycle;
 
 pub use agent::{run_turn, run_turn_with_options, TurnOptions, TurnOutcome};
-pub use context::{CompressionOutcome, Compressor, ContextCompressionConfig};
+pub use context::{
+    CompressionOutcome, CompressionResult, Compressor, ContextCompressionConfig,
+};
 pub use delegation::{
     Delegation, DelegationDepth, SubAgentReport, SubTask, DEFAULT_DELEGATION_BUDGET,
     MAX_DELEGATION_BUDGET, MAX_DELEGATION_DEPTH,

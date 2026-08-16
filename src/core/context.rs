@@ -39,6 +39,7 @@
 use crate::message::{Message, Role};
 use crate::transport::ProviderTransport;
 use crate::util::tokens::{HeuristicCounter, TokenCounter};
+use crate::util::Result;
 
 /// Context compression configuration.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -92,6 +93,14 @@ pub const FALLBACK_CONTEXT_WINDOW: u32 = 32_000;
 /// The marker inserted where history was elided.
 const ELISION_MARKER: &str = "[earlier conversation elided to fit the context window]";
 
+/// System prompt for the model that generates a smart summary of dropped context.
+const SUMMARY_SYSTEM_PROMPT: &str =
+    "You are a context summarizer. Summarize the following conversation in a concise \
+     way that preserves key facts, decisions, topics discussed, and context the assistant \
+     needs to continue the conversation naturally. Focus on technical details, code changes, \
+     decisions made, and the current state of any ongoing task. Keep the summary brief — \
+     aim for no more than 200 tokens.";
+
 /// What one compression pass did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionOutcome {
@@ -105,6 +114,29 @@ impl CompressionOutcome {
     pub fn changed(&self) -> bool {
         self.dropped_messages > 0
     }
+}
+
+/// Full result of a model-assisted compression pass.
+pub struct CompressionResult {
+    pub messages: Vec<Message>,
+    pub outcome: CompressionOutcome,
+    /// Model-generated summary of the dropped content, or `None` when the
+    /// plain elision marker was used (either no model available or summary
+    /// call failed).
+    pub summary: Option<String>,
+}
+
+/// Result of computing where to cut the message list.
+#[derive(Debug, Clone, Copy)]
+struct CompressionSplit {
+    /// Number of system messages at the head (0 or 1).
+    system_len: usize,
+    /// Index *within* the non-system body from which to keep messages.
+    keep_from: usize,
+    /// Token cost of the system portion.
+    system_cost: usize,
+    /// Token cost of the tail (rest[`keep_from`..]).
+    tail_cost: usize,
 }
 
 /// Decides when to compress and does it, against a pluggable token counter.
@@ -196,22 +228,122 @@ impl<C: TokenCounter> Compressor<C> {
         })
     }
 
+    /// Compress `messages` in place using a model-generated summary, if the
+    /// trigger is exceeded.  Returns the full [`CompressionResult`] so the
+    /// caller can surface the summary text.
+    pub fn compress_in_place_with_model(
+        &self,
+        messages: &mut Vec<Message>,
+        transport: &(dyn ProviderTransport + '_),
+    ) -> Option<CompressionResult> {
+        if !self.should_compress(messages) {
+            return None;
+        }
+        let before_len = messages.len();
+        let before_tokens = self.estimate(messages);
+        let result = self.compress_with_model(messages, transport);
+
+        match result {
+            Ok(res) => {
+                // Refuse a pass that did not strictly help.
+                if res.messages.len() >= before_len || res.outcome.after_tokens >= before_tokens {
+                    return None;
+                }
+                *messages = res.messages.clone();
+                Some(res)
+            }
+            Err(_) => {
+                // Summary call failed — fall back to plain compression.
+                let compressed = self.compress(messages);
+                let after_tokens = self.estimate(&compressed);
+                if compressed.len() >= before_len || after_tokens >= before_tokens {
+                    return None;
+                }
+                let dropped_messages = before_len - compressed.len();
+                *messages = compressed;
+                Some(CompressionResult {
+                    messages: messages.clone(),
+                    outcome: CompressionOutcome {
+                        before_tokens,
+                        after_tokens,
+                        dropped_messages,
+                    },
+                    summary: None,
+                })
+            }
+        }
+    }
+
     /// Produce the compressed conversation without mutating the input.
     fn compress(&self, messages: &[Message]) -> Vec<Message> {
-        let target = self.target_tokens();
+        let split = self.compute_split(messages);
+        let (system, rest) = messages.split_at(split.system_len);
+        let marker_cost = self.counter.count_message(&Message::user(ELISION_MARKER));
+        let body_budget =
+            self.target_tokens().saturating_sub(split.system_cost + marker_cost);
+        let keep_from = adjust_for_budget(rest, split.keep_from, split.tail_cost, body_budget, &self.counter, &self.config);
+        self.build_compressed(system, rest, keep_from, None)
+    }
 
-        // The leading system message is identity + durable facts. Dropping it
-        // changes who the agent is mid-conversation, so it is never a
-        // candidate — it is subtracted from the budget instead.
+    /// Compress `messages` using a model-generated summary for the dropped
+    /// portion. Falls back to the plain elision marker on any error.
+    pub fn compress_with_model(
+        &self,
+        messages: &[Message],
+        transport: &(dyn ProviderTransport + '_),
+    ) -> Result<CompressionResult> {
+        let before_tokens = self.estimate(messages);
+        let before_len = messages.len();
+
+        let split = self.compute_split(messages);
+        let (system, rest) = messages.split_at(split.system_len);
+        let keep_from = split.keep_from;
+        let dropped = &rest[..keep_from];
+
+        if dropped.is_empty() {
+            return Ok(CompressionResult {
+                messages: messages.to_vec(),
+                outcome: CompressionOutcome {
+                    before_tokens,
+                    after_tokens: before_tokens,
+                    dropped_messages: 0,
+                },
+                summary: None,
+            });
+        }
+
+        // Attempt to generate a model-based summary.
+        let summary = summarize_dropped(dropped, transport).ok();
+
+        let marker_cost = self.counter.count_message(&Message::user(ELISION_MARKER));
+        let body_budget =
+            self.target_tokens().saturating_sub(split.system_cost + marker_cost);
+        let keep_from = adjust_for_budget(rest, keep_from, split.tail_cost, body_budget, &self.counter, &self.config);
+
+        let compressed = self.build_compressed(system, rest, keep_from, summary.clone());
+
+        let after_tokens = self.estimate(&compressed);
+        let dropped_messages = before_len - compressed.len();
+
+        Ok(CompressionResult {
+            messages: compressed,
+            outcome: CompressionOutcome {
+                before_tokens,
+                after_tokens,
+                dropped_messages,
+            },
+            summary,
+        })
+    }
+
+    /// Compute where to cut: returns system length, keep-from index, and costs.
+    fn compute_split(&self, messages: &[Message]) -> CompressionSplit {
+        let target = self.target_tokens();
         let (system, rest) = split_system(messages);
         let system_cost: usize = system.iter().map(|m| self.counter.count_message(m)).sum();
-        let marker = Message::system(ELISION_MARKER);
-        let marker_cost = self.counter.count_message(&marker);
+        let marker_cost = self.counter.count_message(&Message::user(ELISION_MARKER));
         let body_budget = target.saturating_sub(system_cost + marker_cost);
 
-        // Walk backwards accumulating the most recent messages that fit, then
-        // widen the cut to the nearest safe boundary so no tool-call pair is
-        // split.
         let mut keep_from = rest.len();
         let mut used = 0usize;
         for (idx, msg) in rest.iter().enumerate().rev() {
@@ -224,15 +356,87 @@ impl<C: TokenCounter> Compressor<C> {
             keep_from = idx;
         }
         let keep_from = safe_boundary(rest, keep_from);
+        let tail_cost: usize = rest[keep_from..].iter().map(|m| self.counter.count_message(m)).sum();
 
+        CompressionSplit {
+            system_len: system.len(),
+            keep_from,
+            system_cost,
+            tail_cost,
+        }
+    }
+
+    /// Build the compressed message list from a split point and optional summary.
+    fn build_compressed(
+        &self,
+        system: &[Message],
+        rest: &[Message],
+        keep_from: usize,
+        summary: Option<String>,
+    ) -> Vec<Message> {
         let mut out = Vec::with_capacity(system.len() + 1 + (rest.len() - keep_from));
         out.extend(system.iter().cloned());
         if keep_from > 0 {
-            out.push(marker);
+            if let Some(sum) = summary {
+                out.push(Message::assistant(format!(
+                    "[conversation summary]\n{sum}"
+                )));
+            } else {
+                out.push(Message::user(ELISION_MARKER));
+            }
         }
         out.extend(rest[keep_from..].iter().cloned());
         out
     }
+}
+
+/// Re-adjust keep_from after adding a summary, ensuring we still fit budget.
+fn adjust_for_budget<C: TokenCounter>(
+    rest: &[Message],
+    keep_from: usize,
+    tail_cost: usize,
+    body_budget: usize,
+    counter: &C,
+    config: &ContextCompressionConfig,
+) -> usize {
+    let summary_cost = counter.count_message(&Message::assistant("[conversation summary]\n..."));
+    let available = body_budget.saturating_sub(summary_cost);
+    if tail_cost <= available {
+        return keep_from;
+    }
+    // Need to drop more messages to fit the summary
+    let mut new_cost = 0usize;
+    let mut new_keep = rest.len();
+    for (idx, msg) in rest.iter().enumerate().rev() {
+        let cost = counter.count_message(msg);
+        let kept_so_far = rest.len() - idx - 1;
+        if new_cost + cost > available && kept_so_far >= config.min_recent_messages {
+            break;
+        }
+        new_cost += cost;
+        new_keep = idx;
+    }
+    safe_boundary(rest, new_keep)
+}
+
+/// Call the model to produce a summary of the dropped portion.
+fn summarize_dropped(
+    dropped: &[Message],
+    transport: &(dyn ProviderTransport + '_),
+) -> Result<String> {
+    let transcript = dropped
+        .iter()
+        .map(|m| format!("[{}]: {}", m.role.as_str(), m.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let messages = vec![
+        Message::system(SUMMARY_SYSTEM_PROMPT),
+        Message::user(transcript),
+    ];
+
+    let resp = transport.complete(&messages, &[], "")?;
+    Ok(resp.content)
 }
 
 /// Split off a leading system message, if present.
@@ -511,5 +715,121 @@ mod tests {
             c.compress_in_place(&mut msgs).is_none(),
             "a converged conversation must not re-compress"
         );
+    }
+
+    #[test]
+    fn model_compression_replaces_marker_with_summary() {
+        struct SummaryTransport;
+        impl ProviderTransport for SummaryTransport {
+            fn name(&self) -> &str {
+                "summary"
+            }
+            fn complete(
+                &self,
+                _m: &[Message],
+                _t: &[crate::transport::ToolSpec],
+                _model: &str,
+            ) -> crate::util::Result<crate::transport::ModelResponse> {
+                Ok(crate::transport::ModelResponse {
+                    content: "User asked about Rust lifetimes; assistant explained borrow checker rules.".into(),
+                    tool_calls: vec![],
+                    finish_reason: crate::transport::FinishReason::Stop,
+                })
+            }
+            fn context_window(&self) -> Option<u32> {
+                Some(4_000)
+            }
+        }
+        let c = Compressor::with_window(&cfg(), 4_000);
+        let mut msgs = long_conversation(60, 40);
+        let result = c.compress_in_place_with_model(&mut msgs, &SummaryTransport).expect("should compress");
+        assert!(result.outcome.changed());
+        assert!(result.summary.is_some(), "model summary should be present");
+        // The summary replaces the marker — no elided marker in the result
+        assert!(
+            !msgs.iter().any(|m| m.content.contains("elided")),
+            "summary should replace the plain elision marker"
+        );
+        // The summary message should be an assistant message
+        let summary_msg = msgs.iter().find(|m| m.content.starts_with("[conversation summary]"));
+        assert!(summary_msg.is_some(), "summary message should be present");
+        assert_eq!(summary_msg.map(|m| m.role), Some(Role::Assistant));
+    }
+
+    #[test]
+    fn model_compression_falls_back_on_error() {
+        struct FailingTransport;
+        impl ProviderTransport for FailingTransport {
+            fn name(&self) -> &str {
+                "failing"
+            }
+            fn complete(
+                &self,
+                _m: &[Message],
+                _t: &[crate::transport::ToolSpec],
+                _model: &str,
+            ) -> crate::util::Result<crate::transport::ModelResponse> {
+                Err(crate::util::AgentError::Transport("summary call failed".into()))
+            }
+            fn context_window(&self) -> Option<u32> {
+                Some(4_000)
+            }
+        }
+        let c = Compressor::with_window(&cfg(), 4_000);
+        let mut msgs = long_conversation(60, 40);
+        let result = c.compress_in_place_with_model(&mut msgs, &FailingTransport).expect("should compress");
+        assert!(result.outcome.changed());
+        assert!(result.summary.is_none(), "should fall back to no summary");
+        // Should still have the plain marker
+        assert!(
+            msgs.iter().any(|m| m.content.contains("elided")),
+            "fallback should use elision marker"
+        );
+    }
+
+    #[test]
+    fn model_compression_preserves_tool_call_pairs() {
+        struct SummaryTransport;
+        impl ProviderTransport for SummaryTransport {
+            fn name(&self) -> &str {
+                "summary"
+            }
+            fn complete(
+                &self,
+                _m: &[Message],
+                _t: &[crate::transport::ToolSpec],
+                _model: &str,
+            ) -> crate::util::Result<crate::transport::ModelResponse> {
+                Ok(crate::transport::ModelResponse {
+                    content: "Summary of tool interactions".into(),
+                    tool_calls: vec![],
+                    finish_reason: crate::transport::FinishReason::Stop,
+                })
+            }
+            fn context_window(&self) -> Option<u32> {
+                Some(4_000)
+            }
+        }
+        let mut msgs = vec![Message::system("sys")];
+        for i in 0..40 {
+            let mut a = Message::assistant(filler(30));
+            a.tool_calls = vec![ToolCall::new(format!("c{i}"), "bash", "{}")];
+            msgs.push(a);
+            msgs.push(Message::tool(format!("c{i}"), "bash", filler(30)));
+        }
+        let c = Compressor::with_window(&cfg(), 4_000);
+        c.compress_in_place_with_model(&mut msgs, &SummaryTransport).unwrap();
+
+        // Any surviving tool message must be preceded by an assistant message.
+        for (i, m) in msgs.iter().enumerate() {
+            if m.role == Role::Tool {
+                let prev = msgs.get(i.wrapping_sub(1)).map(|p| p.role);
+                assert_eq!(
+                    prev,
+                    Some(Role::Assistant),
+                    "orphaned tool message at index {i}"
+                );
+            }
+        }
     }
 }

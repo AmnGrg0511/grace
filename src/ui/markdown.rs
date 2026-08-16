@@ -9,6 +9,7 @@ use std::io::IsTerminal;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
+use unicode_width::UnicodeWidthStr;
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -60,9 +61,14 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     let parser = Parser::new_ext(md, opts);
 
-    let ss = SyntaxSet::load_defaults_newlines();
-    let ts = ThemeSet::load_defaults();
-    let theme = &ts.themes["base16-ocean.dark"];
+    // Loaded once per process: reconstructing the default syntax/theme sets
+    // takes hundreds of milliseconds, and the streaming renderer calls this
+    // once per finalized block.
+    static SS: std::sync::LazyLock<SyntaxSet> =
+        std::sync::LazyLock::new(SyntaxSet::load_defaults_newlines);
+    static TS: std::sync::LazyLock<ThemeSet> = std::sync::LazyLock::new(ThemeSet::load_defaults);
+    let theme = &TS.themes["base16-ocean.dark"];
+    let ss = &*SS;
 
     let gold = code_color(skin);
     let heading_color = heading_ansi(skin);
@@ -170,7 +176,7 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
                 }
                 TagEnd::CodeBlock => {
                     if !code_buf.is_empty() {
-                        out.push_str(&render_code_block(&code_buf, &code_lang, &ss, theme, &gold));
+                        out.push_str(&render_code_block(&code_buf, &code_lang, ss, theme, &gold));
                     }
                     in_code = false;
                     code_lang.clear();
@@ -341,9 +347,19 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
         }
     }
 
-    // Trim trailing whitespace but keep content
+    // Trim trailing whitespace but keep content.  With *no* content the
+    // result must be empty, not a lone newline: the streaming renderer
+    // incrementally renders growing prefixes and requires render(p) to be a
+    // byte-prefix of render(p+more).  A phantom "\n" for empty input breaks
+    // that (render("\n\n")=="\n" vs render("\n\nPONG")=="PONG\n"), which made
+    // the duplication guard drop the entire answer — silent total loss,
+    // e.g. for thinking-model replies whose content starts with "\n\n".
     let trimmed = out.trim_end_matches('\n').to_string();
-    format!("{trimmed}\n")
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n")
+    }
 }
 
 fn list_depth(stack: &[(bool, usize)]) -> usize {
@@ -372,7 +388,7 @@ fn render_code_block(
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     let lines: Vec<&str> = code.lines().collect();
-    let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let max_len = lines.iter().map(|l| display_width(l)).max().unwrap_or(0);
     let box_width = max_len.max(20) + 2;
 
     let mut out = String::new();
@@ -386,7 +402,7 @@ fn render_code_block(
 
     for line in &lines {
         let ranges = highlighter.highlight_line(line, ss).unwrap_or_default();
-        let visible_len: usize = ranges.iter().map(|(_, t)| t.chars().count()).sum();
+        let visible_len = display_width(line);
         let pad = box_width.saturating_sub(visible_len + 2);
 
         out.push_str(DIM);
@@ -439,8 +455,7 @@ fn render_table(rows: &[Vec<String>], header_indices: &[usize]) -> String {
     let mut widths = vec![0usize; ncols];
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            let visible = strip_ansi(cell);
-            widths[i] = widths[i].max(visible.chars().count());
+            widths[i] = widths[i].max(display_width(cell));
         }
     }
 
@@ -463,8 +478,7 @@ fn render_table(rows: &[Vec<String>], header_indices: &[usize]) -> String {
         out.push_str("│ ");
         out.push_str(RESET);
         for (ci, cell) in row.iter().enumerate() {
-            let visible = strip_ansi(cell);
-            let pad = widths[ci].saturating_sub(visible.chars().count());
+            let pad = widths[ci].saturating_sub(display_width(cell));
             if is_header {
                 out.push_str(BOLD);
                 out.push_str(cell);
@@ -524,6 +538,14 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Terminal cell count of `s` after dropping ANSI escapes: wide/CJK/emoji
+/// glyphs (e.g. `✅`, `中`) occupy two columns, not one.  This is what keeps
+/// box/table borders aligned — `chars().count()` undercounts wide glyphs and
+/// shifts the right `│` border one cell off on the affected lines.
+fn display_width(s: &str) -> usize {
+    strip_ansi(s).width()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +593,61 @@ mod tests {
         assert!(rendered.contains('└'));
         assert!(rendered.contains('│'));
         assert!(!rendered.contains("────────────────────────────────────────┐"));
+    }
+
+    #[test]
+    fn code_block_box_aligns_with_wide_glyphs() {
+        // A code block whose comments contain a wide (2-cell) ✅ glyph: every
+        // rendered row — top/bottom borders AND every content line — must have
+        // the same display width, so the right `│` border lines up.  With the
+        // old chars().count() sizing, ✅ lines rendered one cell too wide and
+        // the right border stuck out.
+        let ss = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+        let theme = &ts.themes["base16-ocean.dark"];
+        let gold = code_color(&crate::ui::skin::SOLARIS);
+
+        let code = "fn shout(text: &str) {\n\
+                    |    println!(\"{}\", text.to_uppercase());\n\
+                    |}\n\
+                    |\n\
+                    |shout(\"hi\");              // ✅ literal\n\
+                    |shout(&my_string);        // ✅ &String auto-derefs to &str";
+        let rendered = render_code_block(code, "rust", &ss, theme, &gold);
+
+        let widths: Vec<usize> = rendered
+            .lines()
+            .map(display_width)
+            .filter(|&w| w > 0)
+            .collect();
+        assert!(widths.len() >= 3, "expected a bordered box: {rendered:?}");
+        assert_eq!(
+            widths.iter().max(),
+            widths.iter().min(),
+            "box rows must all be the same display width: {rendered:?} widths={widths:?}"
+        );
+    }
+
+    #[test]
+    fn table_aligns_with_wide_glyphs() {
+        // Same invariant for tables: a cell containing a wide glyph must not
+        // shift its column's right border.
+        let rows = vec![
+            vec!["A".to_string(), "B".to_string()],
+            vec!["✅ ok".to_string(), "plain".to_string()],
+        ];
+        let rendered = render_table(&rows, &[0]);
+        let widths: Vec<usize> = rendered
+            .lines()
+            .map(display_width)
+            .filter(|&w| w > 0)
+            .collect();
+        assert!(widths.len() >= 4, "expected a bordered table: {rendered:?}");
+        assert_eq!(
+            widths.iter().max(),
+            widths.iter().min(),
+            "table rows must all be the same display width: {rendered:?} widths={widths:?}"
+        );
     }
 
     #[test]

@@ -11,3 +11,6 @@
 *.key
 credentials*
 typescript
+
+# Local agent config (SOPs, scratch notes) — never committed
+.opencode/
