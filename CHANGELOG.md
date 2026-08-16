@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.3.1
+
+**Fixed**
+- Streaming output was **silently truncated** when a list contained
+  nested items with styled text (e.g. `**bold**` in a nested bullet):
+  inline style escapes were emitted at the tag-open position, and in
+  tight lists that position can sit on the *parent* item's line — so
+  rendering the extended prefix changed bytes already emitted, and the
+  duplication guard dropped the rest of the answer.  Inline styles are
+  now emitted together with the styled text, keeping every render a
+  true byte-prefix of the next.
+- Strong/emphasis/link inside table cells wrote escapes into the wrong
+  buffer; cells now render their styling correctly.
+
+**Tests**
+- `stream_sim_driver` is now self-contained (committed real capture
+  fixture, OS-temp outputs) and asserts the full answer reaches the
+  terminal at 20/40/120 columns from a real 37 KB thinking-model turn —
+  the regression above is caught in CI, not just locally.
+
 ## v0.3.0
 
 **Added**
