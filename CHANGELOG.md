@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.4
+
+**Fixed**
+- The public repo leaked maintainer- and project-specific identifiers:
+  the seeded `grace-agent` default skill (and its embedded copy in the
+  binary) carried the maintainer's build path, and doc comments, tests,
+  and CLI examples named the internal product. The skill now documents a
+  plain `cargo build --release` + `cp` install, and the tests, comments,
+  and example use a neutral stand-in.
+
 ## v0.3.3
 
 **Fixed**
