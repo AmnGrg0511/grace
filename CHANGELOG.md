@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.3.3
+
+**Fixed**
+- The answer appeared **all at once at the end** of generation in chat
+  mode and one-shot `--stream` instead of progressively.  The streaming
+  transport read the entire HTTP body before parsing it, so every
+  fragment fired in one burst after the model finished.  The SSE body is
+  now read incrementally from the socket and each fragment reaches the
+  renderer as it is produced; first visible token arrives within one
+  round trip of generation start.
+- A mid-stream network failure now surfaces as an io error naming the
+  read failure (previously a transport error from the buffered read);
+  it still aborts the turn with a message, never silently.
+
+**Tests**
+- `parse_sse_stream` is now guarded against its two load-bearing
+  properties: chunk-boundary agnosticism (byte-at-a-time delivery parses
+  identically to a one-shot buffer) and terminating at `data: [DONE]`
+  even when the connection stays open (keep-alive) afterward.
+
 ## v0.3.2
 
 **Fixed**
