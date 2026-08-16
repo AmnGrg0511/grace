@@ -782,6 +782,14 @@ pub struct StreamState {
     /// we can verify the new render is a byte-prefix extension of it (the
     /// invariant that makes delta-emission duplication-free).
     last_rendered: String,
+    /// The render width for this stream, captured once, on first use —
+    /// `Some` after the first render, the inner value `None` when there is no
+    /// width (no terminal size and no `COLUMNS`).  Pinning it is load-bearing: a
+    /// table's wrapped form depends on the width, so a fresh per-render width
+    /// would let a mid-stream resize re-wrap an already-committed table and
+    /// break the byte-prefix invariant the delta emitter checks.  One-shot
+    /// renders (answers, tool results) resolve a fresh width instead.
+    width: Option<Option<usize>>,
 }
 
 /// The byte offset into `buf` up to which the buffer consists of fully
@@ -824,10 +832,12 @@ fn stable_commit_endpoint(buf: &str) -> usize {
             // do NOT advance commit past the opening fence: the block's
             // content is not finalized until the closing fence arrives.
         } else if is_table_row(line) {
-            // A table's rendered box is sized to its widest line, so every
-            // already-rendered row (and the borders) would change if a wider
-            // row arrives — the same prefix-instability as an open fence.
-            // Hold the table's last rows until a non-row line ends them.
+            // A table's rendered box depends on every row of it (columns are
+            // sized to the whole table, then fitted to the terminal width),
+            // so every already-rendered row — borders included — could
+            // change if another row arrives: the same prefix-instability as
+            // an open fence.  Hold the table's rows until a non-row line
+            // ends it.
         } else {
             commit = line_end; // finalizes any held table rows, too
         }
@@ -916,7 +926,10 @@ pub fn finalize_stream(
     out: &mut dyn std::io::Write,
 ) -> std::io::Result<()> {
     if !disable_color && !stream.buf.is_empty() {
-        let rendered = crate::ui::markdown::render_terminal_colored(&stream.buf, skin, true);
+        let width = *stream
+            .width
+            .get_or_insert_with(crate::ui::markdown::terminal_width);
+        let rendered = crate::ui::markdown::render_terminal_width(&stream.buf, skin, true, width);
         emit_committed(stream, &rendered, out);
         out.flush()?;
     }
@@ -1068,11 +1081,17 @@ pub fn print_agent_event_to(
                 // newly-rendered bytes.  Append-only — no cursor movement — so
                 // it renders markdown on any terminal, keeps rendering past the
                 // viewport, and cannot duplicate.
+                // Pin the width for this stream on first use (see
+                // StreamState::width): a mid-stream resize must not re-wrap an
+                // already-committed table.
+                let width = *stream
+                    .width
+                    .get_or_insert_with(crate::ui::markdown::terminal_width);
                 let commit = stable_commit_endpoint(&stream.buf);
                 if commit > 0 {
                     let committed = &stream.buf[..commit];
                     let rendered =
-                        crate::ui::markdown::render_terminal_colored(committed, skin, true);
+                        crate::ui::markdown::render_terminal_width(committed, skin, true, width);
                     emit_committed(stream, &rendered, out);
                 }
             }
@@ -1826,6 +1845,59 @@ mod streaming_markdown_tests {
         assert!(!s.contains("```"), "raw fences must never reach the terminal: {s:?}");
         let expected = crate::ui::markdown::render_terminal_colored(doc, &skin, true);
         assert_eq!(s, expected, "streamed deltas must reassemble into the full render");
+
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+    }
+
+    #[test]
+    fn streamed_wide_table_fits_the_terminal_width() {
+        // A table whose natural width exceeds the terminal must stream as
+        // wrapped rows that fit the width (no soft-wrap at the edge), keep
+        // every byte of content, and reassemble into the full render.
+        let _lock = crate::util::test_support::env_guard();
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        std::env::set_var("COLUMNS", "60");
+        let skin = crate::ui::skin::SOLARIS;
+        let doc = format!(
+            "| name | score |\n| --- | --- |\n| {} | 10 |\n",
+            "a".repeat(120)
+        );
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        for frag in doc.as_bytes().chunks(13) {
+            let frag = std::str::from_utf8(frag).unwrap();
+            print_agent_event_to(
+                AgentEvent::ContentFragment(frag),
+                &skin,
+                false,
+                &mut stream,
+                &mut out,
+            );
+        }
+        let _ = finalize_stream(&mut stream, &skin, false, &mut out);
+        let s = String::from_utf8(out).unwrap();
+
+        // No table row may exceed the terminal width the stream pinned.
+        let width = crate::ui::markdown::terminal_width().unwrap();
+        use unicode_width::UnicodeWidthStr;
+        let wide_rows: Vec<String> = s.lines().map(strip_ansi).filter(|l| l.contains('│')).collect();
+        assert!(!wide_rows.is_empty(), "expected a rendered table: {s:?}");
+        assert!(
+            wide_rows.iter().all(|l| l.width() <= width),
+            "every table row must fit the terminal: {s:?} width={width}"
+        );
+        // No content is lost to the wrap.
+        let plain: String = s.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
+        assert!(
+            plain.matches('a').count() >= 120,
+            "table content lost in the wrap: {plain:?}"
+        );
+        assert_eq!(
+            s,
+            crate::ui::markdown::render_terminal_colored(&doc, &skin, true),
+            "streamed deltas must reassemble into the full render"
+        );
 
         std::env::remove_var("NO_COLOR");
         std::env::remove_var("CLICOLOR");

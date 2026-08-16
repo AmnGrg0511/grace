@@ -46,7 +46,11 @@ cargo build --release
   reassembly).
 - `render_terminal_colored` stays **prefix-stable**: render(p) is a
   byte prefix of render(p+more) for line-complete prefixes. Guarded by
-  `render_is_prefix_stable_under_line_extension`.
+  `render_is_prefix_stable_under_line_extension`. Table layout depends
+  on the terminal width, so the stream path must use ONE width per
+  stream (pinned in `StreamState::width`) — never re-resolve the width
+  per render inside the stream path, or a mid-stream resize re-wraps an
+  already-committed table and the invariant breaks.
 - Never swallow errors in the turn/event path. An empty or failed
   answer must say why — silent no-outputs are the worst failure mode.
 - No secrets (keys, endpoint URLs, credentials) in code, comments,

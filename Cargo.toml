@@ -39,6 +39,11 @@ rustyline = "14"
 # TTY detection. See https://rust-cli-recommendations.sunshowers.io/managing-colors-in-rust.html
 anstyle = "1"
 anstyle-query = "1"
+# Live terminal size for width-aware table wrapping.  std has no size API
+# on stable, and COLUMNS is not reliable (interactive shells here often
+# don't export it) — the ioctl-backed size is the primary source, with
+# COLUMNS only as the fallback for piped output (e.g. `grace | less -R`).
+terminal_size = "0.4"
 # Unified diff generation for the patch tool's terminal output — same
 # diffing engine used by ruff, difftastic-adjacent tooling. Avoids
 # hand-rolling LCS/Myers diff.
