@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.0
+
+**Added**
+- Append-only streaming: long answers now stream past the terminal
+  viewport with no duplication and no cursor re-rendering. Each
+  completed markdown block (paragraphs, headings, lists, code fences,
+  tables) is rendered exactly once and emitted exactly once.
+- Tables commit atomically (like code fences), so a table box is never
+  exposed half-sized mid-stream.
+- VT replay driver test (`stream_sim_driver`) replays the bytes grace
+  actually emits through a terminal screen model.
+
+**Fixed**
+- Streaming replies from thinking models (gateways that stream
+  reasoning tokens first, then content beginning with blank lines)
+  rendered **nothing at all** — the renderer's unconditional trailing
+  newline broke the byte-prefix invariant the duplication guard
+  enforces, so every delta after the first was silently dropped.
+  Empty/whitespace-only input now renders to nothing.
+- Syntax highlighting data reloaded on every streamed line; now cached
+  for the process lifetime.
+
 ## v0.2.1
 
 **Fixed**
