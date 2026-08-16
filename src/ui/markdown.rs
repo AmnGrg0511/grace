@@ -135,17 +135,19 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
                 Tag::Item => {
                     list_item_started = true;
                 }
+                // State only — the escapes are emitted with the styled TEXT
+                // (see Event::Text), not here: in tight list items a tag can
+                // open before the newline that starts its text's line, and an
+                // early escape would land on the previous line, breaking the
+                // byte-prefix invariant the streaming emitter relies on.
                 Tag::Strong => {
                     strong_stack += 1;
-                    out.push_str(BOLD);
                 }
                 Tag::Emphasis => {
                     em_stack += 1;
-                    out.push_str(ITALIC);
                 }
                 Tag::Link { .. } => {
                     _in_link = true;
-                    out.push_str(UNDERLINE);
                 }
                 Tag::Table(_) => {
                     ensure_blank(&mut out, 1);
@@ -198,17 +200,31 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
                         elem.1 += 1;
                     }
                 }
+                // The closing reset goes to the same buffer the styled text
+                // went to (cells render from cell_buf, not `out`).
                 TagEnd::Strong => {
                     strong_stack = strong_stack.saturating_sub(1);
-                    out.push_str(RESET);
+                    if in_cell {
+                        cell_buf.push_str(RESET);
+                    } else {
+                        out.push_str(RESET);
+                    }
                 }
                 TagEnd::Emphasis => {
                     em_stack = em_stack.saturating_sub(1);
-                    out.push_str(RESET);
+                    if in_cell {
+                        cell_buf.push_str(RESET);
+                    } else {
+                        out.push_str(RESET);
+                    }
                 }
                 TagEnd::Link => {
                     _in_link = false;
-                    out.push_str(RESET);
+                    if in_cell {
+                        cell_buf.push_str(RESET);
+                    } else {
+                        out.push_str(RESET);
+                    }
                 }
                 TagEnd::TableHead => {
                     // The header row is complete - push it and record its index
@@ -250,9 +266,27 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
 
             // ── Text ─────────────────────────────────────────────
             Event::Text(text) => {
+                // Open inline styles are applied to the buffer the text
+                // actually lands in, at the instant it is written — not at
+                // the tag-open position.  In tight list items a tag can open
+                // before the newline that starts this text's line, and an
+                // early escape would land on the previous line, breaking the
+                // byte-prefix invariant the streaming emitter depends on.
+                let open_style = |buf: &mut String| {
+                    if strong_stack > 0 {
+                        buf.push_str(BOLD);
+                    }
+                    if em_stack > 0 {
+                        buf.push_str(ITALIC);
+                    }
+                    if _in_link {
+                        buf.push_str(UNDERLINE);
+                    }
+                };
                 if in_code {
                     code_buf.push_str(&text);
                 } else if in_cell {
+                    open_style(&mut cell_buf);
                     cell_buf.push_str(&text);
                 } else if in_blockquote {
                     if bq_needs_prefix {
@@ -262,11 +296,13 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
                         bq_needs_prefix = false;
                     }
                     out.push_str(DIM);
+                    open_style(&mut out);
                     out.push_str(&text);
                     out.push_str(RESET);
                 } else if heading_level > 0 {
                     out.push_str(&heading_color);
                     out.push_str(BOLD);
+                    open_style(&mut out);
                     out.push_str(&text);
                     out.push_str(RESET);
                 } else if list_item_started {
@@ -285,11 +321,14 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
                         out.push_str(RESET);
                     }
                     list_item_started = false;
+                    open_style(&mut out);
                     out.push_str(&text);
                 } else if !list_stack.is_empty() {
                     // Continuation text in a list item
+                    open_style(&mut out);
                     out.push_str(&text);
                 } else {
+                    open_style(&mut out);
                     out.push_str(&text);
                 }
             },

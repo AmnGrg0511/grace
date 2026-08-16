@@ -1710,10 +1710,17 @@ mod streaming_markdown_tests {
                    \n\
                    ### Heading after the block\n\
                    \n\
-                   - bullet one\n\
-                   - bullet two with `code` inside\n\
-                   \n\
-                   A second fence, longer lines:   \n\
+                    - bullet one\n\
+                    - bullet two with `code` inside\n\
+                    \n\
+                    A nested list with styling in the children:\n\
+                    \n\
+                    * Parent item text here:\n\
+                    \x20\x20* **Abacus** and bead counting frames\n\
+                    \x20\x20* A nested item that is deliberately much longer than the parent line above it so the box and lines must stay stable while it arrives\n\
+                    \x20\x20* Mixed **bold** and *italic* in one item\n\
+                    \n\
+                    A second fence, longer lines:   \n\
                    ```cpp\n\
                    std::vector<int> v = {1, 2, 3};\n\
                    v.push_back(4);\n\
