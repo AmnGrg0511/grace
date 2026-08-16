@@ -168,8 +168,8 @@ Tools are Rust structs implementing the `Tool` trait (`src/tools/trait.rs`):
    (for something conditional, e.g. `delegate` or `session_search`). Do NOT
    register tools from `main.rs` — that is how a tool ends up missing from
    every entry point except one.
-3. Rebuild: `CARGO_TARGET_DIR=/calypto/scratch/amagar24/grace-target cargo build --release`
-   then reinstall (`cp` the binary to `~/.local/bin/grace`) — a new tool
+3. Rebuild: `cargo build --release`
+   then reinstall (`cp` `target/release/grace` to `~/.local/bin/grace`) — a new tool
    is NOT hot-loadable, unlike a skin or a skill.
 4. Verify: `grace --chat` then ask a question that should trigger the
    tool; confirm it appears in the tool-call tree with the right name.

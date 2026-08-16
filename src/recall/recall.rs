@@ -190,14 +190,14 @@ mod tests {
         let (mem_path, skills_dir, _) = scratch_paths("basic");
         let memory = Memory::open(&mem_path).unwrap();
         memory
-            .remember("user works on PowerPro QoR regression triage")
+            .remember("user works on acme regression triage")
             .unwrap();
         memory.remember("user prefers concise answers").unwrap();
 
-        std::fs::create_dir_all(skills_dir.join("powerpro-regold")).unwrap();
+        std::fs::create_dir_all(skills_dir.join("acme-triage")).unwrap();
         std::fs::write(
-            skills_dir.join("powerpro-regold").join("SKILL.md"),
-            "---\ndescription: Attribute and regold PowerPro QoR regression failures\n---\n# body",
+            skills_dir.join("acme-triage").join("SKILL.md"),
+            "---\ndescription: Triage and attribute acme regression failures\n---\n# body",
         )
         .unwrap();
         std::fs::create_dir_all(skills_dir.join("unrelated")).unwrap();
@@ -209,7 +209,7 @@ mod tests {
         let skills = SkillStore::new(&skills_dir);
 
         let hits = recall(
-            "help me triage a PowerPro QoR regression failure",
+            "help me triage an acme regression failure",
             &memory,
             &skills,
             None,
@@ -218,10 +218,10 @@ mod tests {
 
         assert!(hits
             .iter()
-            .any(|h| h.kind == "fact" && h.snippet.contains("QoR regression")));
+            .any(|h| h.kind == "fact" && h.snippet.contains("regression triage")));
         assert!(hits
             .iter()
-            .any(|h| h.kind == "skill" && h.label == "powerpro-regold"));
+            .any(|h| h.kind == "skill" && h.label == "acme-triage"));
         assert!(!hits.iter().any(|h| h.label == "unrelated"));
         assert!(!hits.iter().any(|h| h.snippet.contains("concise answers")));
 

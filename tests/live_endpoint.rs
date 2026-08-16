@@ -10,8 +10,7 @@
 //! export GRACE_LIVE_BASE_URL="https://your-endpoint/v1"
 //! export GRACE_LIVE_API_KEY="..."
 //! export GRACE_LIVE_MODEL="your-model-id"
-//! CARGO_TARGET_DIR=/calypto/scratch/amagar24/grace-target \
-//!   cargo test --release --test live_endpoint -- --ignored --test-threads=1
+//! cargo test --release --test live_endpoint -- --ignored --test-threads=1
 //! ```
 //!
 //! Credentials are read ONLY from environment variables at run time — never

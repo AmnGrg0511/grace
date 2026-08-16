@@ -332,8 +332,8 @@ fn a_sub_agent_can_use_tools_within_its_budget() {
 
 #[test]
 fn a_runaway_sub_agent_spends_only_its_own_budget() {
-    // The central guarantee, modelled on PowerPro's insert_obs: one
-    // pathological branch cannot consume the parent's remaining rounds.
+    // The central guarantee: one pathological branch cannot consume the
+    // parent's remaining rounds.
     let transport = ScriptedTransport::new(vec![call_tool(
         "c",
         "bash",

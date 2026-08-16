@@ -126,8 +126,8 @@ mod tests {
 
     #[test]
     fn extract_links_finds_wikilink_targets() {
-        let links = Memory::extract_links("see [[powerpro]] and [[grace core]]");
-        assert_eq!(links, vec!["powerpro", "grace core"]);
+        let links = Memory::extract_links("see [[acme]] and [[grace core]]");
+        assert_eq!(links, vec!["acme", "grace core"]);
     }
 
     #[test]
@@ -144,10 +144,10 @@ mod tests {
     #[test]
     fn resolve_links_pulls_in_a_referenced_fact() {
         let (dir, mem) = scratch("resolve");
-        mem.remember("powerpro is the EDA tool we work on").unwrap();
-        mem.remember("today we debug [[powerpro]]").unwrap();
-        let resolved = mem.resolve_links("today we debug [[powerpro]]").unwrap();
-        assert!(resolved.iter().any(|f| f.content.contains("EDA tool")));
+        mem.remember("acme is the build tool we work on").unwrap();
+        mem.remember("today we debug [[acme]]").unwrap();
+        let resolved = mem.resolve_links("today we debug [[acme]]").unwrap();
+        assert!(resolved.iter().any(|f| f.content.contains("build tool")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -269,15 +269,15 @@ fn forgetting_an_unknown_fact_reports_false_rather_than_erroring() {
 fn wikilinks_resolve_one_hop_between_facts() {
     let dir = scratch_dir("links");
     let mem = Memory::open(dir.join("memory.db")).unwrap();
-    mem.remember("powerpro is an EDA power optimization tool")
+    mem.remember("acme is the build tool we use")
         .unwrap();
-    mem.remember("today we debug [[powerpro]] sequential moves")
+    mem.remember("today we debug [[acme]] sequential moves")
         .unwrap();
 
     let resolved = mem
-        .resolve_links("today we debug [[powerpro]] sequential moves")
+        .resolve_links("today we debug [[acme]] sequential moves")
         .unwrap();
-    assert!(resolved.iter().any(|f| f.content.contains("EDA power")));
+    assert!(resolved.iter().any(|f| f.content.contains("build tool")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

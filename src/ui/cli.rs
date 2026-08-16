@@ -447,7 +447,7 @@ fn run_action(action: &Action) -> Result<ExitCode, BoxedError> {
         }
         Action::SearchSessions(query) => {
             if query.is_empty() {
-                eprintln!("--search-sessions requires a query, e.g. --search-sessions \"powerpro\"");
+                eprintln!("--search-sessions requires a query, e.g. --search-sessions \"refactor\"");
                 return Ok(ExitCode::FAILURE);
             }
             let sessions = SessionStore::open(SessionStore::default_path())?;

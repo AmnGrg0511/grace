@@ -15,11 +15,10 @@
 //! - **A clean message history.** The whole point of delegating is that the
 //!   subtask does not inherit (or pollute) the parent's context. This is what
 //!   makes delegation a context-management tool and not just a function call.
-//! - **Its own iteration budget.** Modelled on PowerPro's `insert_obs`
-//!   multi-flop transform, where each nested transform gets an explicit
-//!   bounded budget so one pathological branch cannot consume the parent's
-//!   remaining rounds. A runaway subtask fails *its own* budget and reports
-//!   back; the parent keeps every iteration it had left and can react.
+//! - **Its own iteration budget.** A sub-agent gets an explicit bounded
+//!   budget, so one pathological branch cannot consume the parent's remaining
+//!   rounds. A runaway subtask fails *its own* budget and reports back; the
+//!   parent keeps every iteration it had left and can react.
 //! - **A narrowable tool set.** A sub-agent asked to summarize files has no
 //!   business holding `bash`.
 //!
