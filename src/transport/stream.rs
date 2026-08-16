@@ -176,8 +176,10 @@ pub fn stream_complete(
         let text = resp.text().unwrap_or_default();
         return Err(AgentError::Transport(format!("HTTP {status}: {text}")));
     }
-    let body_bytes = resp.bytes().map_err(AgentError::from)?;
-    parse_sse_stream(std::io::Cursor::new(body_bytes), on_fragment)
+    // `Response` implements io::Read, so this reads the body incrementally
+    // and each fragment is delivered as it arrives — `resp.bytes()` would
+    // buffer the whole generation and fire everything in one burst at the end.
+    parse_sse_stream(resp, on_fragment)
 }
 
 #[cfg(test)]
@@ -246,5 +248,84 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 2);
         assert_eq!(response.tool_calls[0].name(), "foo");
         assert_eq!(response.tool_calls[1].name(), "bar");
+    }
+
+    /// A `Read` that yields at most `chunk` bytes per call — a stand-in for
+    /// a network delivering an SSE body one chunk at a time, where chunk
+    /// boundaries can fall anywhere (mid-`data:`, mid-JSON, mid-line-break).
+    struct ChunkyRead {
+        bytes: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+        /// Error instead of EOF once the bytes are exhausted — a keep-alive
+        /// server that never closes the connection.
+        open_after_end: bool,
+    }
+
+    impl Read for ChunkyRead {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.bytes.len() {
+                if self.open_after_end {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "connection still open",
+                    ));
+                }
+                return Ok(0);
+            }
+            let n = self.chunk.min(buf.len()).min(self.bytes.len() - self.pos);
+            buf[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn sse_parse_is_chunk_boundary_agnostic() {
+        // Live streaming depends on this: the body must parse identically
+        // whether it arrives in one slab or byte by byte, so a socket
+        // delivering chunks can drive the same code path a Cursor does.
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"lo, \"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"world!\"}, \"finish_reason\":null}]}\n\
+                   data: {\"choices\":[{\"delta\":{}, \"finish_reason\":\"stop\"}]}\n\
+                   data: [DONE]\n";
+        for chunk in [1usize, 2, 3, 7] {
+            let mut collected = String::new();
+            let response = parse_sse_stream(
+                ChunkyRead {
+                    bytes: sse.as_bytes().to_vec(),
+                    pos: 0,
+                    chunk,
+                    open_after_end: false,
+                },
+                |frag| collected.push_str(frag),
+            )
+            .unwrap_or_else(|e| panic!("chunk={chunk}: {e}"));
+            assert_eq!(collected, "Hello, world!", "chunk={chunk}");
+            assert_eq!(response.content, "Hello, world!", "chunk={chunk}");
+            assert_eq!(response.finish_reason, FinishReason::Stop, "chunk={chunk}");
+            assert!(response.tool_calls.is_empty(), "chunk={chunk}");
+        }
+    }
+
+    #[test]
+    fn sse_parse_returns_at_done_without_waiting_for_eof() {
+        // A real streaming connection can stay open after `[DONE]`
+        // (keep-alive): the parser must stop reading at the marker instead
+        // of blocking until the server closes the connection.
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\
+                   data: [DONE]\n";
+        let response = parse_sse_stream(
+            ChunkyRead {
+                bytes: sse.as_bytes().to_vec(),
+                pos: 0,
+                chunk: 2,
+                open_after_end: true,
+            },
+            |_| {},
+        )
+        .expect("[DONE] must end the parse even though the reader never EOFs");
+        assert_eq!(response.content, "ok");
     }
 }
