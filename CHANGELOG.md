@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.3.2
+
+**Fixed**
+- Wide tables rendered at their natural width (hundreds of columns), so
+  every row soft-wrapped and the box was unreadable.  Tables now fit the
+  terminal: columns shrink proportionally to the render width (floors of
+  1–2 columns so two-cell glyphs like ✅/CJK always fit) and cell text
+  word-wraps ANSI-aware, hard-breaking unbroken tokens.  Tables that
+  already fit render byte-identically to before.
+- The width source was previously none at all: a `COLUMNS`-only fallback
+  would not see a width in shells that don't export it (the common case
+  here), silently keeping the old overflow behavior.
+
+**Added**
+- The render width now comes from the live TTY size (`terminal_size` —
+  std has no size API on stable), with `$COLUMNS` as the fallback for
+  piped output (e.g. `grace | less -R`).  Resizes are picked up between
+  turns; the stream path pins the width per stream so a mid-stream resize
+  can't re-wrap an already-committed table.
+- Chat startup wordmark (skin rebrands it via the answer/tool-dim tiers)
+  with a clean-screen open; the tool-call line is dimmed so it recedes
+  behind the streamed answer.
+
 ## v0.3.1
 
 **Fixed**
