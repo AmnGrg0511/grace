@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  # The sync invariant: the tag IS the release, and Cargo.toml is the
+  # single source of truth. If someone tags v0.4.0 while the crate says
+  # 0.3.1, the release must fail here — never publish out-of-sync
+  # binaries.
+  version-sync:
+    name: Verify tag matches crate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag vs Cargo.toml
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          echo "tag=$TAG  cargo=$CARGO"
+          if [ "$TAG" != "$CARGO" ]; then
+            echo "::error::tag v$TAG does not match Cargo.toml version $CARGO — bump the crate version in the release commit, then re-tag."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: version-sync
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
