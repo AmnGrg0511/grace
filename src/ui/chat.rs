@@ -33,6 +33,38 @@ pub fn short_session_id() -> String {
     format!("s-{}", std::str::from_utf8(&suffix).unwrap())
 }
 
+/// The startup wordmark printed once above the "chat mode —" hint.
+///
+/// 6 rows: "GRACE" in dense box-drawing capitals (ANSI Shadow style). The
+/// lower half stands out in the skin's main color (the answer role —
+/// grace's own output color, so each skin rebrands the mark at once); the
+/// upper half recedes in the muted `tool_dim` tier (same as the status bar)
+/// so it never competes with the conversation. `Skin::paint` is a no-op when
+/// stdout is not a TTY, so piped output gets the plain art with no escapes.
+pub fn chat_banner(skin: &Skin) -> String {
+    const ART: [&str; 6] = [
+        " ██████╗ ██████╗  █████╗  ██████╗███████╗",
+        "██╔════╝ ██╔══██╗██╔══██╗██╔════╝██╔════╝",
+        "██║  ███╗██████╔╝███████║██║     █████╗",
+        "██║   ██║██╔══██╗██╔══██║██║     ██╔══╝",
+        "╚██████╔╝██║  ██║██║  ██║╚██████╗███████╗",
+        " ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝",
+    ];
+    const MAIN_COLOR_START: usize = 3; // rows 3–5 (the lower half) get the main color
+    ART.iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let role = if i >= MAIN_COLOR_START {
+                Role::Answer
+            } else {
+                Role::ToolDim
+            };
+            skin.paint(role, line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Interactive REPL. Each line you type is appended as a user message and the
 /// conversation history (including tool calls) is preserved across turns. If
 /// a session id was given, each turn is also persisted to disk immediately.
@@ -82,7 +114,19 @@ pub fn run_chat(
         });
     }
 
-    println!("chat mode — type a message, '/exit' to leave, '/model [name]' to switch models, '/skin [name]' to retheme, '/session' to switch sessions, '/verbose' to toggle tool output.\n");
+    // Start on a clean screen so the wordmark sits at the top of the view.
+    // One-shot, pre-conversation: not part of the append-only stream path.
+    // TTY only — piped/one-shot stdout never receives screen-control escapes.
+    use std::io::{IsTerminal, Write};
+    if std::io::stdout().is_terminal() {
+        let _ = write!(std::io::stdout(), "\x1b[2J\x1b[H");
+        let _ = std::io::stdout().flush();
+    }
+
+    println!(
+        "{}\nchat mode — type a message, '/exit' to leave, '/model [name]' to switch models, '/skin [name]' to retheme, '/session' to switch sessions, '/verbose' to toggle tool output.\n",
+        chat_banner(&skin)
+    );
 
     let started_at = std::time::Instant::now();
     // Loaded once per chat session (not re-read from disk every turn) —
@@ -981,7 +1025,10 @@ pub fn print_agent_event_to(
             let _ = finalize_stream(stream, skin, disable_color, out);
             let compact = compact_args(arguments);
             let bullet = skin.paint(Role::ToolBullet, "●");
-            writeln!(out, "{} {}{}({})", bullet, dim(""), name, compact).ok();
+            // Dim the call itself so it recedes behind the undimmed answer
+            // text above/below it — bright name+args read as "response".
+            let call = dim(&format!("{name}({compact})"));
+            writeln!(out, "{} {call}", bullet).ok();
         }
         crate::core::lifecycle::AgentEvent::ToolCallEnd { name, result, elapsed } => {
             let _ = finalize_stream(stream, skin, disable_color, out);
@@ -1213,6 +1260,33 @@ mod verbose_gate_tests {
     fn edit_always_shown_regardless_of_verbose() {
         assert!(should_show_tool_output("edit", false));
         assert!(should_show_tool_output("edit", true));
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::chat_banner;
+    use crate::ui::skin::SOLARIS;
+
+    #[test]
+    fn banner_is_a_compact_box_wordmark() {
+        // Structural invariants, not a copy of the constant: the wordmark
+        // must stay 6 compact rows (it prints above the status line on every
+        // chat start), stay within a 43-col budget (well under a third of a
+        // terminal — no wall of art), use only box-drawing/block characters,
+        // and — with no TTY in tests — be free of any leaked ANSI escapes.
+        let banner = chat_banner(&SOLARIS);
+        assert!(!banner.contains('\x1b'), "no ANSI escapes in non-TTY banner: {banner:?}");
+        let lines: Vec<&str> = banner.lines().collect();
+        assert_eq!(lines.len(), 6, "expected 6 art rows: {banner:?}");
+        for line in &lines {
+            // chars, not bytes: the box glyphs are 3 bytes each in UTF-8.
+            assert!(line.chars().count() <= 43, "wordmark must stay within 43 cols: {line:?}");
+            assert!(
+                line.chars().all(|c| matches!(c, ' ' | '█' | '═' | '║' | '╗' | '╔' | '╚' | '╝')),
+                "wordmark must use only box/block characters: {line:?}"
+            );
+        }
     }
 }
 
