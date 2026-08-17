@@ -54,6 +54,16 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "Switch / start session (picker)",
     },
     SlashCommand {
+        name: "remember",
+        aliases: &[],
+        summary: "Save a fact for every future session",
+    },
+    SlashCommand {
+        name: "forget",
+        aliases: &[],
+        summary: "Delete a remembered fact (picker)",
+    },
+    SlashCommand {
         name: "verbose",
         aliases: &[],
         summary: "Toggle tool-output visibility",
