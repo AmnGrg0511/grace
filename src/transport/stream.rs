@@ -6,6 +6,11 @@
 //! `choices[0].delta.content` fragments (invoking a callback per fragment)
 //! and `choices[0].delta.tool_calls` deltas (concatenated by index), and
 //! returns a final [`ModelResponse`] once `data: [DONE]` arrives.
+//!
+//! A dead or erroring stream is an error, not a (possibly empty) partial
+//! answer: an `error` frame inside the stream, or EOF before `[DONE]`,
+//! yields `Err` so the turn reports why it has no answer instead of
+//! silently presenting a truncated one.
 
 use crate::message::{Message, ToolCall};
 use crate::transport::r#trait::{FinishReason, ModelResponse, ToolSpec};
@@ -14,6 +19,7 @@ use crate::util::{AgentError, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::time::Duration;
 
 #[derive(Default, Clone)]
 struct PartialToolCall {
@@ -47,6 +53,11 @@ impl SseAccumulator {
 
     /// Feed one decoded SSE `data:` payload (without the `data: ` prefix).
     /// Returns `true` when this was the terminal `[DONE]` marker.
+    ///
+    /// A chunk carrying a non-null top-level `error` field is a provider
+    /// error *inside* the stream — that is an `Err`, not a silently dropped
+    /// frame. Chunks that merely lack `choices` (e.g. Qwen/vLLM trailing
+    /// usage chunks) are still fine: the key is `error`, not missing choices.
     pub fn feed(&mut self, payload: &str, mut on_fragment: impl FnMut(&str)) -> Result<bool> {
         let trimmed = payload.trim();
         if trimmed == "[DONE]" {
@@ -57,6 +68,15 @@ impl SseAccumulator {
         }
         let value: Value = serde_json::from_str(trimmed)
             .map_err(|e| AgentError::Response(format!("bad SSE chunk json: {e}")))?;
+
+        if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| err.to_string());
+            return Err(AgentError::Response(format!("provider stream error: {msg}")));
+        }
 
         let Some(choice) = value.get("choices").and_then(|c| c.get(0)) else {
             return Ok(false);
@@ -130,6 +150,7 @@ pub fn parse_sse_stream(
     use std::io::BufRead;
     let reader = std::io::BufReader::new(body);
     let mut acc = SseAccumulator::new();
+    let mut done = false;
     for line in reader.lines() {
         let line = line.map_err(AgentError::Io)?;
         let Some(rest) = line.strip_prefix("data:") else {
@@ -137,8 +158,18 @@ pub fn parse_sse_stream(
         };
         let payload = rest.trim_start();
         if acc.feed(payload, &mut on_fragment)? {
+            done = true;
             break;
         }
+    }
+    // EOF without the `[DONE]` marker means the stream died mid-response
+    // (connection reset, provider crash, idle close). Returning the
+    // accumulator here would read a dead stream back as a normal — often
+    // empty or partial — answer, so the turn must fail with a reason.
+    if !done {
+        return Err(AgentError::Transport(
+            "stream ended before the [DONE] marker — the response was cut off".into(),
+        ));
     }
     Ok(acc.finish())
 }
@@ -165,7 +196,12 @@ pub fn stream_complete(
         body["tools"] = tools_to_json(tools);
     }
 
-    let client = reqwest::blocking::Client::new();
+    // Connect timeout only — a global `.timeout()` would also cap the body
+    // read and kill legitimately long generations mid-stream.
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| AgentError::Transport(format!("HTTP client error: {e}")))?;
     let mut req = client.post(&url).json(&body);
     if !api_key.is_empty() {
         req = req.bearer_auth(api_key);
@@ -307,6 +343,29 @@ mod tests {
             assert_eq!(response.finish_reason, FinishReason::Stop, "chunk={chunk}");
             assert!(response.tool_calls.is_empty(), "chunk={chunk}");
         }
+    }
+
+    #[test]
+    fn an_error_frame_fails_the_stream_with_its_message() {
+        // Providers surface mid-stream problems as an `error` frame; reading
+        // that as "a chunk with no choices" would swallow the error and
+        // return the partial content as a normal answer.
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\
+                   data: {\"error\":{\"message\":\"rate limited by upstream\"}}\n\
+                   data: [DONE]\n";
+        let err = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| {}).unwrap_err();
+        assert!(err.to_string().contains("rate limited by upstream"), "{err}");
+        assert!(err.to_string().contains("provider stream error"), "{err}");
+    }
+
+    #[test]
+    fn eof_without_the_done_marker_is_an_error_not_a_partial_answer() {
+        // Even with `finish_reason: stop`, an abrupt EOF before `[DONE]` is a
+        // dead stream — the turn must say so, not present the fragment.
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n";
+        let err = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| {}).unwrap_err();
+        assert!(err.to_string().contains("[DONE]"), "{err}");
     }
 
     #[test]
