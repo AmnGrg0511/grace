@@ -113,6 +113,54 @@ fn short_job_id() -> String {
 ///     their cwd (a simple jail, not a full sandbox).
 pub struct BashTool;
 
+/// Validate a command against the `GRACE_TERMINAL_ALLOW` allow-list.
+///
+/// Refuses outright anything that lets an allow-listed first token smuggle a
+/// second program past the guard: separators (`;`, `|`, `&`) outside quotes,
+/// backticks, `$(` substitution, and newlines. A command that survives is a
+/// single segment, which is then validated as a whole — `ls; rm -rf /` no
+/// longer passes an allow-list that only names `ls`. `pub` so the read-only
+/// session posture (features.md W4) can reuse the same check.
+pub fn validate_command(command: &str, allow: &[String]) -> Result<()> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for c in command.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ';' | '|' | '&' if !in_single && !in_double => {
+                return Err(AgentError::Tool(format!(
+                    "command refused: '{c}' outside quotes — chaining not allowed"
+                )));
+            }
+            '`' | '\n' => {
+                return Err(AgentError::Tool(
+                    "command refused: backticks and newlines are not allowed".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if command.contains("$(") {
+        return Err(AgentError::Tool(
+            "command refused: command substitution is not allowed".into(),
+        ));
+    }
+    let first_token = command.split_whitespace().next().unwrap_or("");
+    if !allow.iter().any(|a| a == first_token) {
+        return Err(AgentError::Tool(format!(
+            "command refused: '{first_token}' not in allow-list"
+        )));
+    }
+    Ok(())
+}
+
 /// (stdout, stderr, exit_code, timed_out) — see `BashTool::run_with_timeout`.
 type SpawnResult = (Vec<u8>, Vec<u8>, Option<i32>, bool);
 
@@ -126,9 +174,11 @@ impl BashTool {
             .collect()
     }
 
-    /// Allow-list: if `GRACE_TERMINAL_ALLOW` is set, only commands whose
-    /// first token matches an entry are permitted. Empty/unset = allow all
-    /// (backward-compatible default).
+    /// Allow-list: if `GRACE_TERMINAL_ALLOW` is set, only simple commands
+    /// whose first token matches an entry are permitted. Chaining (`; | &`),
+    /// substitution and newlines are refused outright — see
+    /// [`validate_command`]. Empty/unset = allow all (backward-compatible
+    /// default).
     fn allow_list() -> Vec<String> {
         std::env::var("GRACE_TERMINAL_ALLOW")
             .unwrap_or_default()
@@ -406,12 +456,7 @@ impl Tool for BashTool {
         }
         let allow = Self::allow_list();
         if !allow.is_empty() {
-            let first_token = command.split_whitespace().next().unwrap_or("");
-            if !allow.iter().any(|a| a == first_token) {
-                return Err(AgentError::Tool(format!(
-                    "command refused: '{first_token}' not in allow-list"
-                )));
-            }
+            validate_command(&command, &allow)?;
         }
         if background {
             return Self::spawn_background(&command);
@@ -605,5 +650,47 @@ mod tools_hardening_tests {
         let tool = BashTool;
         let err = tool.run(&json!({})).unwrap_err();
         assert!(err.to_string().contains("either 'command' or 'job_id'"));
+    }
+
+    #[test]
+    fn allow_list_checks_every_segment_not_just_the_first_token() {
+        // Regression: `ls; rm -rf /` used to pass an allow-list naming only
+        // `ls`, because only the first whitespace token was checked.
+        let _g = ENV_GUARD_FN();
+        std::env::set_var("GRACE_TERMINAL_ALLOW", "ls");
+        let tool = BashTool;
+        let err = tool
+            .run(&json!({"command": "ls; rm -rf /"}))
+            .unwrap_err();
+        assert!(err.to_string().contains("chaining"), "err was: {err}");
+        let err = tool
+            .run(&json!({"command": "ls | grep x"}))
+            .unwrap_err();
+        assert!(err.to_string().contains("chaining"), "err was: {err}");
+        std::env::remove_var("GRACE_TERMINAL_ALLOW");
+    }
+
+    #[test]
+    fn allow_list_refuses_substitution_backticks_and_newlines() {
+        let _g = ENV_GUARD_FN();
+        std::env::set_var("GRACE_TERMINAL_ALLOW", "ls");
+        let tool = BashTool;
+        for bad in ["ls $(rm -rf /)", "`rm -rf /`", "ls\nrm -rf /"] {
+            let err = tool.run(&json!({"command": bad})).unwrap_err();
+            assert!(err.to_string().contains("refused"), "command {bad:?} err: {err}");
+        }
+        std::env::remove_var("GRACE_TERMINAL_ALLOW");
+    }
+
+    #[test]
+    fn allow_list_keeps_quoted_separators_inside_a_single_segment() {
+        // A separator *inside* quotes is data, not chaining — `echo "a;b"`
+        // must stay allowed when `echo` is.
+        let _g = ENV_GUARD_FN();
+        std::env::set_var("GRACE_TERMINAL_ALLOW", "echo");
+        let tool = BashTool;
+        let out = tool.run(&json!({"command": "echo \"a;b\""})).unwrap();
+        assert!(out.contains("a;b"), "out was: {out}");
+        std::env::remove_var("GRACE_TERMINAL_ALLOW");
     }
 }
