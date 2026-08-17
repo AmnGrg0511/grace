@@ -123,7 +123,7 @@ pub fn run_chat(
     }
 
     println!(
-        "{}\nchat mode — type a message, '/exit' to leave, '/model [name]' to switch models, '/skin [name]' to retheme, '/session' to switch sessions, '/verbose' to toggle tool output.\n",
+        "{}\nchat mode — type a message, \"/\" for the command palette, '/exit' to leave, '/model [name]' to switch models, '/skin [name]' to retheme, '/session' to switch sessions, '/verbose' to toggle tool output.\n",
         chat_banner(&skin)
     );
 
@@ -153,20 +153,45 @@ pub fn run_chat(
     // opening its own `std::io::stdin()`.
     let mut reader = LineReader::new(history_path, skin);
     let is_rustyline = reader.is_interactive_editor();
+    // Input queued by the command palette (a bare `/` line): consumed by the
+    // next iteration as if it had been typed.
+    let mut pending_input: Option<String> = None;
 
     loop {
         print_status_line(&skin, transport, messages, started_at, cached_context_window);
-        // rustyline draws its own prompt glyph via readline(prompt); the
-        // plain fallback prints it manually inside LineReader::read_line.
-        let Some(line) = reader.read_line(&prompt_label(&skin)) else {
-            if !is_rustyline {
-                // Plain fallback: blank line before exit for parity with the
-                // old loop's trailing newline behavior on EOF.
-            }
-            break;
+        let line = if let Some(queued) = pending_input.take() {
+            queued
+        } else {
+            // rustyline draws its own prompt glyph via readline(prompt); the
+            // plain fallback prints it manually inside LineReader::read_line.
+            let Some(line) = reader.read_line(&prompt_label(&skin)) else {
+                if !is_rustyline {
+                    // Plain fallback: blank line before exit for parity with
+                    // the old loop's trailing newline behavior on EOF.
+                }
+                break;
+            };
+            line
         };
         let text = line.trim();
         if text.is_empty() {
+            continue;
+        }
+        // A bare `/` opens the command palette over the single registry; the
+        // chosen command is re-run as if the user had typed it.
+        if text == "/" {
+            let items: Vec<crate::ui::picker::Pick> = crate::ui::commands::SLASH_COMMANDS
+                .iter()
+                .map(|c| crate::ui::picker::Pick {
+                    id: c.name.to_string(),
+                    label: format!("/{}", c.name),
+                    sublabel: Some(c.summary.to_string()),
+                })
+                .collect();
+            if let Some(name) = crate::ui::picker::pick(&items, &skin, "pick a command (type to filter)")
+            {
+                pending_input = Some(format!("/{name} "));
+            }
             continue;
         }
         // A slash command is its first *word*: `/modelxyz` is model text, not
@@ -1303,13 +1328,29 @@ pub fn compact_args(arguments: &str) -> String {
 }
 
 /// Print available slash commands for the chat REPL.
-/// `/help` — rendered from the single command registry, so the help screen
-/// can never list (or omit) a command whose dispatching differs.
+/// `/help` — rendered from the single command registry in two columns, so
+/// the help screen can never list (or omit) a command whose dispatching
+/// differs.
 fn print_slash_commands_help() {
-    println!("\nAvailable slash commands:");
-    for c in crate::ui::commands::SLASH_COMMANDS {
+    use crate::ui::commands;
+
+    let cmds = commands::SLASH_COMMANDS;
+    let fmt = |c: &commands::SlashCommand| {
         let names: Vec<String> = c.all_names().map(|n| format!("/{n}")).collect();
-        println!("  {:<22} - {}", names.join(", "), c.summary);
+        format!("{:>w$}  {}", names.join(", "), c.summary, w = 12)
+    };
+    let (left, right) = {
+        let half = cmds.len().div_ceil(2);
+        cmds.split_at(half)
+    };
+    let width = left.iter().map(|c| fmt(c).len()).max().unwrap_or(0);
+    println!("\nAvailable slash commands (type a bare \"/\" for the picker):");
+    for (i, c) in left.iter().enumerate() {
+        let l = fmt(c);
+        match right.get(i) {
+            Some(r) => println!("  {:<w$}    {}", l, fmt(r), w = width),
+            None => println!("  {l}"),
+        }
     }
     println!();
 }

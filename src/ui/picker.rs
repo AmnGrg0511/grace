@@ -35,14 +35,15 @@ fn move_up(n: usize) -> String {
 /// How many rows of the filtered list are shown at once.
 const WINDOW: usize = 9;
 
-/// One selectable row. `id` is returned on selection (stable, not display
-/// text); `label` is what the user sees; `sublabel` is an optional dimmed
-/// second hint (a path, a timestamp, a count).
-#[derive(Debug, Clone, Copy)]
-pub struct Pick<'a> {
-    pub id: &'a str,
-    pub label: &'a str,
-    pub sublabel: Option<&'a str>,
+/// One selectable row (owned strings — callers build labels at runtime).
+/// `id` is returned on selection (stable, not display text); `label` is what
+/// the user sees; `sublabel` is an optional dimmed second hint (a path, a
+/// timestamp, a count).
+#[derive(Debug, Clone)]
+pub struct Pick {
+    pub id: String,
+    pub label: String,
+    pub sublabel: Option<String>,
 }
 
 /// Mutable filter/selection state of a [`pick`] run — split out so the
@@ -82,7 +83,7 @@ pub enum PickOutcome {
 
 /// The indices of the items whose label or sublabel contains `filter`
 /// (case-insensitive). An empty filter matches everything.
-pub fn filter_items(items: &[Pick<'_>], filter: &str) -> Vec<usize> {
+pub fn filter_items(items: &[Pick], filter: &str) -> Vec<usize> {
     let needle = filter.to_lowercase();
     items
         .iter()
@@ -92,6 +93,7 @@ pub fn filter_items(items: &[Pick<'_>], filter: &str) -> Vec<usize> {
                 || it.label.to_lowercase().contains(&needle)
                 || it
                     .sublabel
+                    .as_ref()
                     .map(|s| s.to_lowercase().contains(&needle))
                     .unwrap_or(false)
         })
@@ -106,7 +108,7 @@ pub fn filter_items(items: &[Pick<'_>], filter: &str) -> Vec<usize> {
 /// into range, then returns the outcome plus the list the caller should
 /// render next.
 pub fn pick_step(
-    items: &[Pick<'_>],
+    items: &[Pick],
     state: &mut PickState,
     visible: &mut Vec<usize>,
     key: PickKey,
@@ -152,7 +154,7 @@ pub fn pick_step(
 /// written so the caller knows how many to clear before the next frame.
 fn render_frame(
     w: &mut dyn Write,
-    items: &[Pick<'_>],
+    items: &[Pick],
     visible: &[usize],
     state: &PickState,
     skin: &Skin,
@@ -188,8 +190,8 @@ fn render_frame(
         } else {
             ("  ".to_string(), Role::ToolDim)
         };
-        let mut row = format!("{bullet} {}", truncate_utf8(it.label, 76));
-        if let Some(sub) = it.sublabel {
+        let mut row = format!("{bullet} {}", truncate_utf8(&it.label, 76));
+        if let Some(sub) = it.sublabel.as_deref() {
             row.push_str(&format!("  {}", truncate_utf8(sub, 40)));
         }
         lines.push(skin.paint(row_style, &row));
@@ -213,7 +215,7 @@ fn render_frame(
 
 /// Open the dropdown, block until a choice (or cancel), and clear the frame.
 /// Returns the `id` of the chosen item, or `None` on cancel/empty list.
-pub fn pick(items: &[Pick<'_>], skin: &Skin, hint: &str) -> Option<String> {
+pub fn pick(items: &[Pick], skin: &Skin, hint: &str) -> Option<String> {
     if items.is_empty() {
         return None;
     }
@@ -236,7 +238,7 @@ pub fn pick(items: &[Pick<'_>], skin: &Skin, hint: &str) -> Option<String> {
 }
 
 fn run_raw(
-    items: &[Pick<'_>],
+    items: &[Pick],
     skin: &Skin,
     hint: &str,
     out: &mut dyn Write,
@@ -273,7 +275,7 @@ fn run_raw(
                 match outcome {
                     PickOutcome::Selected(idx) => {
                         clear_frame(out, drawn);
-                        return Some(items[idx].id.to_string());
+                        return Some(items[idx].id.clone());
                     }
                     PickOutcome::Cancelled => {
                         clear_frame(out, drawn);
@@ -326,11 +328,11 @@ fn map_event(ev: Event) -> Option<PickKey> {
 /// Numbered-list fallback for non-TTY runs (piped output, tests): prints the
 /// options and reads one number — the same visible contract as the numbered
 /// menus this picker replaces, minus the interactivity.
-fn pick_plain(items: &[Pick<'_>], hint: &str) -> Option<String> {
+fn pick_plain(items: &[Pick], hint: &str) -> Option<String> {
     println!("\n{hint}");
     for (i, it) in items.iter().enumerate() {
         let mut line = format!("  {}) {}", i + 1, it.label);
-        if let Some(sub) = it.sublabel {
+        if let Some(sub) = it.sublabel.as_deref() {
             line.push_str(&format!("  {}", truncate_utf8(sub, 60)));
         }
         println!("{line}");
@@ -343,7 +345,7 @@ fn pick_plain(items: &[Pick<'_>], hint: &str) -> Option<String> {
     }
     match line.trim().parse::<usize>() {
         Ok(0) => None,
-        Ok(n) if (1..=items.len()).contains(&n) => Some(items[n - 1].id.to_string()),
+        Ok(n) if (1..=items.len()).contains(&n) => Some(items[n - 1].id.clone()),
         _ => None,
     }
 }
@@ -352,18 +354,18 @@ fn pick_plain(items: &[Pick<'_>], hint: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn items() -> Vec<Pick<'static>> {
+    fn items() -> Vec<Pick> {
         vec![
-            Pick { id: "solaris", label: "solaris", sublabel: Some("warm ambers") },
-            Pick { id: "ocean", label: "ocean", sublabel: Some("cool blues") },
-            Pick { id: "royal", label: "royal", sublabel: Some("deep purple") },
-            Pick { id: "mono", label: "mono", sublabel: None },
+            Pick { id: "solaris".into(), label: "solaris".into(), sublabel: Some("warm ambers".into()) },
+            Pick { id: "ocean".into(), label: "ocean".into(), sublabel: Some("cool blues".into()) },
+            Pick { id: "royal".into(), label: "royal".into(), sublabel: Some("deep purple".into()) },
+            Pick { id: "mono".into(), label: "mono".into(), sublabel: None },
         ]
     }
 
     /// Drive the pure state machine through `keys`; returns the final
     /// outcome.
-    fn drive(items: &[Pick<'_>], keys: &[PickKey]) -> PickOutcome {
+    fn drive(items: &[Pick], keys: &[PickKey]) -> PickOutcome {
         let mut state = PickState::default();
         let mut visible = filter_items(items, "");
         let mut outcome = PickOutcome::Continue;
