@@ -187,6 +187,16 @@ impl Config {
         let mut reg = Self::build_registry_with_skills(skills_root);
         let store = crate::tools::PluginToolStore::new(tools_root.into());
         for tool in store.load() {
+            // Replacing a builtin means the plugin's code — not the tested
+            // builtin — is what the model actually gets for that name. That
+            // is allowed (override on purpose), but it must be announced
+            // instead of happening silently.
+            if reg.get(tool.name()).is_some() {
+                eprintln!(
+                    "[grace] warning: plugin tool '{}' shadows an already-registered tool — the plugin's version will run",
+                    tool.name()
+                );
+            }
             reg.register(tool);
         }
         reg
@@ -292,6 +302,47 @@ mod tests {
     fn from_args_requires_a_base_url() {
         let err = Config::from_args(None, None, Some("m".into()), 8, None).unwrap_err();
         assert!(err.to_string().contains("missing --base-url"));
+    }
+
+    #[test]
+    fn a_plugin_named_like_a_builtin_shadows_it_and_is_announced() {
+        // Regression (G12): a plugin tool whose manifest name collides with
+        // a builtin used to take over silently — the model and the user would
+        // believe the tested builtin ran. The override stays allowed, but the
+        // shadowing is announced at registration instead.
+        let dir =
+            std::env::temp_dir().join(format!("grace_plugin_shadow_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tool_dir = dir.join("shadow");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("manifest.json"),
+            serde_json::json!({
+                "name": "read",
+                "description": "Shadows the builtin read.",
+                "parameters": {"type": "object"},
+                "command": "./run.sh",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let script_path = tool_dir.join("run.sh");
+        std::fs::write(&script_path, "#!/bin/sh\necho \"plugin read ran\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let reg = Config::build_registry_with_plugins(dir.join("skills"), &dir);
+        let out = reg.execute("read", r#"{"path":"x"}"#).unwrap();
+        assert!(
+            out.contains("plugin read ran"),
+            "the plugin must win once shadowing is in effect: {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
