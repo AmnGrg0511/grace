@@ -103,22 +103,29 @@ impl Tool for ReadTool {
 
     fn run(&self, args: &Value) -> Result<String> {
         let path = arg_str(args, "path")?;
-        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(1) as usize;
-        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(500) as usize;
-        
+        // Distinguish an *explicit* window from the defaults: a caller that
+        // asks for a specific range gets exactly that range, even on a large
+        // file — the head/tail summary below is only the no-window fallback.
+        let offset = args.get("offset").and_then(Value::as_u64);
+        let limit = args.get("limit").and_then(Value::as_u64);
+        let explicit_window = offset.is_some() || limit.is_some();
+        let offset = offset.unwrap_or(1) as usize;
+        let limit = limit.unwrap_or(500) as usize;
+
         let allowed = check_path_allowed(&path)?;
-        
+
         // Get total line count first
         let content = fs::read_to_string(&allowed)
             .map_err(|e| AgentError::Tool(format!("read {}: {e}", path)))?;
-        
+
         let total_lines = content.lines().count();
-        
-        // If file is large (>500 lines), only show summary + head/tail
-        if total_lines > 500 {
+
+        // If file is large (>500 lines) and no window was requested, only
+        // show summary + head/tail.
+        if !explicit_window && total_lines > 500 {
             let head: Vec<&str> = content.lines().take(50).collect();
             let tail: Vec<&str> = content.lines().skip(total_lines.saturating_sub(50)).collect();
-            
+
             let mut result = format!("File: {} ({} lines)\n", path, total_lines);
             result.push_str("=== FIRST 50 LINES ===\n");
             result.push_str(&head.join("\n"));
@@ -127,8 +134,8 @@ impl Tool for ReadTool {
             result.push_str(&format!("\n... [{} lines omitted] ...", total_lines - head.len() - tail.len()));
             return Ok(result);
         }
-        
-        // For smaller files, apply offset/limit
+
+        // Apply offset/limit regardless of size when a window was asked for.
         let lines: Vec<&str> = content.lines().skip(offset.saturating_sub(1)).take(limit).collect();
         let shown = lines.len();
         let mut result = format!("File: {} ({} lines total, showing {} lines from {})\n", path, total_lines, shown, offset);
@@ -270,6 +277,27 @@ mod tests {
         assert!(out.contains("showing 2 lines from 2"));
         let body: Vec<&str> = out.lines().skip(1).collect();
         assert_eq!(body, vec!["b", "c"], "only the requested window");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_and_limit_are_honored_on_large_files_too() {
+        // Regression: a windowed read of a >500-line file used to fall into
+        // the head/tail summary, silently ignoring the requested range.
+        let _g = EnvVarGuard::none();
+        let dir = scratch("window_large");
+        let path = dir.join("big.txt");
+        let content: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        fs::write(&path, &content).unwrap();
+
+        let out = ReadTool
+            .run(&json!({"path": path.to_str().unwrap(), "offset": 600, "limit": 3}))
+            .unwrap();
+        assert!(out.contains("showing 3 lines from 600"), "got: {out}");
+        assert!(!out.contains("FIRST 50 LINES"), "summary must be skipped: {out}");
+        assert!(out.contains("line 599"), "got: {out}");
+        assert!(out.contains("line 600"), "got: {out}");
+        assert!(out.contains("line 601"), "got: {out}");
         let _ = fs::remove_dir_all(&dir);
     }
 
