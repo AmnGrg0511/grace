@@ -231,16 +231,16 @@ impl Config {
         system_prompt: Option<String>,
     ) -> Result<Config> {
         let base_url = base_url.ok_or_else(|| AgentError::Config("missing --base-url".into()))?;
-        // Fall back to whichever env var the onboarding wizard actually wrote
-        // this key under (~/.grace/.env, loaded at startup) — not just
-        // OPENROUTER_API_KEY. Checking only that one meant a restarted session
-        // with a custom/OpenAI/Copilot base_url silently sent an empty bearer
-        // token.
+        // Fall back to the env var that matches the *resolved* host, not a
+        // fixed chain. A fixed chain sent the right key to the wrong host
+        // (e.g. an OPENAI_API_KEY onto a Copilot endpoint). The onboarding
+        // wizard writes the key under the preset's var, so the host match
+        // finds it again after a restart.
         let api_key = api_key
-            .or_else(|| std::env::var("GRACE_API_KEY").ok())
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-            .or_else(|| std::env::var("GITHUB_COPILOT_TOKEN").ok())
-            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+            .or_else(|| {
+                let var = crate::config::settings::env_var_for_base_url(&base_url);
+                std::env::var(var).ok()
+            })
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
             .unwrap_or_default();
@@ -326,6 +326,60 @@ mod tests {
         .unwrap();
         match &c.transport {
             TransportConfig::Http { api_key, .. } => assert_eq!(api_key, "secret"),
+        }
+    }
+
+    #[test]
+    fn from_args_picks_the_key_env_var_of_the_resolved_host() {
+        // A Copilot host must read GITHUB_COPILOT_TOKEN, never a stray
+        // OPENAI_API_KEY set for some other endpoint. Two EnvVarGuards would
+        // deadlock on the crate-wide env lock, so both vars are set and
+        // restored under one lock by hand.
+        let _lock = crate::util::test_support::env_guard();
+        let saved = [
+            std::env::var("OPENAI_API_KEY").ok(),
+            std::env::var("GITHUB_COPILOT_TOKEN").ok(),
+        ];
+        std::env::set_var("OPENAI_API_KEY", "openai-key");
+        std::env::set_var("GITHUB_COPILOT_TOKEN", "copilot-key");
+        let outcome = std::panic::catch_unwind(|| {
+            let c = Config::from_args(
+                Some("https://api.githubcopilot.com".into()),
+                None,
+                Some("gpt-4o".into()),
+                4,
+                None,
+            )
+            .unwrap();
+            match &c.transport {
+                TransportConfig::Http { api_key, .. } => assert_eq!(api_key, "copilot-key"),
+            }
+        });
+        for (i, key) in ["OPENAI_API_KEY", "GITHUB_COPILOT_TOKEN"].iter().enumerate() {
+            match &saved[i] {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        if outcome.is_err() {
+            panic!("from_args picked the wrong key for the Copilot host");
+        }
+    }
+
+    #[test]
+    fn from_args_treats_an_empty_matched_key_env_var_as_absent() {
+        // An empty var must not short-circuit into a useless bearer token.
+        let _guard = crate::util::test_support::EnvVarGuard::set("GRACE_API_KEY", " ");
+        let c = Config::from_args(
+            Some("https://custom.example/v1".into()),
+            None,
+            Some("m".into()),
+            4,
+            None,
+        )
+        .unwrap();
+        match &c.transport {
+            TransportConfig::Http { api_key, .. } => assert_eq!(api_key, ""),
         }
     }
 

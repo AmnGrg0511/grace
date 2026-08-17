@@ -112,6 +112,28 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     },
 ];
 
+/// Which env var holds the API key for a given base URL. Matches the host of
+/// the URL against the onboarding presets (host, not full URL, so a trailing
+/// path or port does not dodge the match) and falls back to `GRACE_API_KEY`
+/// for anything unknown — the "custom endpoint" preset's variable.
+pub fn env_var_for_base_url(base_url: &str) -> &'static str {
+    let host = host_of(base_url);
+    for preset in PROVIDER_PRESETS {
+        if !preset.base_url.is_empty() && host_of(preset.base_url) == host {
+            return preset.env_var;
+        }
+    }
+    "GRACE_API_KEY"
+}
+
+/// The host part of a URL — scheme, path and port stripped. Empty input stays
+/// empty so the custom-preset (empty `base_url`) fallback is stable.
+fn host_of(url: &str) -> &str {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let before_path = after_scheme.split('/').next().unwrap_or("");
+    before_path.split(':').next().unwrap_or("").trim()
+}
+
 /// Best-effort context window lookup by exact or substring model id match,
 /// for display in the chat prompt line. Not authoritative, not enforced.
 pub fn context_window_for(model: &str) -> Option<u32> {
@@ -279,5 +301,36 @@ request_timeout_secs = 30
 
         // CLI value wins.
         assert_eq!(model.as_deref(), Some("from-cli"));
+    }
+
+    #[test]
+    fn env_var_for_base_url_matches_on_host_not_full_url() {
+        // Trailing path/port must not dodge the preset match, so a Copilot
+        // key never goes to an OpenAI endpoint and vice versa.
+        assert_eq!(
+            env_var_for_base_url("https://api.openai.com/v1"),
+            "OPENAI_API_KEY"
+        );
+        assert_eq!(env_var_for_base_url("https://api.openai.com"), "OPENAI_API_KEY");
+        assert_eq!(
+            env_var_for_base_url("https://api.openai.com:8443/extra"),
+            "OPENAI_API_KEY"
+        );
+        assert_eq!(
+            env_var_for_base_url("https://api.githubcopilot.com"),
+            "GITHUB_COPILOT_TOKEN"
+        );
+        assert_eq!(
+            env_var_for_base_url(crate::config::OPENROUTER_BASE_URL),
+            "OPENROUTER_API_KEY"
+        );
+    }
+
+    #[test]
+    fn env_var_for_base_url_falls_back_for_unknown_hosts() {
+        // Anything not in the presets is a custom endpoint — its key lives in
+        // GRACE_API_KEY.
+        assert_eq!(env_var_for_base_url("https://llama.example.com/v1"), "GRACE_API_KEY");
+        assert_eq!(env_var_for_base_url(""), "GRACE_API_KEY");
     }
 }
