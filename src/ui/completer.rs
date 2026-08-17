@@ -21,18 +21,10 @@ use rustyline::Context;
 use rustyline::Result;
 use std::borrow::Cow;
 
-/// All `/` commands available in chat mode.
-const SLASH_COMMANDS: &[&str] = &[
-    "/exit",
-    "/quit",
-    "/model",
-    "/skin",
-    "/session",
-    "/verbose",
-];
-
 /// Rustyline helper that provides `/`-command tab completion, hints, and
-/// skin-colored input-line highlighting.
+/// skin-colored input-line highlighting. The candidate list comes from the
+/// single registry in `crate::ui::commands` — not a second local copy that
+/// could drift from what actually dispatches.
 pub struct CommandHelper {
     pub skin: Skin,
 }
@@ -50,9 +42,8 @@ impl Completer for CommandHelper {
         if !line.starts_with('/') {
             return Ok((0, Vec::new()));
         }
-        let candidates: Vec<String> = SLASH_COMMANDS
-            .iter()
-            .filter(|cmd| cmd.starts_with(line))
+        let candidates: Vec<String> = crate::ui::commands::completion_candidates(line)
+            .into_iter()
             .map(|s| s.to_string())
             .collect();
         // Return start position = 0 (replace the whole line with the match)
@@ -68,9 +59,9 @@ impl Hinter for CommandHelper {
             return None;
         }
         // Show the first matching command as a hint (minus what's already typed)
-        SLASH_COMMANDS
+        crate::ui::commands::completion_candidates(line)
             .iter()
-            .find(|cmd| cmd.starts_with(line) && **cmd != line)
+            .find(|cmd| **cmd != line)
             .map(|cmd| cmd[line.len()..].to_string())
     }
 }
@@ -125,5 +116,18 @@ mod tests {
         let ctx = rustyline::Context::new(&hist);
         let hint = helper.hint("/se", 3, &ctx);
         assert_eq!(hint, Some("ssion".to_string()));
+    }
+
+    #[test]
+    fn help_and_commands_are_completable() {
+        // Regression (G14): both dispatch and document themselves, yet were
+        // missing from completion because the completer kept its own list.
+        let helper = CommandHelper { skin: crate::ui::skin::SOLARIS };
+        let hist = rustyline::history::DefaultHistory::new();
+        let ctx = rustyline::Context::new(&hist);
+        let (_, h) = helper.complete("/h", 2, &ctx).unwrap();
+        assert!(h.contains(&"/help".to_string()));
+        let (_, c) = helper.complete("/c", 2, &ctx).unwrap();
+        assert!(c.contains(&"/commands".to_string()));
     }
 }

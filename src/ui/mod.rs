@@ -3,6 +3,7 @@
 //! ```text
 //! chat.rs         the interactive REPL and its slash commands
 //! cli.rs          --help text and shell completions
+//! commands.rs     the single slash-command registry (completer/help/palette)
 //! line_reader.rs  line editing / history
 //! completer.rs    tab completion + hinting for the REPL
 //! picker.rs       the shared dropdown (palette, /model, /forget, /jump)
@@ -16,6 +17,7 @@
 
 pub mod chat;
 pub mod cli;
+pub mod commands;
 pub mod completer;
 pub mod line_reader;
 pub mod markdown;

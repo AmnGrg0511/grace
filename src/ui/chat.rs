@@ -169,43 +169,56 @@ pub fn run_chat(
         if text.is_empty() {
             continue;
         }
-        if matches!(text, "/exit" | "/quit") {
-            println!("goodbye.");
-            break;
-        }
-        if text.starts_with("/help") || text.starts_with("/commands") {
-            print_slash_commands_help();
-            continue;
-        }
-        if let Some(rest) = text.strip_prefix("/model") {
-            handle_model_command(transport, rest.trim(), &mut reader);
-            // After model switch, get context window from the transport first
-            // (which resolved it during handle_model_command), falling back to
-            // settings and the static table.
-            cached_context_window = transport.context_window()
-                .or(crate::config::settings::Settings::load().default_context_window)
-                .or_else(|| crate::config::settings::context_window_for(
-                    transport.current_model().as_deref().unwrap_or(""),
-                ));
-            continue;
-        }
-        if let Some(rest) = text.strip_prefix("/skin") {
-            handle_skin_command(rest.trim(), &mut skin, &mut reader);
-            reader.set_skin(skin);
-            continue;
-        }
-        if let Some(_rest) = text.strip_prefix("/session") {
-            handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills);
-            continue;
-        }
-        if text.starts_with("/verbose") {
-            verbose = !verbose;
-            println!(
-                "tool output {} (read/bash bodies {}; edit diffs always show).",
-                if verbose { "shown" } else { "hidden" },
-                if verbose { "visible" } else { "hidden" }
-            );
-            continue;
+        // A slash command is its first *word*: `/modelxyz` is model text, not
+        // a mistyped `/model`.
+        let cmd_word = text.split_whitespace().next().unwrap_or(text);
+        let rest = text[cmd_word.len()..].trim();
+        match cmd_word.strip_prefix('/') {
+            Some("exit" | "quit") => {
+                println!("goodbye.");
+                break;
+            }
+            Some("help" | "commands") => {
+                print_slash_commands_help();
+                continue;
+            }
+            Some("model") => {
+                handle_model_command(transport, rest, &mut reader);
+                // After model switch, get context window from the transport first
+                // (which resolved it during handle_model_command), falling back to
+                // settings and the static table.
+                cached_context_window = transport
+                    .context_window()
+                    .or(crate::config::settings::Settings::load().default_context_window)
+                    .or_else(|| {
+                        crate::config::settings::context_window_for(
+                            transport.current_model().as_deref().unwrap_or(""),
+                        )
+                    });
+                continue;
+            }
+            Some("skin") => {
+                handle_skin_command(rest, &mut skin, &mut reader);
+                reader.set_skin(skin);
+                continue;
+            }
+            Some("session") => {
+                handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills);
+                continue;
+            }
+            Some("verbose") => {
+                verbose = !verbose;
+                println!(
+                    "tool output {} (read/bash bodies {}; edit diffs always show).",
+                    if verbose { "shown" } else { "hidden" },
+                    if verbose { "visible" } else { "hidden" }
+                );
+                continue;
+            }
+            Some(_) | None => {
+                // Not a known command: unknown `/xyz` goes to the model as
+                // typed (it may be asking about a command or a path).
+            }
         }
         // Pre-flight recall: same mechanism one-shot mode gets at startup,
         // but re-run on EVERY turn here since chat is long-lived and each
@@ -1290,14 +1303,14 @@ pub fn compact_args(arguments: &str) -> String {
 }
 
 /// Print available slash commands for the chat REPL.
+/// `/help` — rendered from the single command registry, so the help screen
+/// can never list (or omit) a command whose dispatching differs.
 fn print_slash_commands_help() {
     println!("\nAvailable slash commands:");
-    println!("  /exit, /quit          - Exit the chat");
-    println!("  /help, /commands      - Show this help");
-    println!("  /model [name]         - Switch model (interactive picker if no arg)");
-    println!("  /skin [name]          - Switch color skin (interactive picker if no arg)");
-    println!("  /session              - Switch / start session (interactive picker)");
-    println!("  /verbose              - Toggle tool-output visibility (patch diffs always show)");
+    for c in crate::ui::commands::SLASH_COMMANDS {
+        let names: Vec<String> = c.all_names().map(|n| format!("/{n}")).collect();
+        println!("  {:<22} - {}", names.join(", "), c.summary);
+    }
     println!();
 }
 
@@ -1317,6 +1330,40 @@ mod verbose_gate_tests {
     fn edit_always_shown_regardless_of_verbose() {
         assert!(should_show_tool_output("edit", false));
         assert!(should_show_tool_output("edit", true));
+    }
+}
+
+#[cfg(test)]
+mod slash_command_agreement_tests {
+    /// The words the dispatch `match` in `run_chat` handles. This list and
+    /// the registry are checked against each other in both directions: a
+    /// handler without a registry entry is an undiscoverable command (audit
+    /// G14), and a registry entry without a handler is a phantom. Update
+    /// this constant whenever an arm in the dispatch match changes.
+    const DISPATCHED: &[&str] = &[
+        "exit", "quit", "help", "commands", "model", "skin", "session", "verbose",
+    ];
+
+    #[test]
+    fn every_dispatched_word_is_registered() {
+        for w in DISPATCHED {
+            assert!(
+                crate::ui::commands::resolve(w).is_some(),
+                "dispatched but not registered: {w}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_word_is_dispatched() {
+        for c in crate::ui::commands::SLASH_COMMANDS {
+            for n in c.all_names() {
+                assert!(
+                    DISPATCHED.contains(&n),
+                    "registered but not dispatched: {n}"
+                );
+            }
+        }
     }
 }
 
