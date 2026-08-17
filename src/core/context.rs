@@ -39,7 +39,7 @@
 use crate::message::{Message, Role};
 use crate::transport::ProviderTransport;
 use crate::util::tokens::{HeuristicCounter, TokenCounter};
-use crate::util::Result;
+use crate::util::{truncate_utf8, Result};
 
 /// Context compression configuration.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -135,8 +135,6 @@ struct CompressionSplit {
     keep_from: usize,
     /// Token cost of the system portion.
     system_cost: usize,
-    /// Token cost of the tail (rest[`keep_from`..]).
-    tail_cost: usize,
 }
 
 /// Decides when to compress and does it, against a pluggable token counter.
@@ -278,11 +276,9 @@ impl<C: TokenCounter> Compressor<C> {
     fn compress(&self, messages: &[Message]) -> Vec<Message> {
         let split = self.compute_split(messages);
         let (system, rest) = messages.split_at(split.system_len);
-        let marker_cost = self.counter.count_message(&Message::user(ELISION_MARKER));
-        let body_budget =
-            self.target_tokens().saturating_sub(split.system_cost + marker_cost);
-        let keep_from = adjust_for_budget(rest, split.keep_from, split.tail_cost, body_budget, &self.counter, &self.config);
-        self.build_compressed(system, rest, keep_from, None)
+        // The elision marker's cost is already in the body budget, so the
+        // split point is final as-is — no summary cost left to reserve.
+        self.build_compressed(system, rest, split.keep_from, None)
     }
 
     /// Compress `messages` using a model-generated summary for the dropped
@@ -297,10 +293,15 @@ impl<C: TokenCounter> Compressor<C> {
 
         let split = self.compute_split(messages);
         let (system, rest) = messages.split_at(split.system_len);
-        let keep_from = split.keep_from;
-        let dropped = &rest[..keep_from];
 
-        if dropped.is_empty() {
+        let marker_cost = self.counter.count_message(&Message::user(ELISION_MARKER));
+        let body_budget =
+            self.target_tokens().saturating_sub(split.system_cost + marker_cost);
+
+        // Pick the cut ignoring the summary (its cost is not knowable until
+        // it exists) — that span is the first thing to summarize.
+        let mut keep_from = split.keep_from;
+        if rest[..keep_from].is_empty() {
             return Ok(CompressionResult {
                 messages: messages.to_vec(),
                 outcome: CompressionOutcome {
@@ -312,13 +313,30 @@ impl<C: TokenCounter> Compressor<C> {
             });
         }
 
-        // Attempt to generate a model-based summary.
-        let summary = summarize_dropped(dropped, transport).ok();
-
-        let marker_cost = self.counter.count_message(&Message::user(ELISION_MARKER));
-        let body_budget =
-            self.target_tokens().saturating_sub(split.system_cost + marker_cost);
-        let keep_from = adjust_for_budget(rest, keep_from, split.tail_cost, body_budget, &self.counter, &self.config);
+        // Summarize the dropped span, then re-cut against the summary's REAL
+        // token cost (the old code reserved the cost of a fixed placeholder
+        // string, so a longer summary silently ate into the tail budget).
+        // If the re-cut drops more than the summary covers, re-summarize the
+        // larger final span — every dropped message must be in the summary,
+        // never neither kept nor summarized. The cut only moves forward
+        // (the budget never grows) and is floored by min_recent_messages, so
+        // this converges; the cap bounds pathological oscillation.
+        let mut summary = summarize_dropped(&rest[..keep_from], transport).ok();
+        for _ in 0..3 {
+            let Some(sum) = summary.clone() else {
+                break;
+            };
+            let summary_cost = self.counter.count_message(&Message::assistant(format!(
+                "[conversation summary]\n{sum}"
+            )));
+            let final_keep =
+                final_keep_from(rest, body_budget, summary_cost, &self.counter, &self.config);
+            if final_keep == keep_from {
+                break;
+            }
+            keep_from = final_keep;
+            summary = summarize_dropped(&rest[..keep_from], transport).ok();
+        }
 
         let compressed = self.build_compressed(system, rest, keep_from, summary.clone());
 
@@ -356,13 +374,11 @@ impl<C: TokenCounter> Compressor<C> {
             keep_from = idx;
         }
         let keep_from = safe_boundary(rest, keep_from);
-        let tail_cost: usize = rest[keep_from..].iter().map(|m| self.counter.count_message(m)).sum();
 
         CompressionSplit {
             system_len: system.len(),
             keep_from,
             system_cost,
-            tail_cost,
         }
     }
 
@@ -390,33 +406,29 @@ impl<C: TokenCounter> Compressor<C> {
     }
 }
 
-/// Re-adjust keep_from after adding a summary, ensuring we still fit budget.
-fn adjust_for_budget<C: TokenCounter>(
+/// Re-derive the cut once the summary's real token cost is known: the kept
+/// tail must fit the body budget alongside the summary message. The same
+/// walk as `compute_split`, with the summary cost deducted up front.
+fn final_keep_from<C: TokenCounter>(
     rest: &[Message],
-    keep_from: usize,
-    tail_cost: usize,
     body_budget: usize,
+    summary_cost: usize,
     counter: &C,
     config: &ContextCompressionConfig,
 ) -> usize {
-    let summary_cost = counter.count_message(&Message::assistant("[conversation summary]\n..."));
     let available = body_budget.saturating_sub(summary_cost);
-    if tail_cost <= available {
-        return keep_from;
-    }
-    // Need to drop more messages to fit the summary
-    let mut new_cost = 0usize;
-    let mut new_keep = rest.len();
+    let mut keep_from = rest.len();
+    let mut used = 0usize;
     for (idx, msg) in rest.iter().enumerate().rev() {
         let cost = counter.count_message(msg);
         let kept_so_far = rest.len() - idx - 1;
-        if new_cost + cost > available && kept_so_far >= config.min_recent_messages {
+        if used + cost > available && kept_so_far >= config.min_recent_messages {
             break;
         }
-        new_cost += cost;
-        new_keep = idx;
+        used += cost;
+        keep_from = idx;
     }
-    safe_boundary(rest, new_keep)
+    safe_boundary(rest, keep_from)
 }
 
 /// Call the model to produce a summary of the dropped portion.
@@ -426,7 +438,22 @@ fn summarize_dropped(
 ) -> Result<String> {
     let transcript = dropped
         .iter()
-        .map(|m| format!("[{}]: {}", m.role.as_str(), m.content))
+        .map(|m| {
+            let mut line = format!("[{}]: {}", m.role.as_str(), m.content);
+            // Without the tool calls the model loses *what it was doing* —
+            // an in-flight ReAct turn reads as "assistant said a word" and
+            // the summary drops the work that was actually underway.
+            if !m.tool_calls.is_empty() {
+                let calls = m
+                    .tool_calls
+                    .iter()
+                    .map(|c| format!("{}({})", c.name(), truncate_utf8(c.arguments(), 200)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                line.push_str(&format!(" [tool_calls: {calls}]"));
+            }
+            line
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -831,5 +858,140 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A transport that records each summarize request so a test can inspect
+    /// the transcript the dropped messages were rendered as.
+    struct CaptureTransport<M: FnMut(&[Message]) + 'static> {
+        capture: std::sync::Mutex<Option<Box<M>>>,
+        answer: String,
+    }
+
+    fn capture_transport<M: FnMut(&[Message]) + 'static>(
+        answer: &str,
+        capture: M,
+    ) -> CaptureTransport<M> {
+        CaptureTransport {
+            capture: std::sync::Mutex::new(Some(Box::new(capture))),
+            answer: answer.to_string(),
+        }
+    }
+
+    impl<M: FnMut(&[Message]) + 'static> ProviderTransport for CaptureTransport<M> {
+        fn name(&self) -> &str {
+            "capture"
+        }
+        fn complete(
+            &self,
+            m: &[Message],
+            _t: &[crate::transport::ToolSpec],
+            _model: &str,
+        ) -> crate::util::Result<crate::transport::ModelResponse> {
+            if let Some(c) = self.capture.lock().unwrap().as_mut() {
+                c(m);
+            }
+            Ok(crate::transport::ModelResponse {
+                content: self.answer.clone(),
+                tool_calls: vec![],
+                finish_reason: crate::transport::FinishReason::Stop,
+            })
+        }
+        fn context_window(&self) -> Option<u32> {
+            Some(4_000)
+        }
+    }
+
+    fn tool_heavy_conversation(turns: usize, tokens_each: usize) -> Vec<Message> {
+        let mut msgs = vec![Message::system("sys")];
+        for i in 0..turns {
+            msgs.push(Message::user(format!("q{i} {}", filler(tokens_each))));
+            let mut a = Message::assistant(format!("a{i} {}", filler(tokens_each)));
+            a.tool_calls = vec![ToolCall::new(
+                format!("c{i}"),
+                "bash",
+                format!("{{\"command\":\"run_step_{i}\"}}"),
+            )];
+            msgs.push(a);
+            msgs.push(Message::tool(format!("c{i}"), "bash", "ok"));
+        }
+        msgs
+    }
+
+    #[test]
+    fn the_summary_transcript_keeps_tool_calls_of_the_dropped_span() {
+        // If the dropped turns' tool calls are not in the transcript, the
+        // summary can only say "the assistant said a word" and the model
+        // loses the work that was underway.
+        static CAPTURED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let transport = capture_transport("sum", |m: &[Message]| {
+            if let Some(t) = m.last() {
+                CAPTURED.lock().unwrap().push(t.content.clone());
+            }
+        });
+        let mut msgs = tool_heavy_conversation(60, 40);
+        let c = Compressor::with_window(&cfg(), 4_000);
+        c.compress_in_place_with_model(&mut msgs, &transport)
+            .expect("should compress");
+        let captures = CAPTURED.lock().unwrap();
+        assert!(!captures.is_empty(), "the summary call must have happened");
+        let final_transcript = captures.last().unwrap();
+        assert!(
+            final_transcript.contains("run_step_"),
+            "tool arguments must survive into the summary transcript"
+        );
+        assert!(
+            final_transcript.contains("bash"),
+            "tool names must survive into the summary transcript"
+        );
+    }
+
+    #[test]
+    fn the_real_summary_cost_is_reserved_not_a_placeholder() {
+        // A summary much larger than the old fixed placeholder must shrink
+        // the kept tail accordingly; otherwise the compressed result lands
+        // over the target exactly when the summary is long.
+        let transport = capture_transport(&filler(60), |_: &[Message]| {});
+        let mut msgs = long_conversation(60, 40);
+        let c = Compressor::with_window(&cfg(), 4_000);
+        let result = c
+            .compress_in_place_with_model(&mut msgs, &transport)
+            .unwrap();
+        assert!(result.outcome.changed());
+        assert!(
+            result.outcome.after_tokens <= c.target_tokens(),
+            "after={} exceeds target {} — the summary cost was not reserved",
+            result.outcome.after_tokens,
+            c.target_tokens()
+        );
+    }
+
+    #[test]
+    fn the_summary_covers_exactly_the_final_dropped_span() {
+        // If reserving the real summary cost moves the cut, the messages
+        // between the first span and the final cut must be summarized too —
+        // a summary of only the first span would leave a gap that is neither
+        // kept nor described.
+        static CAPTURED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let transport = capture_transport(&filler(60), |m: &[Message]| {
+            if let Some(t) = m.last() {
+                CAPTURED.lock().unwrap().push(t.content.clone());
+            }
+        });
+        let mut msgs = long_conversation(60, 40);
+        let before_len = msgs.len();
+        let c = Compressor::with_window(&cfg(), 4_000);
+        let result = c
+            .compress_in_place_with_model(&mut msgs, &transport)
+            .unwrap();
+        assert!(result.summary.is_some());
+        let kept_tail = result.messages.len() - 2; // system + summary
+        let final_dropped = before_len - 1 - kept_tail;
+        let guard = CAPTURED.lock().unwrap();
+        let final_transcript = guard.last().unwrap();
+        assert_eq!(
+            final_transcript.lines().count(),
+            final_dropped,
+            "the final summary must describe every dropped message and no more"
+        );
     }
 }
