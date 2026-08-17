@@ -98,13 +98,26 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     let api_key = if is_copilot {
         crate::transport::copilot::get_or_create_token()?
     } else {
-        match std::env::var(preset.env_var).ok().filter(|k| !k.is_empty()) {
-            Some(k) => k,
-            None => prompt_read(&format!(
+        // The env var wins if set; otherwise ask — re-prompting on empty
+        // input, since an empty key would be persisted and sent as an empty
+        // bearer instead of getting another chance.
+        loop {
+            if let Some(k) =
+                std::env::var(preset.env_var).ok().filter(|k| !k.is_empty())
+            {
+                break k;
+            }
+            let Some(typed) = prompt_read(&format!(
                 "API key for {} (or set ${} and re-run): ",
                 preset.label, preset.env_var
-            ))
-            .ok_or_else(no_stdin)?,
+            )) else {
+                return Err(no_stdin());
+            };
+            if typed.is_empty() {
+                println!("key is empty — enter the key again");
+                continue;
+            }
+            break typed;
         }
     };
 
@@ -182,17 +195,12 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     if let Err(e) = settings.save() {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
     }
-    let env_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".grace")
-        .join(".env");
-    if let Some(parent) = env_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&env_path, format!("{}={}\n", preset.env_var, api_key)) {
+    // Per-key upsert: a whole-file rewrite here would wipe the other
+    // providers' keys every time onboarding ran for a new one.
+    if let Err(e) = crate::ui::cli::upsert_env_file(preset.env_var, &api_key) {
         eprintln!(
             "[grace] warning: could not save {}: {e}",
-            env_path.display()
+            crate::ui::cli::env_file_path().display()
         );
     }
     println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");

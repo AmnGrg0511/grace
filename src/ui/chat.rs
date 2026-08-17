@@ -288,10 +288,22 @@ fn handle_model_command(
                     .map(|k| k.trim().to_string())
                     .filter(|k| !k.is_empty())
                     .or_else(|| {
-                        reader
-                            .read_line(&format!("API key for this provider (${env_var} not set): "))
-                            .map(|k| k.trim().to_string())
-                            .filter(|k| !k.is_empty())
+                        // Re-prompt on empty input (an empty key would be
+                        // persisted and sent as an empty bearer); bail only
+                        // on EOF.
+                        loop {
+                            let Some(raw) = reader
+                                .read_line(&format!("API key for this provider (${env_var} not set): "))
+                            else {
+                                break None;
+                            };
+                            let trimmed = raw.trim().to_string();
+                            if trimmed.is_empty() {
+                                println!("key is empty — type it again");
+                                continue;
+                            }
+                            break Some(trimmed);
+                        }
                     })
             };
             let Some(key) = key else {
@@ -306,15 +318,13 @@ fn handle_model_command(
             if let Err(e) = settings.save() {
                 eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
             }
-            let env_path = dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".grace")
-                .join(".env");
-            if let Some(parent) = env_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::write(&env_path, format!("{env_var}={key}\n")) {
-                eprintln!("[grace] warning: could not save {}: {e}", env_path.display());
+            // Per-key upsert: a whole-file rewrite would wipe the other
+            // providers' keys every time `/model` switched providers.
+            if let Err(e) = crate::ui::cli::upsert_env_file(env_var, &key) {
+                eprintln!(
+                    "[grace] warning: could not save {}: {e}",
+                    crate::ui::cli::env_file_path().display()
+                );
             }
         }
     }
