@@ -158,6 +158,29 @@ fn a_failing_tool_is_reported_to_the_model_rather_than_aborting_the_turn() {
 }
 
 #[test]
+fn a_tool_failure_reports_the_error_prefix_exactly_once() {
+    // Regression (G3): the failure wrapper formatted "tool error: {e}" for
+    // any `AgentError` — but the `Tool` variant's own Display already starts
+    // with "tool error: ", so the model (and `--verbose`) saw the prefix
+    // twice.
+    let transport = ScriptedTransport::new(vec![
+        call_tool("c1", "definitely_not_a_tool", r#"{}"#),
+        answer("fine"),
+    ]);
+    let mut messages = vec![Message::user("try it")];
+    run_turn(&transport, &builtin_registry(), &mut messages, 8).unwrap();
+
+    let tool_msg = messages.iter().find(|m| m.role == Role::Tool).unwrap();
+    assert_eq!(
+        tool_msg.content.matches("tool error").count(),
+        1,
+        "the prefix must appear exactly once: {:?}",
+        tool_msg.content
+    );
+    assert!(tool_msg.content.contains("unknown tool"));
+}
+
+#[test]
 fn the_iteration_budget_bounds_a_model_that_never_stops() {
     let transport = ScriptedTransport::new(vec![call_tool(
         "c",

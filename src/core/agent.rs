@@ -217,7 +217,16 @@ pub fn run_turn_with_options(
                     // error — it gets the message and can correct course.
                     let result = match tools.execute(call.name(), call.arguments()) {
                         Ok(out) => out,
-                        Err(e) => format!("tool error: {e}"),
+                        Err(e) => {
+                            // `AgentError::Tool`'s Display already carries the
+                            // "tool error:" prefix — unwrap it, or the model
+                            // and `--verbose` would read "tool error: tool
+                            // error: …".
+                            match e {
+                                AgentError::Tool(msg) => format!("tool error: {msg}"),
+                                other => format!("tool error: {other}"),
+                            }
+                        }
                     };
                     let elapsed = started.elapsed();
                     emit(
