@@ -6,11 +6,9 @@ use crate::core::context::ContextCompressionConfig;
 use crate::message::Message;
 use crate::session::SessionStore;
 use crate::config::settings::PROVIDER_PRESETS;
-use crate::ui::skin::{Role, Skin};
+use crate::ui::skin::{no_color, reset, Role, Skin};
 
 use crate::ui::line_reader::LineReader;
-
-pub const RESET: &str = "\x1b[0m";
 
 /// A short, readable session id — e.g. `s-4kq9`. Full UUIDs are needless
 /// noise for something the user only ever sees in a picker (never types by
@@ -601,7 +599,7 @@ pub fn pick_skin_interactive(names: &[String], reader: &mut LineReader) -> Optio
             name = name,
             p = s.style(Role::Prompt).render(),
             glyph = s.prompt_glyph,
-            r = RESET,
+            r = reset(),
             tb = s.style(Role::ToolBullet).render(),
             tn = s.style(Role::ToolName).render(),
             td = s.style(Role::ToolDim).render(),
@@ -698,7 +696,7 @@ pub fn run_one_chat_turn(
                     "\n{}{}{} {}\n",
                     skin.paint(Role::Answer, ""),
                     skin.answer_glyph,
-                    RESET,
+                    reset(),
                     crate::ui::markdown::render_terminal(&answer, skin)
                 );
             }
@@ -1210,20 +1208,6 @@ pub fn print_agent_event_to(
 pub fn estimate_tokens(text: &str) -> usize {
     use crate::util::tokens::TokenCounter;
     crate::util::tokens::default_counter().count_text(text).max(1)
-}
-
-/// Whether ANSI color should be suppressed: not a TTY (unless
-/// `CLICOLOR_FORCE` is set), or `NO_COLOR`/`CLICOLOR=0` set.  The
-/// `CLICOLOR_FORCE` override lets a user pipe to `less -R` (or similar) and
-/// still get color, and lets tests force the color path without a PTY.
-pub fn no_color() -> bool {
-    use std::io::IsTerminal;
-    if std::env::var("CLICOLOR_FORCE").as_deref() == Ok("1") {
-        return false;
-    }
-    !std::io::stdout().is_terminal()
-        || std::env::var("NO_COLOR").is_ok()
-        || std::env::var("CLICOLOR").as_deref() == Ok("0")
 }
 
 /// The interactive-chat input prompt — a skin-colored glyph, never the

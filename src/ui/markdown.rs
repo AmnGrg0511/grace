@@ -41,7 +41,11 @@ fn ensure_blank(out: &mut String, n: usize) {
 /// Render `md` to terminal-friendly ANSI text if stdout is a TTY; otherwise
 /// return it unchanged.
 pub fn render_terminal(md: &str, skin: &Skin) -> String {
-    render_terminal_colored(md, skin, std::io::stdout().is_terminal())
+    render_terminal_colored(
+        md,
+        skin,
+        std::io::stdout().is_terminal() && !crate::ui::skin::no_color(),
+    )
 }
 
 /// The column width to render to: the live size of the terminal attached to
@@ -66,8 +70,8 @@ fn columns_env_width() -> Option<usize> {
 /// Render `md` with explicit color control.  When `color` is true, the output
 /// contains ANSI escapes for bold/headings/code; when false, the raw markdown
 /// is returned unchanged.  This is the primitive behind [`render_terminal`]
-/// (which passes `stdout().is_terminal()`) and is also used by the streaming
-/// renderer, which decides color once via [`crate::ui::chat::no_color`] and
+ /// (which passes `stdout().is_terminal() && !no_color()`) and is also used by the streaming
+ /// renderer, which decides color once via [`crate::ui::skin::no_color`] and
 /// re‑applies that decision on every incremental render.  Tables are fitted
 /// to [`terminal_width`].
 pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {

@@ -11,6 +11,34 @@
 
 use anstyle::{Color, RgbColor, Style};
 
+/// The single color policy for the whole UI.
+///
+/// Color comes off when stdout is not a terminal, or `NO_COLOR` is set, or
+/// `CLICOLOR=0` — and back on when `CLICOLOR_FORCE=1` (lets a user pipe to
+/// `less -R` and keep color). Every color-emitting surface (stream path,
+/// `Skin::paint`, one-shot renders, the markdown renderer) must ask this
+/// one function: a second policy with a subtly different check was bug
+/// G13 (raw fragments next to colored bullets under `NO_COLOR=1` on a TTY).
+pub fn no_color() -> bool {
+    use std::io::IsTerminal;
+    if std::env::var("CLICOLOR_FORCE").as_deref() == Ok("1") {
+        return false;
+    }
+    !std::io::stdout().is_terminal()
+        || std::env::var("NO_COLOR").is_ok()
+        || std::env::var("CLICOLOR").as_deref() == Ok("0")
+}
+
+/// The ANSI reset to pair with painted output — empty when color is off, so
+/// a `NO_COLOR` run contains no escape bytes at all.
+pub fn reset() -> &'static str {
+    if no_color() {
+        ""
+    } else {
+        "\x1b[0m"
+    }
+}
+
 /// One coherent palette. Each field is the color for a distinct role in the
 /// transcript — no two roles share a slot, so a skin fully re-themes the UI.
 #[derive(Debug, Clone, Copy)]
@@ -37,7 +65,14 @@ pub struct Skin {
 
 impl Skin {
     /// Get a `Style` for a color role.
+    ///
+    /// Policy-aware: when [`no_color`] is on the style renders to nothing,
+    /// which covers direct `style(..).render()` call sites as well as
+    /// [`paint`].
     pub fn style(&self, role: Role) -> Style {
+        if no_color() {
+            return Style::new();
+        }
         match role {
             Role::Prompt => Style::new().fg_color(Some(Color::from(self.prompt))),
             Role::Answer => Style::new().fg_color(Some(Color::from(self.answer))),
@@ -51,8 +86,9 @@ impl Skin {
 
     /// Render text with a role's color (TTY only; no-op otherwise).
     pub fn paint(&self, role: Role, text: &str) -> String {
-        use std::io::IsTerminal;
-        if !std::io::stdout().is_terminal() {
+        // Early-return on the policy (not just an empty style) so no reset
+        // escape is emitted either: `NO_COLOR` output stays byte-clean.
+        if no_color() {
             return text.to_string();
         }
         let style = self.style(role);
@@ -251,5 +287,33 @@ mod tests {
         let skin = SOLARIS;
         let styled = skin.paint(Role::Prompt, "test");
         assert!(styled.contains("test"));
+    }
+
+    #[test]
+    fn the_color_policy_is_single_and_precedence_is_pinned() {
+        // Regression (G13): the stream path and `paint`/the markdown
+        // renderer each kept their own "is a TTY" check, so `NO_COLOR=1` on
+        // a TTY left the bullets colored while fragments went raw. The whole
+        // UI now asks this one function — pin its precedence and that
+        // paint/reset follow it.
+        let _lock = crate::util::test_support::env_guard();
+        std::env::remove_var("CLICOLOR_FORCE");
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+
+        // Not a TTY (tests): color off by default, reset emits nothing.
+        assert!(no_color());
+        assert_eq!(reset(), "");
+
+        // NO_COLOR keeps it off where a bare TTY check would disagree.
+        std::env::set_var("NO_COLOR", "1");
+        assert!(no_color());
+        assert_eq!(SOLARIS.paint(Role::Prompt, "x"), "x");
+
+        // CLICOLOR_FORCE wins over NO_COLOR (piping through `less -R`).
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        assert!(!no_color());
+        std::env::remove_var("CLICOLOR_FORCE");
+        std::env::remove_var("NO_COLOR");
     }
 }
