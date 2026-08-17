@@ -445,13 +445,15 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
         .with_compression(config.context_compression.clone());
     let tools = Config::build_registry_full(&registry_options, DelegationDepth::ROOT);
 
-    let mut messages = vec![Message::system(build_system_prompt(
-        &config,
-        &memory,
-        &skills,
-        &sessions,
-        args.prompt.as_deref(),
-    )?)];
+    let mut messages = vec![
+        Message::system(crate::config::build_system_prompt(
+            config.system_prompt.as_deref(),
+            &memory,
+            &skills,
+            &sessions,
+            args.prompt.as_deref(),
+        )?)
+    ];
 
     println!(
         "[grace] transport={} model={} ctx={} tools={}",
@@ -489,6 +491,7 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
             args.verbose,
             &memory,
             &skills,
+            args.system_prompt.as_deref(),
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -574,37 +577,6 @@ fn run_action(action: &Action) -> Result<ExitCode, BoxedError> {
             Ok(ExitCode::FAILURE)
         }
     }
-}
-
-/// Assemble the system prompt: persona, then durable facts, then pre-flight
-/// recall for this specific prompt.
-fn build_system_prompt(
-    config: &Config,
-    memory: &Memory,
-    skills: &crate::skill::SkillStore,
-    sessions: &Arc<SessionStore>,
-    prompt: Option<&str>,
-) -> Result<String, BoxedError> {
-    let mut sp = config
-        .system_prompt
-        .clone()
-        .unwrap_or_else(crate::config::load_soul);
-
-    // Ground the persona in durable facts rather than leaving it decorative
-    // text: whatever Grace has been told to remember is appended every run.
-    if let Some(block) = memory.as_prompt_block()? {
-        sp.push_str(&block);
-    }
-
-    // Pre-flight recall: surface facts/skills/sessions overlapping this
-    // prompt's keywords without the user having to say "look at X".
-    if let Some(user_prompt) = prompt {
-        let hits = crate::recall::recall(user_prompt, memory, skills, Some(sessions), 5);
-        if let Some(block) = crate::recall::as_prompt_block(&hits) {
-            sp.push_str(&block);
-        }
-    }
-    Ok(sp)
 }
 
 /// One-shot `--prompt` mode.

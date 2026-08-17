@@ -64,6 +64,39 @@ pub fn load_soul_from(path: &std::path::Path) -> String {
     DEFAULT_SYSTEM_PROMPT.to_string()
 }
 
+/// Assemble the full system prompt — the single assembly path shared by
+/// first launch, `/session` switches, and one-shot `--prompt` runs.
+///
+/// An explicit `override_prompt` (the `--system` flag) replaces the soul
+/// file entirely; without it, the soul file is the persona. Durable memory
+/// facts are always appended after, and `query`, when given, triggers the
+/// pre-flight recall against it (facts/skills/sessions overlapping its
+/// keywords).
+///
+/// Errors are returned, never swallowed: a caller that silently drops them
+/// would build a prompt that quietly loses the user's remembered facts.
+pub fn build_system_prompt(
+    override_prompt: Option<&str>,
+    memory: &crate::memory::Memory,
+    skills: &crate::skill::SkillStore,
+    sessions: &crate::session::SessionStore,
+    query: Option<&str>,
+) -> crate::util::Result<String> {
+    let mut sp = override_prompt.map(str::to_string).unwrap_or_else(load_soul);
+
+    if let Some(block) = memory.as_prompt_block()? {
+        sp.push_str(&block);
+    }
+
+    if let Some(query) = query {
+        let hits = crate::recall::recall(query, memory, skills, Some(sessions), 5);
+        if let Some(block) = crate::recall::as_prompt_block(&hits) {
+            sp.push_str(&block);
+        }
+    }
+    Ok(sp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +172,62 @@ mod tests {
     fn soul_path_lives_under_the_dot_grace_directory() {
         let p = soul_path();
         assert!(p.ends_with(".grace/soul.md"), "got {}", p.display());
+    }
+
+    #[test]
+    fn build_system_prompt_is_the_single_assembly_path() {
+        // Regression (G1/G2): `/session` used to derive its own copy of the
+        // system prompt — dropping the `--system` override, skipping
+        // pre-flight recall, and swallowing memory read errors via
+        // `if let Ok(...)`. Session switches must go through this one
+        // builder so startup and switch re-derivation agree.
+        let dir = scratch("build_prompt");
+        let memory = crate::memory::Memory::open(dir.join("memory.db")).unwrap();
+        memory.remember("the user prefers rust").unwrap();
+        let skills = crate::skill::SkillStore::new(dir.join("skills"));
+        let sessions = crate::session::SessionStore::open(dir.join("sessions.db")).unwrap();
+
+        // The override takes the persona slot entirely …
+        let sp =
+            build_system_prompt(Some("you are a test persona"), &memory, &skills, &sessions, None)
+                .unwrap();
+        assert!(
+            sp.starts_with("you are a test persona"),
+            "the --system override must win: {sp:?}"
+        );
+        // … with durable facts appended on top …
+        assert!(sp.contains("prefers rust"), "memory block must be present: {sp:?}");
+
+        // A query triggers pre-flight recall — what a switch into a session
+        // feeds (the target session's first user message).
+        let sp = build_system_prompt(None, &memory, &skills, &sessions, Some("rust preferences"))
+            .unwrap();
+        assert!(
+            sp.contains("recalled automatically"),
+            "recall block expected for an overlapping query: {sp:?}"
+        );
+
+        // Without a query there is nothing to recall against — no empty
+        // recall noise.
+        let sp = build_system_prompt(None, &memory, &skills, &sessions, None).unwrap();
+        assert!(!sp.contains("recalled automatically"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_memory_db_fails_loudly_not_silently() {
+        // The old /session copy swallowed this case: an unreadable facts
+        // database must surface as an error the caller prints, not as a
+        // prompt that quietly lost every remembered fact.
+        let dir = scratch("corrupt_memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("memory.db");
+        std::fs::write(&db, b"this is not a sqlite database").unwrap();
+        match crate::memory::Memory::open(&db) {
+            Err(e) => assert!(e.to_string().contains("memory"), "got: {e}"),
+            Ok(_) => panic!("a corrupt facts database must not open"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

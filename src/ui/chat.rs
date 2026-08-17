@@ -85,6 +85,7 @@ pub fn run_chat(
     verbose: bool,
     memory: &crate::memory::Memory,
     skills: &crate::skill::SkillStore,
+    system_override: Option<&str>,
 ) {
     // Owned+mutable so `/skin <name>` can swap it live; `/model <name>` swaps
     // the transport's own interior model instead (see `set_model`).
@@ -196,7 +197,7 @@ pub fn run_chat(
             continue;
         }
         if let Some(_rest) = text.strip_prefix("/session") {
-            handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock);
+            handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills);
             continue;
         }
         if text.starts_with("/verbose") {
@@ -453,6 +454,7 @@ fn handle_skin_command(arg: &str, skin: &mut Skin, reader: &mut LineReader) {
 /// `/session` — interactive session picker.
 /// The picker lists saved sessions, lets you switch to one, or start a fresh session.
 /// No explicit subcommands: the interactive picker covers everything.
+#[allow(clippy::too_many_arguments)]
 fn handle_session_command(
     sessions: &SessionStore,
     messages: &mut Vec<Message>,
@@ -460,19 +462,23 @@ fn handle_session_command(
     reader: &mut LineReader,
     memory: &crate::memory::Memory,
     session_lock: &mut Option<crate::session::SessionLock>,
+    system_override: Option<&str>,
+    skills: &crate::skill::SkillStore,
 ) {
-    // `sessions.load()` never returns a system message (see session.rs —
-    // only user/assistant rows are persisted), and `messages.clear()` below
-    // wipes whatever system message was already in memory. Re-derive fresh
-    // every time instead of caching, since `--remember` can add facts
-    // mid-process (via a different terminal) and a stale cached block would
-    // miss those.
-    let fresh_system = || {
-        let mut sp = crate::config::load_soul();
-        if let Ok(Some(block)) = memory.as_prompt_block() {
-            sp.push_str(&block);
+    // The same assembly path as startup (`config::build_system_prompt`): the
+    // `--system` override is honored, durable facts are appended, and a
+    // memory error is printed rather than swallowed. `query` is the
+    // switched-to session's first user message, which feeds the pre-flight
+    // recall — at startup the interactive path can't know what you'll type,
+    // but a switch targets a session whose opener is already on record.
+    let fresh_system = |query: Option<&str>| {
+        match crate::config::build_system_prompt(system_override, memory, skills, sessions, query) {
+            Ok(sp) => Message::system(sp),
+            Err(e) => {
+                println!("error building the system prompt: {e} — using the bare soul");
+                Message::system(crate::config::load_soul())
+            }
         }
-        Message::system(sp)
     };
 
     let session_list = match sessions.list_sessions() {
@@ -533,7 +539,7 @@ fn handle_session_command(
     match raw.trim().parse::<usize>() {
         Ok(0) => {
             messages.clear();
-            messages.push(fresh_system());
+            messages.push(fresh_system(None));
             let new_id = short_session_id();
             if let Err(e) = sessions.append(&new_id, &Message::user("")) {
                 println!("warning: could not persist new session: {e}");
@@ -559,8 +565,12 @@ fn handle_session_command(
             }
             match sessions.load(sid) {
                 Ok(loaded) => {
+                    let query = loaded
+                        .iter()
+                        .find(|m| m.role == crate::message::Role::User)
+                        .map(|m| m.content.as_str());
                     messages.clear();
-                    messages.push(fresh_system());
+                    messages.push(fresh_system(query));
                     messages.extend(loaded);
                     *current_session = Some(sid.clone());
                     *session_lock = crate::session::SessionLock::acquire(sid).ok();

@@ -14,7 +14,7 @@ pub mod soul;
 
 pub use args::{Config, RegistryOptions, TransportConfig, OPENROUTER_BASE_URL};
 pub use settings::{context_window_for, KnownModel, ProviderPreset, Settings, PROVIDER_PRESETS};
-pub use soul::{load_soul, soul_path, DEFAULT_SYSTEM_PROMPT};
+pub use soul::{build_system_prompt, load_soul, soul_path, DEFAULT_SYSTEM_PROMPT};
 
 /// Re-exported for backwards compatibility: compression config conceptually
 /// belongs to the agent engine, but callers reach for it as configuration.
@@ -47,6 +47,14 @@ mod tests {
         assert!(!DEFAULT_SYSTEM_PROMPT.is_empty());
         assert!(soul_path().ends_with(".grace/soul.md"));
         let _: fn() -> String = load_soul;
+        #[allow(clippy::type_complexity)]
+        let _: fn(
+            Option<&str>,
+            &crate::memory::Memory,
+            &crate::skill::SkillStore,
+            &crate::session::SessionStore,
+            Option<&str>,
+        ) -> crate::util::Result<String> = build_system_prompt;
         let _: fn(&str) -> Option<u32> = context_window_for;
         assert!(!PROVIDER_PRESETS.is_empty());
     }
