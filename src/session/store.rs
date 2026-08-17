@@ -159,7 +159,8 @@ impl SessionStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT session_id, content FROM messages_fts WHERE messages_fts MATCH ?1 LIMIT ?2",
+                "SELECT session_id, content FROM messages_fts \
+                 WHERE messages_fts MATCH ?1 ORDER BY rowid DESC LIMIT ?2",
             )
             .map_err(|e| AgentError::Tool(format!("prepare search: {e}")))?;
         let rows = stmt
@@ -301,6 +302,31 @@ mod tests {
         let hits = store.search("France", 10).unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|(sid, _)| sid == "s1"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn full_text_search_returns_most_recent_rows_first() {
+        // Regression: the FTS MATCH branch had no ORDER BY, so recall
+        // surfaced the *oldest* matches first. Newest first matches the
+        // plain-scan branch (`ORDER BY id DESC`) and what recall wants.
+        let path = scratch_db("fts_order");
+        let _ = std::fs::remove_file(&path);
+        let store = SessionStore::open(&path).unwrap();
+
+        store
+            .append("s1", &Message::user("the first occurence of codex"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store
+            .append("s1", &Message::assistant("a later occurence of codex"))
+            .unwrap();
+
+        let hits = store.search("codex", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].1.contains("later"), "newest first: {hits:?}");
+        assert!(hits[1].1.contains("first"), "oldest last: {hits:?}");
 
         let _ = std::fs::remove_file(&path);
     }
