@@ -289,6 +289,15 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
 
     let chat = args.wants_chat();
 
+    // The id goes into file names (lock file, history file); a path-shaped
+    // id is a traversal, not a session.
+    if let Some(sid) = &args.session_id {
+        if let Err(e) = crate::session::lock::validate_session_id(sid) {
+            eprintln!("error: {e}");
+            return Err(e.into());
+        }
+    }
+
     #[allow(clippy::arc_with_non_send_sync)]
     let sessions = Arc::new(SessionStore::open(SessionStore::default_path())?);
     let mut session_id = args.session_id.clone();
@@ -297,10 +306,13 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
     }
     // Acquire lock immediately — before the onboarding wizard and transport
     // setup — so a second terminal sees this session as taken, not a race
-    // window of hundreds of lines of code.
-    let _lock = session_id
-        .as_deref()
-        .and_then(|s| SessionLock::acquire(s).ok());
+    // window of hundreds of lines of code. A session open in another
+    // terminal is a hard error: silently co-owning it interleaves two
+    // terminals' turns into one history.
+    let _lock = match session_id.as_deref() {
+        Some(sid) => Some(SessionLock::acquire(sid)?),
+        None => None,
+    };
 
     // Onboarding: with no model and no resolvable key anywhere, run the
     // interactive picker rather than failing with a terse "missing --model".

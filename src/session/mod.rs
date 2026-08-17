@@ -14,7 +14,7 @@ pub mod lock;
 pub mod store;
 pub mod title;
 
-pub use lock::{pick_default_session, SessionLock};
+pub use lock::{pick_default_session, validate_session_id, SessionLock};
 pub use store::SessionStore;
 pub use title::generate_title;
 
