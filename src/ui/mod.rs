@@ -5,6 +5,7 @@
 //! cli.rs          --help text and shell completions
 //! line_reader.rs  line editing / history
 //! completer.rs    tab completion + hinting for the REPL
+//! picker.rs       the shared dropdown (palette, /model, /forget, /jump)
 //! skin.rs         color skins
 //! markdown.rs     pulldown-cmark + syntect terminal rendering
 //! wizard.rs       first-run onboarding
@@ -18,6 +19,7 @@ pub mod cli;
 pub mod completer;
 pub mod line_reader;
 pub mod markdown;
+pub mod picker;
 pub mod skin;
 pub mod wizard;
 

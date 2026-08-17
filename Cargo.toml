@@ -39,6 +39,10 @@ rustyline = "14"
 # TTY detection. See https://rust-cli-recommendations.sunshowers.io/managing-colors-in-rust.html
 anstyle = "1"
 anstyle-query = "1"
+# Raw-mode keyboard input for the interactive pickers (model/session/forget/
+# jump menus) and the command palette. Only dependency that owns the terminal
+# directly (alongside rustyline's line editing); no TUI framework.
+crossterm = { version = "0.28", default-features = false, features = ["events"] }
 # Live terminal size for width-aware table wrapping.  std has no size API
 # on stable, and COLUMNS is not reliable (interactive shells here often
 # don't export it) — the ioctl-backed size is the primary source, with
