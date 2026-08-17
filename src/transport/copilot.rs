@@ -10,7 +10,7 @@ use crate::message::Message;
 use crate::transport::r#trait::{
     FinishReason, ModelInfo, ModelResponse, ProviderTransport, ToolSpec,
 };
-use crate::util::{AgentError, Result};
+use crate::util::{truncate_utf8, AgentError, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::cell::RefCell;
@@ -128,7 +128,7 @@ fn poll_token(device_code: &str) -> Result<String> {
         let token_resp: TokenResponse = serde_json::from_str(&text).map_err(|e| {
             AgentError::Transport(format!(
                 "Failed to parse token response: {e}. Raw: {}",
-                truncate(&text, 200)
+                truncate_utf8(&text, 200)
             ))
         })?;
 
@@ -196,14 +196,6 @@ pub fn fetch_models(token: &str) -> Result<Vec<ModelInfo>> {
     Ok(result)
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}... [truncated {} bytes]", &s[..max], s.len() - max)
-    }
-}
-
 /// A minted session token plus when it expires (Unix seconds), so the
 /// transport can tell "still good" from "must refresh" without another
 /// round-trip.
@@ -240,7 +232,7 @@ fn exchange_for_session_token(oauth_token: &str) -> Result<SessionToken> {
             "Copilot session-token exchange returned {status} — the OAuth token is likely \
              stale or revoked; delete GITHUB_COPILOT_TOKEN from ~/.grace/.env and re-run to \
              re-authenticate. Raw: {}",
-            truncate(&text, 300)
+            truncate_utf8(&text, 300)
         )));
     }
     let data: Value = serde_json::from_str(&text)
@@ -370,13 +362,13 @@ impl ProviderTransport for CopilotTransport {
         if !status.is_success() {
             return Err(AgentError::Transport(format!(
                 "Copilot returned {status}: {}",
-                truncate(&text, 500)
+                truncate_utf8(&text, 500)
             )));
         }
         let parsed: Value = serde_json::from_str(&text).map_err(|e| {
             AgentError::Transport(format!(
                 "invalid JSON response (status {status}): {e}. Raw: {}",
-                truncate(&text, 500)
+                truncate_utf8(&text, 500)
             ))
         })?;
         if let Some(err) = parsed.get("error") {

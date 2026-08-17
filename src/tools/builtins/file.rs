@@ -7,7 +7,7 @@
 //! and kill the session outright.
 
 use crate::tools::r#trait::{arg_str, str_prop, Tool};
-use crate::util::{AgentError, Result};
+use crate::util::{truncate_utf8, AgentError, Result};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -174,12 +174,8 @@ impl Tool for WriteTool {
         }
         let nbytes = content.len();
         fs::write(&allowed, &content).map_err(|e| AgentError::Tool(format!("write {}: {e}", path)))?;
-        // Truncate content display for large files
-        let display_content = if content.len() > 200 {
-            format!("{}... [truncated {} bytes]", &content[..200], content.len() - 200)
-        } else {
-            content.to_string()
-        };
+        // Truncate content display for large files (char-boundary safe)
+        let display_content = truncate_utf8(&content, 200);
         Ok(format!("wrote {} bytes to {} (content: {})", nbytes, path, display_content))
     }
 }

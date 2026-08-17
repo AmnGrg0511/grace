@@ -10,7 +10,7 @@ use crate::transport::r#trait::{
     FinishReason, ModelInfo, ModelResponse, ProviderTransport, ToolSpec,
 };
 use crate::transport::wire::{parse_openai_message, tools_to_json};
-use crate::util::{AgentError, Result};
+use crate::util::{truncate_utf8, AgentError, Result};
 use serde_json::{json, Value};
 
 /// Best-effort API fetch to discover a model's context window. Covers
@@ -167,7 +167,7 @@ impl HttpTransport {
                             Err(e) => {
                                 return Err(AgentError::Transport(format!(
                                     "invalid JSON response (status {status}): {e}. Raw: {}",
-                                    Self::truncate(&text, 500)
+                                    truncate_utf8(&text, 500)
                                 )));
                             }
                         }
@@ -185,13 +185,6 @@ impl HttpTransport {
         Err(last_err.unwrap_or_else(|| AgentError::Transport("request failed".into())))
     }
 
-    fn truncate(s: &str, max: usize) -> String {
-        if s.len() <= max {
-            s.to_string()
-        } else {
-            format!("{}... [truncated {} bytes]", &s[..max], s.len() - max)
-        }
-    }
 }
 
 impl ProviderTransport for HttpTransport {
@@ -496,15 +489,6 @@ mod tests {
             t.current_base_url().as_deref(),
             Some("https://openrouter.ai/api/v1")
         );
-    }
-
-    #[test]
-    fn truncate_marks_omitted_bytes() {
-        let long = "x".repeat(600);
-        let out = HttpTransport::truncate(&long, 500);
-        assert!(out.contains("truncated 100 bytes"));
-        let short = HttpTransport::truncate("abc", 500);
-        assert_eq!(short, "abc");
     }
 
     #[test]
