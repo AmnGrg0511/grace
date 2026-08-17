@@ -525,7 +525,7 @@ fn run_one_shot(
     // `--stream` is no longer a separate code path that skips the tool loop.
     // It is a flag on the same loop, so a streamed run can still call tools —
     // the old one-shot-only streaming silently dropped that ability.
-    let outcome = {
+    let turn = {
         let mut sink = |event: crate::core::AgentEvent<'_>| {
             crate::ui::chat::print_agent_event(event, skin, args.verbose, &mut stream_state);
         };
@@ -540,7 +540,18 @@ fn run_one_shot(
             messages,
             config.max_iterations,
             options,
-        )?
+        )
+    };
+    let outcome = match turn {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // The user row is persisted before the turn runs; a failed one
+            // must not leave it dangling in the session history.
+            if let Some(sid) = session_id {
+                let _ = sessions.delete_last_user_row(sid);
+            }
+            return Err(e.into());
+        }
     };
 
     // The agent emits no terminal event after its last ContentFragment, so a

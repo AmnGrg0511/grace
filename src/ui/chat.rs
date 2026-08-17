@@ -728,8 +728,23 @@ pub fn run_one_chat_turn(
         }
         Err(e) => {
             eprintln!("error: {e}");
-            // Drop the last user message so a failed turn can be retried.
-            messages.pop();
+            // Rewind the transcript to before this turn's user message so a
+            // failed turn can be retried cleanly. A blind `pop()` is wrong:
+            // by the time a turn errors, assistant/tool messages have usually
+            // been pushed already (and the compressor may have rewritten the
+            // whole list), so the last message is not the user message.
+            if let Some(pos) = messages
+                .iter()
+                .rposition(|m| m.role == crate::message::Role::User)
+            {
+                messages.truncate(pos);
+            }
+            // The user row was persisted before the turn ran; without this a
+            // failed turn leaves a user message with no answer in the
+            // on-disk history.
+            if let Some(sid) = session_id {
+                let _ = sessions.delete_last_user_row(sid);
+            }
         }
     }
 }

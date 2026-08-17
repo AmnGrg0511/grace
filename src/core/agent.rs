@@ -188,8 +188,21 @@ pub fn run_turn_with_options(
                     });
                 }
                 emit_content(&mut options.on_event, &resp, options.stream);
-                for call in &resp.tool_calls {
+                for (i, call) in resp.tool_calls.iter().enumerate() {
                     if is_interrupted() {
+                        // The assistant message above carries `tool_calls`,
+                        // and providers hard-reject it unless every call is
+                        // answered by a tool message. An interrupt mid-loop
+                        // would leave the remaining calls open, corrupting
+                        // the next request — so close them out with a
+                        // synthesized result before unwinding the turn.
+                        for pending in &resp.tool_calls[i..] {
+                            messages.push(Message::tool(
+                                pending.id.clone(),
+                                pending.name().to_string(),
+                                "[interrupted — no result]",
+                            ));
+                        }
                         return Err(AgentError::Interrupted);
                     }
                     emit(
@@ -285,6 +298,8 @@ mod tests {
     use super::*;
     use crate::message::ToolCall;
     use crate::tools::builtins::register_builtins;
+    use crate::tools::r#trait::Tool;
+    use serde_json::{json, Value};
     use std::cell::{Cell, RefCell};
 
     /// Scripted transport: emits one tool call, then a final answer.
@@ -424,6 +439,84 @@ mod tests {
 
         assert!(matches!(res, Err(AgentError::Interrupted)));
         assert_eq!(messages.len(), 1, "nothing should have been appended");
+    }
+
+    #[test]
+    fn an_interrupt_mid_tool_loop_leaves_every_tool_call_answered() {
+        // A Ctrl-C during the tool loop used to bail with the assistant's
+        // tool_calls only half answered — the transcript sent on the next
+        // turn was malformed (provider 400 / dropped context). The remaining
+        // calls must be closed out with synthesized results.
+        struct FlipTool {
+            flag: std::sync::Arc<AtomicBool>,
+        }
+        impl Tool for FlipTool {
+            fn name(&self) -> &str {
+                "flip"
+            }
+            fn description(&self) -> &str {
+                "test tool"
+            }
+            fn parameters(&self) -> Value {
+                json!({ "type": "object", "properties": {} })
+            }
+            fn run(&self, _args: &Value) -> Result<String> {
+                self.flag.store(true, Ordering::SeqCst);
+                Ok("flipped".to_string())
+            }
+        }
+        struct TwoCalls;
+        impl ProviderTransport for TwoCalls {
+            fn name(&self) -> &str {
+                "two-calls"
+            }
+            fn complete(
+                &self,
+                _m: &[Message],
+                _t: &[ToolSpec],
+                _model: &str,
+            ) -> Result<ModelResponse> {
+                Ok(ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![
+                        ToolCall::new("call_a", "flip", "{}"),
+                        ToolCall::new("call_b", "never-runs", "{}"),
+                    ],
+                    finish_reason: FinishReason::ToolCalls,
+                })
+            }
+        }
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(FlipTool {
+            flag: std::sync::Arc::clone(&flag),
+        }));
+        let mut messages = base_messages();
+        let res = run_turn_with_options(
+            &TwoCalls,
+            &tools,
+            &mut messages,
+            8,
+            TurnOptions::new().with_interrupt(&flag),
+        );
+        assert!(matches!(res, Err(AgentError::Interrupted)));
+        let assistant = messages
+            .iter()
+            .find(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
+            .expect("the assistant tool-call message must be in the transcript");
+        let tool_msgs: Vec<&Message> = messages.iter().filter(|m| m.role == Role::Tool).collect();
+        assert_eq!(
+            tool_msgs.len(),
+            assistant.tool_calls.len(),
+            "every tool_call must have an answering tool message"
+        );
+        for (call, msg) in assistant.tool_calls.iter().zip(&tool_msgs) {
+            assert_eq!(msg.tool_call_id.as_deref(), Some(call.id.as_str()));
+        }
+        assert!(
+            tool_msgs[1].content.contains("interrupted"),
+            "the never-run second call must carry a synthesized result"
+        );
     }
 
     #[test]

@@ -45,6 +45,10 @@ impl SessionStore {
             );
             CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
                 INSERT INTO messages_fts(rowid, content, session_id) VALUES (new.id, new.content, new.session_id);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, session_id)
+                    VALUES('delete', old.id, old.content, old.session_id);
             END;",
         )
         .map_err(|e| AgentError::Tool(format!("init session schema: {e}")))?;
@@ -76,6 +80,25 @@ impl SessionStore {
             )
             .map_err(|e| AgentError::Tool(format!("append message: {e}")))?;
         Ok(())
+    }
+
+    /// Remove the most recent `user` row of a session — the prompt of a turn
+    /// that failed before producing an answer. Without this, every failed
+    /// (or Ctrl-C'd-into-a-hard-error) turn leaves a dangling user message
+    /// in the on-disk history. Returns the number of rows removed (0 or 1);
+    /// the `AFTER DELETE` trigger keeps the FTS index in sync.
+    pub fn delete_last_user_row(&self, session_id: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM messages WHERE id = (
+                    SELECT id FROM messages WHERE session_id = ?1 AND role = 'user'
+                    ORDER BY id DESC LIMIT 1
+                 )",
+                [session_id],
+            )
+            .map_err(|e| AgentError::Tool(format!("delete last user row: {e}")))?;
+        Ok(n)
     }
 
     /// Load a session's prior turns as replayable `Message`s (user/assistant
@@ -296,6 +319,30 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert_eq!(ids[0], "beta"); // most recently active
         assert!(ids.contains(&"alpha".to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_last_user_row_removes_only_the_prompt_and_syncs_fts() {
+        let path = scratch_db("delrow");
+        let _ = std::fs::remove_file(&path);
+        let store = SessionStore::open(&path).unwrap();
+
+        store.append("s1", &Message::user("first question zebra")).unwrap();
+        store.append("s1", &Message::assistant("first answer")).unwrap();
+        store.append("s1", &Message::user("second question zebra")).unwrap();
+        // No assistant row after that — a failed turn.
+
+        assert_eq!(store.delete_last_user_row("s1").unwrap(), 1);
+        assert_eq!(store.load("s1").unwrap().len(), 2);
+
+        // The FTS index must no longer see the deleted row.
+        let hits = store.search("zebra", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, "first question zebra");
+
+        // Other sessions are untouched; nothing to delete -> 0 rows.
+        assert_eq!(store.delete_last_user_row("s2").unwrap(), 0);
         let _ = std::fs::remove_file(&path);
     }
 
