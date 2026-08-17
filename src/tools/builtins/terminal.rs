@@ -6,7 +6,9 @@
 //! unified interface.
 //!
 //! Safety: unguarded by default. Opt-in guardrails via `GRACE_TERMINAL_DENY`,
-//! `GRACE_TERMINAL_ALLOW`, `GRACE_TERMINAL_ALLOW_DIR`, and `GRACE_TERMINAL_TIMEOUT`.
+//! `GRACE_TERMINAL_ALLOW`, `GRACE_TERMINAL_ALLOW_DIR`, and
+//! `GRACE_TERMINAL_TIMEOUT` (foreground) / `GRACE_TERMINAL_BG_TIMEOUT`
+//! (background).
 
 use crate::tools::r#trait::{str_prop, Tool};
 use crate::util::{AgentError, Result};
@@ -206,6 +208,19 @@ impl BashTool {
         (secs > 0).then(|| std::time::Duration::from_secs(secs))
     }
 
+    /// Timeout for background jobs. Deliberately separate from
+    /// [`BashTool::timeout`]: the foreground default (30s) makes no sense for
+    /// a detached server/watcher, and silently killing those was the bug.
+    /// Default is no cap; `GRACE_TERMINAL_BG_TIMEOUT` (seconds, `0`/unset =
+    /// no cap) opts in to one.
+    fn bg_timeout() -> Option<std::time::Duration> {
+        let secs = std::env::var("GRACE_TERMINAL_BG_TIMEOUT")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        (secs > 0).then(|| std::time::Duration::from_secs(secs))
+    }
+
     /// Run `cmd`, killing it if it outlives `timeout()`. Polls
     /// `try_wait()` rather than blocking on `.output()`, since a blocking
     /// wait gives no way to intervene once the timeout has elapsed.
@@ -334,7 +349,7 @@ impl BashTool {
         // runs) so a background job can't leak forever either, then records
         // the outcome for `bash(job_id="...")` to observe.
         std::thread::spawn(move || {
-            let deadline = Self::timeout().map(|d| std::time::Instant::now() + d);
+            let deadline = Self::bg_timeout().map(|d| std::time::Instant::now() + d);
             let poll = std::time::Duration::from_millis(200);
             let (code, timed_out) = loop {
                 let mut guard = job.child.lock().unwrap();
@@ -692,5 +707,33 @@ mod tools_hardening_tests {
         let out = tool.run(&json!({"command": "echo \"a;b\""})).unwrap();
         assert!(out.contains("a;b"), "out was: {out}");
         std::env::remove_var("GRACE_TERMINAL_ALLOW");
+    }
+
+    #[test]
+    fn background_job_ignores_the_foreground_timeout() {
+        // Regression: background jobs used to inherit the 30s foreground
+        // timeout, so a server/watcher left running `sleep 30` got killed on
+        // schedule. With a tight foreground timeout set, a backgrounded
+        // longer sleep must still complete — bg timeout is its own knob.
+        let _g = ENV_GUARD_FN();
+        std::env::set_var("GRACE_TERMINAL_TIMEOUT", "1");
+        std::env::remove_var("GRACE_TERMINAL_BG_TIMEOUT");
+        let tool = BashTool;
+        let out = tool
+            .run(&json!({"command": "sleep 3; echo bg-done", "background": true}))
+            .unwrap();
+        let job_id = out
+            .split('\'')
+            .nth(1)
+            .expect("expected job id quoted in dispatch message")
+            .to_string();
+        let finished = tool
+            .run(&json!({"job_id": job_id, "wait": true}))
+            .unwrap();
+        assert!(
+            finished.contains("bg-done") && finished.contains("[status: exited, code 0]"),
+            "background job was wrongly killed by the foreground timeout: {finished}"
+        );
+        std::env::remove_var("GRACE_TERMINAL_TIMEOUT");
     }
 }
