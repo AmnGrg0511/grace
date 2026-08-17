@@ -92,7 +92,25 @@ pub struct HttpTransport {
     context_window: std::cell::RefCell<Option<Option<u32>>>,
 }
 
+/// The per-request timeout for provider calls: the configured
+/// `request_timeout_secs` when set, else the 60 s default. `0` is clamped to
+/// 1 s — a zero timeout would time out every request instantly.
+pub fn request_timeout(request_timeout_secs: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_secs(request_timeout_secs.unwrap_or(60).max(1))
+}
+
 impl HttpTransport {
+    /// Override the per-request timeout (default 60 s). The connect timeout
+    /// stays 10 s: it bounds the DNS/TCP phase, while the request timeout
+    /// bounds the whole exchange.
+    pub fn with_request_timeout(mut self, secs: u64) -> Self {
+        self.client = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(request_timeout(Some(secs)))
+            .build()
+            .unwrap_or_default();
+        self
+    }
     /// Generic OpenAI-compatible endpoint. `model` defaults to empty and must
     /// be supplied by the caller via [`HttpTransport::with_model`] for real
     /// use; the agent loop passes "", so the transport must own the model.
@@ -438,6 +456,17 @@ mod tests {
     fn empty_model_reports_none_rather_than_an_empty_string() {
         let t = HttpTransport::new("https://example.test/v1", "k");
         assert_eq!(t.current_model(), None);
+    }
+
+    #[test]
+    fn request_timeout_defaults_to_sixty_and_clamps_zero() {
+        // Regression (G10): the configured value (when present) is the
+        // single source for the request timeout; absent, 60 s; `0` would
+        // kill every request instantly, so it clamps to 1 s.
+        use std::time::Duration;
+        assert_eq!(request_timeout(None), Duration::from_secs(60));
+        assert_eq!(request_timeout(Some(120)), Duration::from_secs(120));
+        assert_eq!(request_timeout(Some(0)), Duration::from_secs(1));
     }
 
     #[test]

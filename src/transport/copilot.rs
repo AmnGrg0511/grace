@@ -280,6 +280,17 @@ impl CopilotTransport {
         }
     }
 
+    /// Override the per-request timeout (default 60 s), mirroring
+    /// `HttpTransport::with_request_timeout`.
+    pub fn with_request_timeout(mut self, secs: u64) -> Self {
+        self.client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(crate::transport::http::request_timeout(Some(secs)))
+            .build()
+            .unwrap_or_default();
+        self
+    }
+
     /// Returns a session token guaranteed to be valid for at least 60 more
     /// seconds, refreshing via [`exchange_for_session_token`] if the cached
     /// one is missing or about to expire. This is what makes token refresh

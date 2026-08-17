@@ -21,6 +21,10 @@ pub struct Settings {
     pub skills_dir: Option<String>,
     pub tools_dir: Option<String>,
     pub max_iterations: Option<u32>,
+    /// Provider request timeout in seconds, applied to chat/model requests
+    /// by the transports (see `transport::http::request_timeout`). The
+    /// short startup probes (model lists, context windows) keep their own
+    /// small caps so a slow endpoint can't delay boot.
     pub request_timeout_secs: Option<u64>,
     /// Name of the color skin to use (see [`crate::skin`]). `None` (or an
     /// unrecognized name) falls back to the default "solaris" skin.

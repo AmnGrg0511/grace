@@ -124,6 +124,10 @@ pub struct Config {
     pub system_prompt: Option<String>,
     /// Context compression settings.
     pub context_compression: ContextCompressionConfig,
+    /// Per-request provider timeout from `~/.grace/config.toml`'s
+    /// `request_timeout_secs` — populated by `run()` before
+    /// [`Self::build_transport`]; `None` means the transport default.
+    pub request_timeout_secs: Option<u64>,
 }
 
 impl Config {
@@ -139,16 +143,21 @@ impl Config {
                 // session token, auto-refreshed — a plain HttpTransport
                 // silently 404s after ~25 minutes.
                 if base_url.trim_end_matches('/') == crate::transport::copilot::BASE_URL {
-                    Ok(Box::new(crate::transport::CopilotTransport::new(
-                        api_key.clone(),
-                        model.clone(),
-                    )))
+                    let mut t = crate::transport::CopilotTransport::new(api_key.clone(), model.clone());
+                    if let Some(secs) = self.request_timeout_secs {
+                        t = t.with_request_timeout(secs);
+                    }
+                    Ok(Box::new(t))
                 } else {
-                    Ok(Box::new(crate::transport::HttpTransport::with_model(
+                    let mut t = crate::transport::HttpTransport::with_model(
                         base_url.clone(),
                         api_key.clone(),
                         model.clone(),
-                    )))
+                    );
+                    if let Some(secs) = self.request_timeout_secs {
+                        t = t.with_request_timeout(secs);
+                    }
+                    Ok(Box::new(t))
                 }
             }
         }
@@ -264,6 +273,7 @@ impl Config {
             max_iterations: max_iterations.max(1),
             system_prompt,
             context_compression: ContextCompressionConfig::default(),
+            request_timeout_secs: None,
         })
     }
 }
@@ -460,6 +470,37 @@ mod tests {
             max_iterations: 4,
             system_prompt: None,
             context_compression: ContextCompressionConfig::default(),
+            request_timeout_secs: None,
+        };
+        assert_eq!(c.build_transport().unwrap().name(), "github-copilot");
+    }
+
+    #[test]
+    fn a_configured_request_timeout_builds_both_transport_paths() {
+        // Regression (G10): `request_timeout_secs` was advertised (parsed,
+        // persisted, in the help text) but never read — the transports
+        // hardcoded 60 s. It must reach the client on both paths.
+        let mut c = Config::from_args(
+            Some("https://example.invalid/v1".into()),
+            Some("k".into()),
+            Some("m".into()),
+            8,
+            None,
+        )
+        .unwrap();
+        c.request_timeout_secs = Some(5);
+        assert_eq!(c.build_transport().unwrap().name(), "openai-http");
+
+        let c = Config {
+            transport: TransportConfig::Http {
+                base_url: crate::transport::copilot::BASE_URL.to_string(),
+                api_key: "tok".into(),
+                model: "m".into(),
+            },
+            max_iterations: 4,
+            system_prompt: None,
+            context_compression: ContextCompressionConfig::default(),
+            request_timeout_secs: Some(5),
         };
         assert_eq!(c.build_transport().unwrap().name(), "github-copilot");
     }

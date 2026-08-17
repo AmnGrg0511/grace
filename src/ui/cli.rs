@@ -421,13 +421,17 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
         api_key = api_key.or(Some(picked_key));
     }
 
-    let config = Config::from_args(
+    let mut config = Config::from_args(
         base_url,
         api_key,
         model,
         max_iterations,
         args.system_prompt.clone(),
     )?;
+    // The request timeout is a config-file knob (`request_timeout_secs`); the
+    // CLI has no flag for it. Until this lands in build_transport, honoring
+    // the value is what "advertised" means.
+    config.request_timeout_secs = settings.request_timeout_secs;
     let transport: Rc<dyn crate::transport::ProviderTransport> = Rc::from(config.build_transport()?);
 
     // Seed the default skills into ~/.grace/skills on first run.
