@@ -815,6 +815,10 @@ pub struct StreamState {
     /// break the byte-prefix invariant the delta emitter checks.  One-shot
     /// renders (answers, tool results) resolve a fresh width instead.
     width: Option<Option<usize>>,
+    /// Set once a commit fault has been made visible (invariant broken or a
+    /// write error) so the one-line stderr note is not repeated for every
+    /// subsequent delta of the same stream.
+    commit_failed: bool,
 }
 
 /// The byte offset into `buf` up to which the buffer consists of fully
@@ -922,14 +926,29 @@ fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
 /// never move the cursor, nothing can be duplicated past the viewport either.
 fn emit_committed(stream: &mut StreamState, rendered: &str, out: &mut dyn std::io::Write) {
     // Fail-safe: if the prefix invariant were ever broken, skip this delta
-    // rather than emit a corrupted/duplicated slice. (It should not happen —
-    // the commit boundary is only advanced across complete blocks.)
+    // rather than emit a corrupted/duplicated slice — but say so, once. A
+    // silent skip here would be an invisible loss of output; the note goes
+    // to stderr, never into `out`, so the stream's bytes stay untouched.
     if !stream.last_rendered.is_empty() && !rendered.starts_with(&stream.last_rendered) {
+        if !stream.commit_failed {
+            stream.commit_failed = true;
+            eprintln!(
+                "[grace] stream error: the append-only prefix invariant broke; \
+                 the rest of this block was dropped (output may be incomplete)"
+            );
+        }
         return;
     }
     let end = rendered.len();
     if end > stream.emitted {
-        let _ = out.write_all(&rendered.as_bytes()[stream.emitted..]);
+        if let Err(e) = out.write_all(&rendered.as_bytes()[stream.emitted..]) {
+            if !stream.commit_failed {
+                stream.commit_failed = true;
+                eprintln!("[grace] stream error: writing stream output failed: {e}; remaining output may be missing");
+            }
+        }
+        // Keep the same bookkeeping as before (advance past the attempted
+        // slice) so a broken destination isn't retried delta after delta.
         stream.emitted = end;
     }
     stream.last_rendered = rendered.to_string();
@@ -1670,6 +1689,53 @@ mod streaming_markdown_tests {
             stable_commit_endpoint(&format!("{intro}{rows}after\n")),
             intro.len() + rows.len() + "after\n".len()
         );
+    }
+
+    #[test]
+    fn emit_committed_reports_a_commit_fault_instead_of_dropping_silently() {
+        // Regression (G9): the fail-safe used to `return` without saying a
+        // word — a broken prefix invariant, or a dead write destination,
+        // meant silently missing output. The delta is still skipped
+        // (emitting a corrupted slice would be worse), but the fault must be
+        // flagged exactly once per stream and stay flagged.
+        let mut stream = StreamState::default();
+        let mut out: Vec<u8> = Vec::new();
+        emit_committed(&mut stream, "first line\n", &mut out);
+        assert_eq!(out, b"first line\n");
+        assert!(!stream.commit_failed);
+
+        // A render that does not extend the previous one breaks the prefix
+        // invariant: nothing may be emitted, and no later delta either.
+        let mut broken: Vec<u8> = Vec::new();
+        emit_committed(&mut stream, "something else entirely\n", &mut broken);
+        assert!(broken.is_empty(), "a corrupted slice must never be emitted: {broken:?}");
+        assert!(stream.commit_failed, "the fault must be flagged");
+
+        let mut after: Vec<u8> = Vec::new();
+        emit_committed(&mut stream, "something else entirely\nmore\n", &mut after);
+        assert!(after.is_empty(), "after a fault the delta stays skipped: {after:?}");
+        assert!(stream.commit_failed, "the flag stays set for the rest of the stream");
+    }
+
+    #[test]
+    fn emit_committed_flags_a_failed_write_without_retrying_forever() {
+        struct FailWrite;
+        impl std::io::Write for FailWrite {
+            fn write(&mut self, _b: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe is gone"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // A dead destination is reported once; the bookkeeping still
+        // advances past the attempted slice so the same bytes are not
+        // retried on every subsequent delta.
+        let mut stream = StreamState::default();
+        emit_committed(&mut stream, "some output\n", &mut FailWrite);
+        assert!(stream.commit_failed, "a write error must be flagged");
+        assert_eq!(stream.emitted, "some output\n".len(), "bookkeeping advances past the failed slice");
     }
 
     #[test]
