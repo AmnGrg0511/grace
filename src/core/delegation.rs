@@ -359,6 +359,7 @@ mod tests {
                 content: self.0.to_string(),
                 tool_calls: vec![],
                 finish_reason: FinishReason::Stop,
+                usage: None,
             })
         }
     }
@@ -383,6 +384,7 @@ mod tests {
                     r#"{"command":"echo x"}"#,
                 )],
                 finish_reason: FinishReason::ToolCalls,
+                usage: None,
             })
         }
     }
@@ -406,6 +408,7 @@ mod tests {
                 content: "done".into(),
                 tool_calls: vec![],
                 finish_reason: FinishReason::Stop,
+                usage: None,
             })
         }
     }

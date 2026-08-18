@@ -68,6 +68,7 @@ mod tests {
                 content: self.0.to_string(),
                 tool_calls: vec![],
                 finish_reason: FinishReason::Stop,
+                usage: None,
             })
         }
     }

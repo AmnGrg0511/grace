@@ -64,6 +64,7 @@ fn stop(text: &str) -> ModelResponse {
         content: text.into(),
         tool_calls: vec![],
         finish_reason: FinishReason::Stop,
+        usage: None,
     }
 }
 
@@ -72,6 +73,7 @@ fn tool_call(id: &str, name: &str, args: &str) -> ModelResponse {
         content: String::new(),
         tool_calls: vec![ToolCall::new(id, name, args)],
         finish_reason: FinishReason::ToolCalls,
+        usage: None,
     }
 }
 

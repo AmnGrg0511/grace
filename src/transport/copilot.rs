@@ -401,6 +401,7 @@ impl ProviderTransport for CopilotTransport {
         if !result.tool_calls.is_empty() {
             result.finish_reason = FinishReason::ToolCalls;
         }
+        result.usage = crate::transport::wire::parse_usage(parsed.get("usage"));
         Ok(result)
     }
 

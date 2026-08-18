@@ -21,8 +21,8 @@ pub mod wire;
 
 pub use copilot::CopilotTransport;
 pub use http::HttpTransport;
-pub use r#trait::{FinishReason, ModelInfo, ModelResponse, ProviderTransport, ToolSpec};
-pub use wire::{parse_openai_message, tools_to_json, urlencoding};
+pub use r#trait::{FinishReason, ModelInfo, ModelResponse, ProviderTransport, TokenUsage, ToolSpec};
+pub use wire::{parse_openai_message, parse_usage, tools_to_json, urlencoding};
 
 #[cfg(test)]
 mod tests {

@@ -12,7 +12,7 @@ use grace::core::{
 };
 use grace::message::{Message, Role, ToolCall};
 use grace::tools::{register_builtins, ToolRegistry};
-use grace::transport::{FinishReason, ModelResponse, ProviderTransport, ToolSpec};
+use grace::transport::{FinishReason, ModelResponse, ProviderTransport, TokenUsage, ToolSpec};
 use grace::util::{AgentError, Result};
 use std::cell::{Cell, RefCell};
 
@@ -66,6 +66,7 @@ fn answer(text: &str) -> ModelResponse {
         content: text.to_string(),
         tool_calls: vec![],
         finish_reason: FinishReason::Stop,
+        usage: None,
     }
 }
 
@@ -74,6 +75,7 @@ fn call_tool(id: &str, name: &str, args: &str) -> ModelResponse {
         content: String::new(),
         tool_calls: vec![ToolCall::new(id, name, args)],
         finish_reason: FinishReason::ToolCalls,
+        usage: None,
     }
 }
 
@@ -96,6 +98,51 @@ fn a_single_turn_with_no_tools_returns_the_models_answer() {
     let out = run_turn(&transport, &ToolRegistry::new(), &mut messages, 8).unwrap();
     assert_eq!(out, "hello, Sir");
     assert_eq!(transport.call_count(), 1);
+}
+
+#[test]
+fn the_turn_outcome_carries_the_provider_token_usage() {
+    // The provider's own count (set on the response it returns) must reach
+    // the caller in `last_usage`, so the context bar can prefer it over a
+    // client-side estimate. A mid-turn tool round trip must not lose it:
+    // the *last* call's usage is what's reported.
+    let with_usage = |prompt_tokens: u64, total_tokens: u64| ModelResponse {
+        content: "final answer".to_string(),
+        tool_calls: vec![],
+        finish_reason: FinishReason::Stop,
+        usage: Some(TokenUsage {
+            prompt_tokens,
+            completion_tokens: total_tokens - prompt_tokens,
+            total_tokens,
+        }),
+    };
+    let transport = ScriptedTransport::new(vec![
+        call_tool("c1", "bash", r#"{"command":"echo one"}"#),
+        with_usage(100, 140),
+    ]);
+    let mut messages = vec![Message::user("run echo")];
+    let outcome = run_turn_with_options(
+        &transport,
+        &builtin_registry(),
+        &mut messages,
+        8,
+        TurnOptions::new(),
+    )
+    .unwrap();
+    assert_eq!(outcome.answer, "final answer");
+    let usage = outcome.last_usage.expect("provider usage was dropped");
+    assert_eq!(usage.prompt_tokens, 100);
+    assert_eq!(usage.total_tokens, 140);
+}
+
+#[test]
+fn a_turn_without_provider_usage_reports_none_not_zero() {
+    let transport = ScriptedTransport::new(vec![answer("plain")]);
+    let mut messages = vec![Message::user("hi")];
+    let outcome =
+        run_turn_with_options(&transport, &ToolRegistry::new(), &mut messages, 8, TurnOptions::new())
+            .unwrap();
+    assert!(outcome.last_usage.is_none());
 }
 
 #[test]
@@ -129,6 +176,7 @@ fn several_tool_calls_in_one_response_all_execute() {
                 ToolCall::new("b", "bash", r#"{"command":"echo two"}"#),
             ],
             finish_reason: FinishReason::ToolCalls,
+            usage: None,
         },
         answer("both ran"),
     ]);

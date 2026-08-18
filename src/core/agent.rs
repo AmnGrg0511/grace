@@ -83,6 +83,11 @@ pub struct TurnOutcome {
     /// Without this a streaming caller prints the answer twice: once live as
     /// it arrives, once again when it renders the returned string.
     pub streamed: bool,
+    /// The provider's token count from this turn's *last* model call, if it
+    /// reported one. `prompt_tokens` there is what the provider counted for
+    /// the whole context it received — the real "how full is the window"
+    /// number, ahead of any client-side estimate.
+    pub last_usage: Option<crate::transport::TokenUsage>,
 }
 
 /// Run one conversation turn to completion and return the final answer.
@@ -172,6 +177,7 @@ pub fn run_turn_with_options(
                     answer: resp.content,
                     iterations: budget.used(),
                     streamed,
+                    last_usage: resp.usage,
                 });
             }
             FinishReason::Length => {
@@ -185,6 +191,7 @@ pub fn run_turn_with_options(
                         answer: resp.content,
                         iterations: budget.used(),
                         streamed,
+                        last_usage: resp.usage,
                     });
                 }
                 emit_content(&mut options.on_event, &resp, options.stream);
@@ -353,12 +360,14 @@ mod tests {
                     content: "Running that for you.".to_string(),
                     tool_calls: vec![ToolCall::new("call_1", "bash", args)],
                     finish_reason: FinishReason::ToolCalls,
+                    usage: None,
                 })
             } else {
                 Ok(ModelResponse {
                     content: "Done \u{2014} stub response after tool round.".to_string(),
                     tool_calls: vec![],
                     finish_reason: FinishReason::Stop,
+                    usage: None,
                 })
             }
         }
@@ -492,6 +501,7 @@ mod tests {
                         ToolCall::new("call_b", "never-runs", "{}"),
                     ],
                     finish_reason: FinishReason::ToolCalls,
+                    usage: None,
                 })
             }
         }
@@ -605,6 +615,7 @@ mod tests {
                         content: "recovered".into(),
                         tool_calls: vec![],
                         finish_reason: FinishReason::Stop,
+                        usage: None,
                     })
                 }
             }
@@ -663,6 +674,7 @@ mod tests {
                     content: "nothing to call".into(),
                     tool_calls: vec![],
                     finish_reason: FinishReason::ToolCalls,
+                    usage: None,
                 })
             }
         }
@@ -694,6 +706,7 @@ mod tests {
                     content: "ok".into(),
                     tool_calls: vec![],
                     finish_reason: FinishReason::Stop,
+                    usage: None,
                 })
             }
             fn context_window(&self) -> Option<u32> {
@@ -757,6 +770,7 @@ mod tests {
                     content: "abc".into(),
                     tool_calls: vec![],
                     finish_reason: FinishReason::Stop,
+                    usage: None,
                 })
             }
             fn supports_streaming(&self) -> bool {
@@ -776,6 +790,7 @@ mod tests {
                     content: "abc".into(),
                     tool_calls: vec![],
                     finish_reason: FinishReason::Stop,
+                    usage: None,
                 })
             }
         }
@@ -816,6 +831,7 @@ mod tests {
                     content: "hi".into(),
                     tool_calls: vec![],
                     finish_reason: FinishReason::Stop,
+                    usage: None,
                 })
             }
             fn supports_streaming(&self) -> bool {
@@ -833,6 +849,7 @@ mod tests {
                     content: "hi".into(),
                     tool_calls: vec![],
                     finish_reason: FinishReason::Stop,
+                    usage: None,
                 })
             }
         }

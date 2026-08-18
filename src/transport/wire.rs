@@ -4,10 +4,30 @@
 //! `/chat/completions` dialect, so the request/response shaping lives here
 //! once instead of being duplicated per provider.
 
-use super::r#trait::{FinishReason, ModelResponse, ToolSpec};
+use super::r#trait::{FinishReason, ModelResponse, TokenUsage, ToolSpec};
 use crate::util::Result;
 use serde::Serialize;
 use serde_json::Value;
+
+/// Parse an OpenAI-style top-level `usage` object into [`TokenUsage`].
+///
+/// Returns `None` when the provider omitted it (or sent an empty/partial
+/// object with no usable counts) — callers treat `None` as "unknown" and
+/// fall back to a local estimate, never as zero.
+pub fn parse_usage(usage: Option<&Value>) -> Option<TokenUsage> {
+    let u = usage?;
+    let prompt = u.get("prompt_tokens").and_then(Value::as_u64)?;
+    let completion = u.get("completion_tokens").and_then(Value::as_u64)?;
+    let total = u
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(prompt + completion);
+    Some(TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+    })
+}
 
 /// Encode '/' and other URI-unfriendly chars for model-id path segments.
 pub fn urlencoding(s: &str) -> String {
@@ -88,6 +108,9 @@ pub fn parse_openai_message(
         content,
         tool_calls,
         finish_reason,
+        // `usage` lives on the response body, not the message — the caller
+        // fills it from the top-level `usage` object via `parse_usage`.
+        usage: None,
     })
 }
 
@@ -161,5 +184,37 @@ mod tests {
         let msg = json!({"content": "done"});
         let resp = parse_openai_message(&msg, None).unwrap();
         assert_eq!(resp.finish_reason, FinishReason::Stop);
+        assert!(resp.usage.is_none(), "usage is set by the caller, not here");
+    }
+
+    #[test]
+    fn parse_usage_reads_an_openai_usage_object() {
+        let u = parse_usage(Some(&json!({
+            "prompt_tokens": 1200,
+            "completion_tokens": 35,
+            "total_tokens": 1235
+        })))
+        .unwrap();
+        assert_eq!(u.prompt_tokens, 1200);
+        assert_eq!(u.completion_tokens, 35);
+        assert_eq!(u.total_tokens, 1235);
+    }
+
+    #[test]
+    fn parse_usage_derives_total_when_the_provider_omits_it() {
+        let u = parse_usage(Some(&json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5
+        })))
+        .unwrap();
+        assert_eq!(u.total_tokens, 15);
+    }
+
+    #[test]
+    fn parse_usage_is_none_for_absent_or_partial_objects() {
+        assert!(parse_usage(None).is_none());
+        assert!(parse_usage(Some(&json!({}))).is_none());
+        assert!(parse_usage(Some(&json!({"prompt_tokens": 3}))).is_none());
+        assert!(parse_usage(Some(&json!(null))).is_none());
     }
 }

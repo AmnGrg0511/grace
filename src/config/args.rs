@@ -300,6 +300,7 @@ mod tests {
                 content: "ok".into(),
                 tool_calls: vec![],
                 finish_reason: FinishReason::Stop,
+                usage: None,
             })
         }
     }

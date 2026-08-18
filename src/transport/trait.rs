@@ -31,6 +31,24 @@ pub struct ModelResponse {
     /// Why the model stopped: `stop` ends the turn; anything else usually
     /// means "continue" (e.g. `tool_calls`, `length`).
     pub finish_reason: FinishReason,
+    /// Token accounting as reported by the provider, if it reported any.
+    /// `None` for providers that omit it — callers fall back to a local
+    /// estimate rather than assuming zero. This is the source of truth for
+    /// the context bar when present, so the bar and compaction budget on
+    /// what the provider actually counted, not a client-side guess.
+    pub usage: Option<TokenUsage>,
+}
+
+/// Token counts from a single model call, in the provider's own accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TokenUsage {
+    /// Tokens the provider counted for the request (the whole prompt that
+    /// was sent, i.e. everything in the context window).
+    pub prompt_tokens: u64,
+    /// Tokens the provider counted for the generated completion.
+    pub completion_tokens: u64,
+    /// `prompt_tokens + completion_tokens` as the provider reports it.
+    pub total_tokens: u64,
 }
 
 /// Normalized stop reason, independent of provider vocabulary.
@@ -164,6 +182,7 @@ mod tests {
                 content: "hello".into(),
                 tool_calls: vec![],
                 finish_reason: FinishReason::Stop,
+                usage: None,
             })
         }
     }

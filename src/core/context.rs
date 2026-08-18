@@ -761,6 +761,7 @@ mod tests {
                     content: "User asked about Rust lifetimes; assistant explained borrow checker rules.".into(),
                     tool_calls: vec![],
                     finish_reason: crate::transport::FinishReason::Stop,
+                    usage: None,
                 })
             }
             fn context_window(&self) -> Option<u32> {
@@ -831,6 +832,7 @@ mod tests {
                     content: "Summary of tool interactions".into(),
                     tool_calls: vec![],
                     finish_reason: crate::transport::FinishReason::Stop,
+                    usage: None,
                 })
             }
             fn context_window(&self) -> Option<u32> {
@@ -894,6 +896,7 @@ mod tests {
                 content: self.answer.clone(),
                 tool_calls: vec![],
                 finish_reason: crate::transport::FinishReason::Stop,
+                usage: None,
             })
         }
         fn context_window(&self) -> Option<u32> {

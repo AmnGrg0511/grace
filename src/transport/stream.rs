@@ -13,8 +13,8 @@
 //! silently presenting a truncated one.
 
 use crate::message::{Message, ToolCall};
-use crate::transport::r#trait::{FinishReason, ModelResponse, ToolSpec};
-use crate::transport::wire::tools_to_json;
+use crate::transport::r#trait::{FinishReason, ModelResponse, TokenUsage, ToolSpec};
+use crate::transport::wire::{parse_usage, tools_to_json};
 use crate::util::{AgentError, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -34,6 +34,10 @@ pub struct SseAccumulator {
     content: String,
     tool_calls: BTreeMap<u64, PartialToolCall>,
     finish_reason: FinishReason,
+    /// Latest top-level `usage` seen on any chunk. Providers stream it
+    /// per-chunk (vLLM) or in one trailing empty-choices chunk (OpenAI);
+    /// either way the last non-absent value is the authoritative count.
+    usage: Option<TokenUsage>,
 }
 
 impl Default for SseAccumulator {
@@ -48,6 +52,7 @@ impl SseAccumulator {
             content: String::new(),
             tool_calls: BTreeMap::new(),
             finish_reason: FinishReason::Stop,
+            usage: None,
         }
     }
 
@@ -76,6 +81,13 @@ impl SseAccumulator {
                 .map(str::to_string)
                 .unwrap_or_else(|| err.to_string());
             return Err(AgentError::Response(format!("provider stream error: {msg}")));
+        }
+
+        // Before the choices check below: OpenAI's authoritative usage chunk
+        // arrives with *no* choices at all, so a missing-choices early
+        // return would drop the count.
+        if let Some(u) = parse_usage(value.get("usage")) {
+            self.usage = Some(u);
         }
 
         let Some(choice) = value.get("choices").and_then(|c| c.get(0)) else {
@@ -134,6 +146,7 @@ impl SseAccumulator {
             content: self.content,
             tool_calls,
             finish_reason,
+            usage: self.usage,
         }
     }
 }
@@ -187,10 +200,14 @@ pub fn stream_complete(
 ) -> Result<ModelResponse> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let msgs_json = serde_json::to_value(messages).unwrap_or(Value::Array(vec![]));
+    // `include_usage` asks OpenAI (and conforming servers) to emit a final
+    // usage frame. Providers that always stream usage ignore the flag; the
+    // parse side is tolerant either way.
     let mut body = serde_json::json!({
         "model": model,
         "messages": msgs_json,
         "stream": true,
+        "stream_options": { "include_usage": true },
     });
     if !tools.is_empty() {
         body["tools"] = tools_to_json(tools);
@@ -259,6 +276,21 @@ mod tests {
         assert_eq!(collected, "\n\nPONG");
         assert_eq!(response.content, "\n\nPONG");
         assert_eq!(response.finish_reason, FinishReason::Stop);
+        // The trailing empty-choices chunk is the authoritative count — the
+        // per-chunk increments before it must have been superseded, not summed.
+        let usage = response.usage.expect("streamed usage was dropped");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 6);
+        assert_eq!(usage.total_tokens, 16);
+    }
+
+    #[test]
+    fn a_stream_without_any_usage_frames_yields_none_not_zero() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\
+                   data: [DONE]\n";
+        let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| {}).unwrap();
+        assert!(response.usage.is_none());
+        assert_eq!(response.content, "hi");
     }
 
     #[test]
