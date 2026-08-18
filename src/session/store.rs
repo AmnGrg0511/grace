@@ -108,6 +108,26 @@ impl SessionStore {
         Ok(n)
     }
 
+    /// `/jump`: keep only the first `keep` rows (oldest-first) of a
+    /// session's history, deleting everything after — the on-disk half of
+    /// rewinding the context to an earlier point in the transcript. The
+    /// in-memory `messages` vec is the caller's job to truncate to match;
+    /// this only has to agree with the same oldest-first order `load`
+    /// returns. The `AFTER DELETE` trigger keeps the FTS index in sync, same
+    /// as [`delete_last_user_row`]. Returns the number of rows removed.
+    pub fn truncate_session_after(&self, session_id: &str, keep: usize) -> Result<usize> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM messages WHERE session_id = ?1 AND id NOT IN (
+                    SELECT id FROM messages WHERE session_id = ?1 ORDER BY id ASC LIMIT ?2
+                 )",
+                (session_id, keep as i64),
+            )
+            .map_err(|e| AgentError::Tool(format!("truncate session: {e}")))?;
+        Ok(n)
+    }
+
     /// Load a session's prior turns as replayable `Message`s (user/assistant
     /// only), oldest first.
     pub fn load(&self, session_id: &str) -> Result<Vec<Message>> {
@@ -465,6 +485,40 @@ mod tests {
 
         // Other sessions are untouched; nothing to delete -> 0 rows.
         assert_eq!(store.delete_last_user_row("s2").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn truncate_session_after_keeps_the_oldest_rows_and_syncs_fts() {
+        let path = scratch_db("truncate");
+        let _ = std::fs::remove_file(&path);
+        let store = SessionStore::open(&path).unwrap();
+
+        store.append("s1", &Message::user("q1 zephyr")).unwrap();
+        store.append("s1", &Message::assistant("a1")).unwrap();
+        store.append("s1", &Message::user("q2 zephyr")).unwrap();
+        store.append("s1", &Message::assistant("a2")).unwrap();
+        store.append("s2", &Message::user("untouched")).unwrap();
+
+        // Keep the first 2 rows (q1, a1); drop q2 and a2.
+        let removed = store.truncate_session_after("s1", 2).unwrap();
+        assert_eq!(removed, 2);
+        let remaining = store.load("s1").unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].content, "q1 zephyr");
+        assert_eq!(remaining[1].content, "a1");
+
+        // Other sessions are untouched.
+        assert_eq!(store.load("s2").unwrap().len(), 1);
+
+        // The FTS index no longer sees the deleted rows.
+        let hits = store.search("zephyr", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, "q1 zephyr");
+
+        // Keeping more rows than exist is a no-op, not an error.
+        assert_eq!(store.truncate_session_after("s1", 100).unwrap(), 0);
+
         let _ = std::fs::remove_file(&path);
     }
 

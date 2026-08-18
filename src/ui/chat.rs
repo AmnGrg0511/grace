@@ -238,6 +238,10 @@ pub fn run_chat(
                 handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills, &mut last_usage);
                 continue;
             }
+            Some("jump") => {
+                handle_jump_command(sessions, messages, &current_session, &skin);
+                continue;
+            }
             Some("verbose") => {
                 verbose = !verbose;
                 println!(
@@ -2198,7 +2202,69 @@ pub fn compact_args(arguments: &str) -> String {
     arguments.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Print available slash commands for the chat REPL.
+/// `/jump` — context rewind, replacing the originally planned undo. A picker
+/// over the current session's user+assistant transcript; picking a message
+/// truncates the in-memory context to (and including) that message AND
+/// deletes the newer rows from the session store (B3's `AFTER DELETE`
+/// trigger keeps the FTS index in sync). Context rewind only — no file
+/// reverting, keeping the feature simple.
+///
+/// `messages[0]` is always the system prompt, so history starts at index 1
+/// and lines up 1:1 with the session store's oldest-first rows.
+fn handle_jump_command(
+    sessions: &SessionStore,
+    messages: &mut Vec<Message>,
+    current_session: &Option<String>,
+    skin: &Skin,
+) {
+    let Some(sid) = current_session else {
+        println!("no session in use — nothing to jump within.");
+        return;
+    };
+    let history = &messages[1..];
+    if history.is_empty() {
+        println!("no messages yet in this session.");
+        return;
+    }
+    let items: Vec<crate::ui::picker::Pick> = history
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let role = match m.role {
+                crate::message::Role::User => "user",
+                crate::message::Role::Assistant => "assistant",
+                _ => "?",
+            };
+            let snippet: String =
+                crate::util::truncate_utf8(&m.content.trim().replace('\n', " "), 60);
+            crate::ui::picker::Pick {
+                id: i.to_string(),
+                label: format!("{}) [{role}] {snippet}", i + 1),
+                sublabel: None,
+            }
+        })
+        .collect();
+    let Some(id) = crate::ui::picker::pick(&items, skin, "jump to (keeps this message, drops everything after)") else {
+        println!("staying put.");
+        return;
+    };
+    let Ok(picked) = id.parse::<usize>() else {
+        return;
+    };
+    if picked == history.len() - 1 {
+        println!("already the last message — nothing to drop.");
+        return;
+    }
+    let keep = picked + 1;
+    match sessions.truncate_session_after(sid, keep) {
+        Ok(removed) => {
+            messages.truncate(1 + keep);
+            println!("jumped back {removed} message(s) — context now ends there.");
+        }
+        Err(e) => println!("error rewinding the session: {e}"),
+    }
+}
+
 /// `/help` — rendered from the single command registry in two columns, so
 /// the help screen can never list (or omit) a command whose dispatching
 /// differs.
@@ -2276,7 +2342,8 @@ mod slash_command_agreement_tests {
     /// G14), and a registry entry without a handler is a phantom. Update
     /// this constant whenever an arm in the dispatch match changes.
     const DISPATCHED: &[&str] = &[
-        "exit", "quit", "help", "commands", "model", "skin", "session", "verbose", "readonly",
+        "exit", "quit", "help", "commands", "model", "skin", "session", "jump", "verbose",
+        "readonly",
     ];
 
     #[test]

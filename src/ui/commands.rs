@@ -54,6 +54,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "Switch / start session (picker)",
     },
     SlashCommand {
+        name: "jump",
+        aliases: &[],
+        summary: "Rewind context to an earlier message (picker)",
+    },
+    SlashCommand {
         name: "verbose",
         aliases: &[],
         summary: "Toggle tool-output visibility",
