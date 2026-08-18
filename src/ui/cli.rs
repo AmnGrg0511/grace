@@ -613,6 +613,23 @@ fn run_one_shot(
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
     }
+    // Same 1 Hz live status line as chat mode (TTY only, no-op when piped):
+    // ticks through the model's silence before the first token / tool output
+    // appears. `None` window lets the line fall back to the static table.
+    let mut live = crate::ui::chat::LiveStatus::start(
+        transport
+            .current_model()
+            .unwrap_or_else(|| transport.name().to_string()),
+        {
+            use crate::util::tokens::TokenCounter;
+            crate::util::tokens::default_counter()
+                .count_messages(messages)
+                .max(1)
+        },
+        None,
+        config.context_compression.normalized().trigger_fraction,
+        skin,
+    );
     let mut stream_state = crate::ui::chat::StreamState::default();
 
     // `--stream` is no longer a separate code path that skips the tool loop.
@@ -620,7 +637,18 @@ fn run_one_shot(
     // the old one-shot-only streaming silently dropped that ability.
     let turn = {
         let mut sink = |event: crate::core::AgentEvent<'_>| {
-            crate::ui::chat::print_agent_event(event, skin, args.verbose, &mut stream_state);
+            if let Some(live) = live.as_ref() {
+                live.extend(&event);
+                let at_start = crate::ui::chat::event_ends_at_line_start(
+                    &event,
+                    crate::ui::skin::no_color(),
+                );
+                let guard = live.begin_write();
+                crate::ui::chat::print_agent_event(event, skin, args.verbose, &mut stream_state);
+                live.end_write(guard, at_start);
+            } else {
+                crate::ui::chat::print_agent_event(event, skin, args.verbose, &mut stream_state);
+            }
         };
         let options = crate::core::TurnOptions::new()
             .with_events(&mut sink)
@@ -635,6 +663,9 @@ fn run_one_shot(
             options,
         )
     };
+    if let Some(live) = live.as_mut() {
+        live.finish();
+    }
     let outcome = match turn {
         Ok(outcome) => outcome,
         // Ctrl-C: not an error report — the same "stop, I'm going" as a
