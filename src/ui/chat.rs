@@ -175,6 +175,7 @@ pub fn run_chat(
             cached_context_window,
             last_usage,
             compression_config,
+            tools.is_read_only(),
         );
         let line = if let Some(queued) = pending_input.take() {
             queued
@@ -243,6 +244,32 @@ pub fn run_chat(
                     "tool output {} (read/bash bodies {}; edit diffs always show).",
                     if verbose { "shown" } else { "hidden" },
                     if verbose { "visible" } else { "hidden" }
+                );
+                continue;
+            }
+            Some("readonly") => {
+                // Read-only posture: the registry hides write/edit/bash/
+                // delegate from the model's specs and refuses them in
+                // execute. The flag is shared, so delegated sub-agents and
+                // their later builds inherit whatever we set here.
+                match rest.split_whitespace().next() {
+                    Some("on") => tools.set_read_only(true),
+                    Some("off") => tools.set_read_only(false),
+                    Some(other) => {
+                        println!(
+                            "usage: /readonly [on|off] (no argument toggles) — got '{other}'"
+                        );
+                        continue;
+                    }
+                    None => tools.set_read_only(!tools.is_read_only()),
+                }
+                println!(
+                    "read-only mode {}.",
+                    if tools.is_read_only() {
+                        "on — write, edit, bash, and delegate are unavailable until /readonly off"
+                    } else {
+                        "off — all tools restored"
+                    }
                 );
                 continue;
             }
@@ -774,6 +801,29 @@ const SPINNER_FRAMES: [&str; 10] = [
     "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
 ];
 
+/// The idle status line text: `· model · [context bar] · elapsed`.
+fn status_line_content(
+    model: &str,
+    count: usize,
+    measured: bool,
+    window: Option<u32>,
+    trigger_fraction: f32,
+    started: std::time::Instant,
+    read_only: bool,
+) -> String {
+    let secs = started.elapsed().as_secs();
+    let time = if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    };
+    let bar = context_bar(count, measured, window, trigger_fraction);
+    // `[RO]` sits right after the model: the posture is a property of what
+    // the model may do, and the line already leads with the model.
+    let ro = if read_only { " [RO]" } else { "" };
+    format!("· {model}{ro} · {bar} · {time}")
+}
+
 /// The thinking spinner: one transient line — `{frame} thinking {m:ss}` —
 /// ticking while the turn waits on the model and nothing else is being
 /// printed. It shows only in the silent gaps: from turn start until the
@@ -994,6 +1044,29 @@ mod spinner_tests {
             line.starts_with("⠸ thinking 0:00"),
             "unexpected line: {line}"
         );
+    }
+
+    #[test]
+    fn the_idle_line_keeps_one_format() {
+        let started = std::time::Instant::now();
+        let line = status_line_content("gpt-4o", 4_000, false, Some(10_000), 0.75, started, false);
+        // `· model · [context bar] · elapsed`. Heuristic count (measured=
+        // false) marks the percent with `~`; a fresh start reads 0:00.
+        assert!(
+            line.starts_with("· gpt-4o · [███░░░░░] 40% · "),
+            "unexpected line: {line}"
+        );
+        assert!(line.ends_with("0:00"), "unexpected line: {line}");
+    }
+
+    #[test]
+    fn read_only_mode_marks_the_line_with_an_ro_badge() {
+        let started = std::time::Instant::now();
+        let line = status_line_content("gpt-4o", 4_000, true, Some(10_000), 0.75, started, true);
+        assert!(line.starts_with("· gpt-4o [RO] · "), "unexpected line: {line}");
+        // The badge must not disturb the rest of the format.
+        let off = status_line_content("gpt-4o", 4_000, true, Some(10_000), 0.75, started, false);
+        assert!(line.replacen(" [RO]", "", 1) == off, "only the badge differs: {line:?} vs {off:?}");
     }
 }
 
@@ -2027,6 +2100,7 @@ pub fn fetch_context_window(model: &str, base_url: &str, api_key: &str) -> Optio
 /// would be worse than nothing) — instead the line shows the running count
 /// and *where auto-compaction will fire*, so the hidden 32k fallback trigger
 /// is never silent.
+#[allow(clippy::too_many_arguments)]
 pub fn print_status_line(
     skin: &Skin,
     transport: &(dyn crate::transport::ProviderTransport + '_),
@@ -2035,14 +2109,8 @@ pub fn print_status_line(
     cached_context_window: Option<u32>,
     last_usage: Option<crate::transport::TokenUsage>,
     compression_config: &ContextCompressionConfig,
+    read_only: bool,
 ) {
-    let elapsed = started_at.elapsed();
-    let secs = elapsed.as_secs();
-    let time = if secs >= 3600 {
-        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-    } else {
-        format!("{}:{:02}", secs / 60, secs % 60)
-    };
     let model = transport
         .current_model()
         .unwrap_or_else(|| transport.name().to_string());
@@ -2064,16 +2132,15 @@ pub fn print_status_line(
     // only known at runtime.
     let ctx = cached_context_window.or_else(|| crate::config::settings::context_window_for(&model));
 
-    // `normalized()` like the compressor uses, so an out-of-range fraction
-    // in the config file can't make the line and the trigger disagree.
-    let bar = context_bar(
+    let line = status_line_content(
+        &model,
         count,
         measured,
         ctx,
         compression_config.normalized().trigger_fraction,
+        started_at,
+        read_only,
     );
-
-    let line = format!("· {model} · {bar} · {time}");
     if no_color() {
         println!("{line}");
     } else {
@@ -2209,7 +2276,7 @@ mod slash_command_agreement_tests {
     /// G14), and a registry entry without a handler is a phantom. Update
     /// this constant whenever an arm in the dispatch match changes.
     const DISPATCHED: &[&str] = &[
-        "exit", "quit", "help", "commands", "model", "skin", "session", "verbose",
+        "exit", "quit", "help", "commands", "model", "skin", "session", "verbose", "readonly",
     ];
 
     #[test]

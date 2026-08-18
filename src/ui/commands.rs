@@ -58,6 +58,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         summary: "Toggle tool-output visibility",
     },
+    SlashCommand {
+        name: "readonly",
+        aliases: &[],
+        summary: "Read-only posture: hide write/edit/bash/delegate [on|off]",
+    },
 ];
 
 /// Resolve a command word (the text after `/`, before the first space) to its

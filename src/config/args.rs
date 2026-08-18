@@ -77,6 +77,11 @@ pub struct RegistryOptions {
     pub transport: Option<Rc<dyn ProviderTransport>>,
     /// Compression policy applied to sub-agent conversations.
     pub compression: ContextCompressionConfig,
+    /// The session's read-only posture, shared with every registry this
+    /// builds (main and delegated alike) so `/readonly` covers sub-agents
+    /// and a later toggle covers them live. Starts off; `/readonly` flips it
+    /// through [`ToolRegistry::set_read_only`].
+    pub read_only: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RegistryOptions {
@@ -92,6 +97,7 @@ impl RegistryOptions {
             sessions: None,
             transport: None,
             compression: ContextCompressionConfig::default(),
+            read_only: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -110,6 +116,12 @@ impl RegistryOptions {
     #[must_use]
     pub fn with_compression(mut self, compression: ContextCompressionConfig) -> Self {
         self.compression = compression;
+        self
+    }
+
+    #[must_use]
+    pub fn with_read_only(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.read_only = flag;
         self
     }
 }
@@ -238,6 +250,11 @@ impl Config {
             }
         }
 
+        // Bind the shared read-only posture. `options` is cloned for the
+        // delegation factory above, so every sub-agent registry this factory
+        // builds inherits the very same flag — `/readonly` covers them, and a
+        // later toggle covers them live.
+        reg.set_shared_read_only(Arc::clone(&options.read_only));
         reg
     }
 
