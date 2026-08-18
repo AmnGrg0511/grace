@@ -132,6 +132,10 @@ pub fn run_chat(
     // `/model` updates this in-memory copy too so the status bar reflects
     // a mid-chat model switch without another disk read.
     let mut cached_context_window = crate::config::settings::Settings::load().default_context_window;
+    // The provider's token count from the last completed turn — the status
+    // line's context bar prefers this real number over the local estimate.
+    // `None` until the first turn lands one (or the provider omits usage).
+    let mut last_usage: Option<crate::transport::TokenUsage> = None;
 
     let history_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -158,7 +162,15 @@ pub fn run_chat(
     let mut pending_input: Option<String> = None;
 
     loop {
-        print_status_line(&skin, transport, messages, started_at, cached_context_window);
+        print_status_line(
+            &skin,
+            transport,
+            messages,
+            started_at,
+            cached_context_window,
+            last_usage,
+            compression_config,
+        );
         let line = if let Some(queued) = pending_input.take() {
             queued
         } else {
@@ -259,7 +271,7 @@ pub fn run_chat(
             Some(sessions),
             5,
         ));
-        run_one_chat_turn(
+        last_usage = run_one_chat_turn(
             transport,
             tools,
             messages,
@@ -673,7 +685,7 @@ pub fn run_one_chat_turn(
     interrupted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     compression_config: &ContextCompressionConfig,
     verbose: bool,
-) {
+) -> Option<crate::transport::TokenUsage> {
     // Snapshot turn count BEFORE appending — drives auto-(re)titling below.
     // History alternates user/assistant, so history_len/2 is the 0-based
     // index of the turn about to happen.
@@ -722,7 +734,10 @@ pub fn run_one_chat_turn(
     flush_stream_to_stdout(&mut stream_state, skin);
     match outcome {
         Ok(crate::core::TurnOutcome {
-            answer, streamed, ..
+            answer,
+            streamed,
+            last_usage,
+            ..
         }) => {
             if streamed {
                 // Already printed live, fragment by fragment. Re-rendering it
@@ -774,6 +789,8 @@ pub fn run_one_chat_turn(
                     }
                 }
             }
+            // Hands the provider's token count to the next status line.
+            last_usage
         }
         Err(crate::util::AgentError::Interrupted) => {
             // Tool calls up to this point already ran and are recorded in
@@ -781,6 +798,7 @@ pub fn run_one_chat_turn(
             // Don't pop the user message: unlike a hard error, there's real
             // partial progress worth keeping in context for the next turn.
             println!("\n(interrupted — back to prompt)\n");
+            None
         }
         Err(e) => {
             eprintln!("error: {e}");
@@ -801,6 +819,7 @@ pub fn run_one_chat_turn(
             if let Some(sid) = session_id {
                 let _ = sessions.delete_last_user_row(sid);
             }
+            None
         }
     }
 }
@@ -1258,6 +1277,47 @@ pub fn prompt_label(skin: &Skin) -> String {
     skin.paint(Role::Prompt, &format!("{} ", skin.prompt_glyph))
 }
 
+#[cfg(test)]
+mod context_bar_tests {
+    use super::*;
+
+    #[test]
+    fn measured_provider_count_gets_no_approx_prefix() {
+        assert_eq!(context_bar(5_000, true, None, 0.75), "5000 tok · compacts near ~24k tok");
+        assert_eq!(context_bar(5_000, false, None, 0.75), "~5000 tok · compacts near ~24k tok");
+    }
+
+    #[test]
+    fn a_known_window_renders_the_percent_bar() {
+        // 40% of a 10k window.
+        let bar = context_bar(4_000, true, Some(10_000), 0.75);
+        assert_eq!(bar, "[███░░░░░] 40%");
+    }
+
+    #[test]
+    fn the_bar_never_clips_above_eight_segments() {
+        assert_eq!(context_bar(99_999, true, Some(1_000), 0.75), "[████████] 9999%");
+    }
+
+    #[test]
+    fn compaction_point_follows_the_trigger_fraction() {
+        // 32k fallback window at 0.25 → 8.0k.
+        assert!(context_bar(10, true, None, 0.25).contains("compacts near ~8.0k tok"));
+    }
+
+    #[test]
+    fn a_zero_window_shows_only_the_count() {
+        assert_eq!(context_bar(123, false, Some(0), 0.75), "~123 tok");
+    }
+
+    #[test]
+    fn human_tokens_scales_readably() {
+        assert_eq!(human_tokens(950), "950");
+        assert_eq!(human_tokens(1_200), "1.2k");
+        assert_eq!(human_tokens(32_000), "32k");
+    }
+}
+
 /// Best-effort API fetch to discover a model's context window — thin
 /// wrapper around [`crate::transport::http::fetch_context_window`] kept here
 /// for call-site compatibility.
@@ -1269,12 +1329,22 @@ pub fn fetch_context_window(model: &str, base_url: &str, api_key: &str) -> Optio
 /// All in the skin's muted `tool_dim` color so it recedes behind the prompt
 /// glyph and never competes with the conversation itself. Single dim
 /// (color only, no extra ANSI dim) — same tier as tool output body.
+///
+/// The bar prefers the provider's own `prompt_tokens` from the last turn
+/// (`measured`); only when the provider didn't report usage does it fall back
+/// to the same byte-based estimate the compressor uses (prefix `~`). When the
+/// context window is unknown, no bar is drawn (a % against a guessed window
+/// would be worse than nothing) — instead the line shows the running count
+/// and *where auto-compaction will fire*, so the hidden 32k fallback trigger
+/// is never silent.
 pub fn print_status_line(
     skin: &Skin,
     transport: &(dyn crate::transport::ProviderTransport + '_),
     messages: &[crate::message::Message],
     started_at: std::time::Instant,
     cached_context_window: Option<u32>,
+    last_usage: Option<crate::transport::TokenUsage>,
+    compression_config: &ContextCompressionConfig,
 ) {
     let elapsed = started_at.elapsed();
     let secs = elapsed.as_secs();
@@ -1287,29 +1357,31 @@ pub fn print_status_line(
         .current_model()
         .unwrap_or_else(|| transport.name().to_string());
 
-    // Same estimator the compressor uses, so the bar and the compression
-    // trigger can never disagree about how full the window is.
-    let estimated = {
-        use crate::util::tokens::TokenCounter;
-        crate::util::tokens::default_counter()
-            .count_messages(messages)
-            .max(1)
+    // Prefer the provider's real count; fall back to the same estimator the
+    // compressor uses, so the bar and the trigger never disagree.
+    let (count, measured) = match last_usage {
+        Some(u) => (u.prompt_tokens as usize, true),
+        None => {
+            use crate::util::tokens::TokenCounter;
+            let est = crate::util::tokens::default_counter()
+                .count_messages(messages)
+                .max(1);
+            (est, false)
+        }
     };
     // Saved context window (loaded once per chat session, not re-read from
     // disk every turn) beats the static lookup table — it covers models
     // only known at runtime.
     let ctx = cached_context_window.or_else(|| crate::config::settings::context_window_for(&model));
 
-    // Compact 8-segment context bar: █ filled, ░ empty.
-    let bar = match ctx {
-        Some(limit) if limit > 0 => {
-            let pct = ((estimated as f64) / (limit as f64) * 100.0) as usize;
-            let filled = (pct * 8 / 100).min(8);
-            let empty = 8 - filled;
-            format!("[{}] {pct}%", "█".repeat(filled) + &"░".repeat(empty))
-        }
-        _ => format!("~{estimated} tok"),
-    };
+    // `normalized()` like the compressor uses, so an out-of-range fraction
+    // in the config file can't make the line and the trigger disagree.
+    let bar = context_bar(
+        count,
+        measured,
+        ctx,
+        compression_config.normalized().trigger_fraction,
+    );
 
     let line = format!("· {model} · {bar} · {time}");
     if no_color() {
@@ -1317,6 +1389,48 @@ pub fn print_status_line(
     } else {
         // skin's muted tool-dim color, single dim.
         println!("{}", skin.paint(Role::ToolDim, &line));
+    }
+}
+
+/// Human-readable token count for the status line: `950`, `1.2k`, `32k`.
+fn human_tokens(n: u64) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else if n < 10_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{}k", n / 1000)
+    }
+}
+
+/// The context portion of the status line, computed without touching stdout
+/// so the rule is unit-testable.
+///
+/// * `count` — tokens in use (provider-measured or locally estimated).
+/// * `measured` — whether `count` came from the provider (no `~` prefix).
+/// * `ctx` — the context window, if known. Known → a percent bar. Unknown
+///   (`None`) → the raw count plus the auto-compaction point, so the
+///   fallback-window trigger is never silent. `Some(0)` → the raw count only.
+fn context_bar(count: usize, measured: bool, ctx: Option<u32>, trigger_fraction: f32) -> String {
+    let approx = if measured { "" } else { "~" };
+    match ctx {
+        Some(limit) if limit > 0 => {
+            let pct = ((count as f64) / (limit as f64) * 100.0) as usize;
+            let filled = (pct * 8 / 100).min(8);
+            let empty = 8 - filled;
+            format!("[{}] {pct}%", "█".repeat(filled) + &"░".repeat(empty))
+        }
+        None => {
+            // No trustworthy window: show the running count and the point at
+            // which the compressor (budgeted against its fallback window)
+            // will start eliding history.
+            let trigger = (crate::core::context::FALLBACK_CONTEXT_WINDOW as f64
+                * f64::from(trigger_fraction)) as u64;
+            format!("{approx}{count} tok · compacts near ~{} tok", human_tokens(trigger))
+        }
+        // `Some(0)`: a window the caller explicitly set to zero — just the
+        // count, no bar and no compaction claim.
+        _ => format!("{approx}{count} tok"),
     }
 }
 
