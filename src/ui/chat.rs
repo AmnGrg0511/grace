@@ -1051,11 +1051,10 @@ pub fn run_one_chat_turn(
                 // off the streamed block.
                 println!("\n");
             } else {
+                let glyph = skin.paint(Role::Answer, skin.answer_glyph);
                 println!(
-                    "\n{}{}{} {}\n",
-                    skin.paint(Role::Answer, ""),
-                    skin.answer_glyph,
-                    reset(),
+                    "\n{} {}\n",
+                    glyph,
                     crate::ui::markdown::render_terminal(&answer, skin)
                 );
             }
@@ -1453,9 +1452,14 @@ pub fn print_agent_event_to(
             let _ = finalize_stream(stream, skin, disable_color, out);
             let compact = compact_args(arguments);
             let bullet = skin.paint(Role::ToolBullet, "●");
-            // Dim the call itself so it recedes behind the undimmed answer
-            // text above/below it — bright name+args read as "response".
-            let call = dim(&format!("{name}({compact})"));
+            // Name in the ToolName role (same as the `/skin` preview's
+            // mini-transcript), args dimmed so the call recedes behind the
+            // undimmed answer text above/below it.
+            let call = format!(
+                "{}{}",
+                skin.paint(Role::ToolName, name),
+                dim(&format!("({compact})"))
+            );
             writeln!(out, "{} {call}", bullet).ok();
         }
         crate::core::lifecycle::AgentEvent::ToolCallEnd { name, result, elapsed } => {
@@ -1470,7 +1474,7 @@ pub fn print_agent_event_to(
                 let rendered = crate::ui::markdown::render_terminal(result, skin);
                 for (i, line) in rendered.lines().enumerate() {
                     let prefix = if i == 0 { "  ⎿ " } else { "    " };
-                    writeln!(out, "{}{}{}", skin.paint(Role::ToolDim, ""), prefix, line).ok();
+                    writeln!(out, "{}{}", skin.paint(Role::ToolDim, prefix), line).ok();
                 }
             }
             let tokens = estimate_tokens(result);
@@ -1480,8 +1484,12 @@ pub fn print_agent_event_to(
             } else {
                 format!("{}ms", (secs * 1000.0) as u64)
             };
-            let prefix = format!("    {}· {}Σ", dim(""), skin.paint(Role::ToolBullet, ""));
-            let rest = format!("{} ~{tokens} tok · {timing}", dim(""));
+            let prefix = format!(
+                "    {} {}Σ",
+                skin.paint(Role::ToolDim, "·"),
+                skin.paint(Role::ToolBullet, "Σ")
+            );
+            let rest = dim(&format!(" ~{tokens} tok · {timing}"));
             writeln!(out, "{prefix}{rest}").ok();
         }
         crate::core::lifecycle::AgentEvent::ContentFragment(fragment) => {
