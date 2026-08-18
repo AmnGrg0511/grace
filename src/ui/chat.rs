@@ -225,18 +225,7 @@ pub fn run_chat(
                 continue;
             }
             Some("model") => {
-                handle_model_command(transport, rest, &mut reader);
-                // After model switch, get context window from the transport first
-                // (which resolved it during handle_model_command), falling back to
-                // settings and the static table.
-                cached_context_window = transport
-                    .context_window()
-                    .or(crate::config::settings::Settings::load().default_context_window)
-                    .or_else(|| {
-                        crate::config::settings::context_window_for(
-                            transport.current_model().as_deref().unwrap_or(""),
-                        )
-                    });
+                handle_model_command(transport, rest, &mut reader, &skin, &mut cached_context_window);
                 continue;
             }
             Some("skin") => {
@@ -300,14 +289,130 @@ pub fn run_chat(
     }
 }
 
-/// `/model` (interactive picker, same list as onboarding) or `/model <name>`
-/// (direct switch) mid-chat. Persists to ~/.grace/config.toml so the choice
-/// sticks across restarts (unlike the old session-only behavior).
-/// Only takes effect on transports that own a swappable model (`HttpTransport`).
+/// One destination `/model` can switch to: a named endpoint with the model
+/// id to point it at, plus display bookkeeping.
+#[derive(Debug, Clone)]
+struct ModelCandidate {
+    name: String,
+    model: String,
+    base_url: String,
+    key_env: String,
+    context_window: Option<u32>,
+}
+
+/// Everything `/model` can target right now: the endpoints the user has
+/// previously switched to (persisted in settings) plus the known provider
+/// presets' models. De-duplicated by (base_url, model) — a persisted entry
+/// for the same target keeps its (custom) name.
+fn model_candidates(settings: &crate::config::settings::Settings) -> Vec<ModelCandidate> {
+    let mut out: Vec<ModelCandidate> = Vec::new();
+    let mut known: Vec<(String, String)> = Vec::new();
+    for e in &settings.endpoints {
+        out.push(ModelCandidate {
+            name: e.name.clone(),
+            model: e.model.clone(),
+            base_url: e.base_url.clone(),
+            key_env: e.key_env.clone(),
+            context_window: None,
+        });
+        known.push((e.base_url.clone(), e.model.clone()));
+    }
+    for preset in PROVIDER_PRESETS {
+        for m in preset.models {
+            if known.contains(&(preset.base_url.to_string(), m.id.to_string())) {
+                continue;
+            }
+            out.push(ModelCandidate {
+                name: preset.label.to_string(),
+                model: m.id.to_string(),
+                base_url: preset.base_url.to_string(),
+                key_env: preset.env_var.to_string(),
+                context_window: Some(m.context_window),
+            });
+        }
+    }
+    out
+}
+
+/// `/model <query>` resolution, pure so it is testable: an exact
+/// (case-insensitive) match on endpoint name or model id wins outright;
+/// otherwise a case-insensitive substring match. Returns 0 (no match), 1
+/// (unambiguous), or N (ambiguous — the caller shows the list).
+fn match_model_query(items: &[ModelCandidate], query: &str) -> Vec<usize> {
+    let q = query.to_lowercase();
+    let exact: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.name.eq_ignore_ascii_case(&q) || c.model.eq_ignore_ascii_case(&q))
+        .map(|(i, _)| i)
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            c.name.to_lowercase().contains(&q) || c.model.to_lowercase().contains(&q)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Print a candidate compactly: `name — model (base_url)`.
+fn describe_candidate(c: &ModelCandidate) -> String {
+    let ctx = match c.context_window {
+        Some(w) => format!("{}k ctx", w / 1000),
+        None => String::new(),
+    };
+    if c.base_url.is_empty() {
+        format!("{} — {} (custom endpoint)", c.name, c.model)
+    } else {
+        format!(
+            "{} — {} ({} · {})",
+            c.name,
+            c.model,
+            short_url(&c.base_url),
+            if ctx.is_empty() { "?" } else { ctx.as_str() }
+        )
+    }
+}
+
+/// Host-only view of a base URL for compact picker rows.
+fn short_url(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
+/// Fetch the target endpoint's own model list (best-effort; a slow or
+/// keyless endpoint simply yields the static list).
+fn fetched_models(base_url: &str, key_env: &str) -> Vec<crate::transport::ModelInfo> {
+    if base_url.is_empty() {
+        return Vec::new();
+    }
+    if base_url == crate::transport::copilot::BASE_URL {
+        return Vec::new(); // copilot enumerates via its own session flow
+    }
+    let key = std::env::var(key_env).unwrap_or_default();
+    let transport = crate::transport::http::HttpTransport::new(base_url, key);
+    crate::transport::ProviderTransport::list_models(&transport).unwrap_or_default()
+}
+
+/// `/model` — pick an endpoint (no arg) or resolve one (`<name>`), then
+/// switch the transport to it. Persists the choice (model, endpoint, and
+/// context window) to ~/.grace/config.toml so it sticks across restarts.
+#[allow(clippy::too_many_arguments)]
 fn handle_model_command(
     transport: &(dyn crate::transport::ProviderTransport + '_),
     arg: &str,
     reader: &mut LineReader,
+    skin: &Skin,
+    cached_context_window: &mut Option<u32>,
 ) {
     if transport.current_model().is_none() {
         println!(
@@ -316,72 +421,120 @@ fn handle_model_command(
         );
         return;
     }
-    let (picked, ctx, new_endpoint) = if arg.is_empty() {
-        match pick_model_interactive(reader) {
-            Some(result) => result,
+    let settings = crate::config::settings::Settings::load();
+    let candidates = model_candidates(&settings);
+
+    let target = if arg.is_empty() {
+        match pick_model_interactive(&candidates, reader, skin) {
+            Some(t) => t,
             None => return,
         }
     } else {
-        let endpoint = find_provider_for_model(arg);
-        (arg.to_string(), None, endpoint)
+        match match_model_query(&candidates, arg) {
+            m if m.len() == 1 => candidates[m[0]].clone(),
+            m if m.is_empty() => {
+                println!("no model or endpoint matching \"{arg}\". Available:");
+                for c in &candidates {
+                    println!("  {}", describe_candidate(c));
+                }
+                println!("(or /model with no argument for the picker)");
+                return;
+            }
+            m => {
+                println!("\"{arg}\" matches more than one target:");
+                for &i in &m {
+                    println!("  {}", describe_candidate(&candidates[i]));
+                }
+                println!("be more specific, or /model with no argument for the picker.");
+                return;
+            }
+        }
     };
 
-    // A different provider was picked: re-point the transport at its
-    // base_url/api_key instead of silently keeping the old endpoint with a
-    // model id it was never meant for (the original bug: /model listed
-    // providers but only ever swapped the model string, so picking
-    // "OpenAI" mid-OpenRouter-session sent OpenAI model ids to OpenRouter
-    // with the OpenRouter key and never asked for anything).
-    if let Some((base_url, env_var)) = new_endpoint {
-        let same_endpoint = transport.current_base_url().as_deref() == Some(base_url.as_str());
-        if !same_endpoint {
-            let is_copilot = base_url == crate::transport::copilot::BASE_URL;
-            let key = if is_copilot {
-                // Copilot uses OAuth device flow, not a typed API key.
-                // Same path as the onboarding wizard — get_or_create_token()
-                // handles the "open browser" prompt itself.
-                crate::transport::copilot::get_or_create_token()
-                    .map_err(|e| { println!("copilot auth failed: {e}"); e })
-                    .ok()
-            } else {
-                std::env::var(env_var)
-                    .ok()
-                    .map(|k| k.trim().to_string())
-                    .filter(|k| !k.is_empty())
-                    .or_else(|| {
-                        // Re-prompt on empty input (an empty key would be
-                        // persisted and sent as an empty bearer); bail only
-                        // on EOF.
-                        loop {
-                            let Some(raw) = reader
-                                .read_line(&format!("API key for this provider (${env_var} not set): "))
-                            else {
-                                break None;
-                            };
-                            let trimmed = raw.trim().to_string();
-                            if trimmed.is_empty() {
-                                println!("key is empty — type it again");
-                                continue;
-                            }
-                            break Some(trimmed);
-                        }
-                    })
-            };
-            let Some(key) = key else {
-                if !is_copilot {
-                    println!("no key provided — staying on current provider.");
+    apply_model_switch(transport, target, reader, cached_context_window);
+}
+
+/// Execute a resolved switch: key handling (env/OAuth/prompt), endpoint
+/// re-point, model swap, context-window re-resolution + change notice, and
+/// persistence (config.toml endpoint upsert + .env key upsert).
+fn apply_model_switch(
+    transport: &(dyn crate::transport::ProviderTransport + '_),
+    target: ModelCandidate,
+    reader: &mut LineReader,
+    cached_context_window: &mut Option<u32>,
+) {
+    let is_copilot_target = target.base_url == crate::transport::copilot::BASE_URL;
+    let same_endpoint = transport
+        .current_base_url()
+        .as_deref()
+        .map(|b| short_url(b) == short_url(&target.base_url))
+        .unwrap_or(false);
+
+    // A transport whose endpoint is fixed (Copilot) can swap models for its
+    // own endpoint but never re-point mid-session. Persist the choice so the
+    // *next* launch starts on the new endpoint, and say exactly that.
+    if !same_endpoint && !transport.can_repoint_endpoint() {
+        let window = target
+            .context_window
+            .or_else(|| crate::config::settings::context_window_for(&target.model));
+        persist_model_choice(&target, window);
+        println!(
+            "this session is bound to the {} endpoint and cannot re-point mid-chat — this session keeps running; your next `grace` launch starts on {name}.",
+            transport.name(),
+            name = target.name
+        );
+        return;
+    }
+
+    if !same_endpoint {
+        let key = if is_copilot_target {
+            // Copilot uses the OAuth device flow, not a typed API key —
+            // same path as the onboarding wizard.
+            match crate::transport::copilot::get_or_create_token() {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    println!("copilot auth failed: {e}");
+                    None
                 }
-                return;
-            };
-            transport.set_endpoint(&base_url, &key);
-            let mut settings = crate::config::settings::Settings::load();
-            settings.default_base_url = Some(base_url.clone());
-            if let Err(e) = settings.save() {
-                eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
             }
+        } else {
+            std::env::var(&target.key_env)
+                .ok()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .or_else(|| {
+                    // Re-prompt on empty input (an empty key would be
+                    // persisted and sent as an empty bearer); bail only on EOF.
+                    loop {
+                        let Some(raw) = reader
+                            .read_line(&format!(
+                                "API key for {} (${env_var} not set): ",
+                                target.name,
+                                env_var = target.key_env
+                            ))
+                        else {
+                            break None;
+                        };
+                        let trimmed = raw.trim().to_string();
+                        if trimmed.is_empty() {
+                            println!("key is empty — type it again");
+                            continue;
+                        }
+                        break Some(trimmed);
+                    }
+                })
+        };
+        let Some(key) = key else {
+            if !is_copilot_target {
+                println!("no key provided — staying on the current endpoint.");
+            }
+            return;
+        };
+        transport.set_endpoint(&target.base_url, &key);
+        if !is_copilot_target {
             // Per-key upsert: a whole-file rewrite would wipe the other
             // providers' keys every time `/model` switched providers.
-            if let Err(e) = crate::ui::cli::upsert_env_file(env_var, &key) {
+            if let Err(e) = crate::ui::cli::upsert_env_file(&target.key_env, &key) {
                 eprintln!(
                     "[grace] warning: could not save {}: {e}",
                     crate::ui::cli::env_file_path().display()
@@ -390,99 +543,192 @@ fn handle_model_command(
         }
     }
 
-    transport.set_model(&picked);
-    if let Some(m) = transport.current_model() {
-        // Force the transport to re-resolve its context window now that the
-        // model has changed (set_model above invalidated the cache). The
-        // transport's context_window() method fetches from the provider API,
-        // falls back to the /models listing, then to the static table.
-        let resolved = ctx.or(transport.context_window());
-        let mut settings = crate::config::settings::Settings::load();
-        settings.default_model = Some(m.clone());
-        settings.default_context_window = resolved;
-        if let Err(e) = settings.save() {
-            eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
-        } else {
-            println!("model switched to \"{m}\" (saved to config).");
+    transport.set_model(&target.model);
+    // Re-resolve the window now that model/endpoint changed (the swap
+    // invalidated the transport's cache). The static-list value, if any,
+    // avoids a network probe the picker already answered.
+    let resolved = target.context_window.or(transport.context_window());
+    if let (Some(old_w), Some(new_w)) = (*cached_context_window, resolved) {
+        if old_w != new_w {
+            println!(
+                "note: context window changed {} -> {} (compaction budget follows).",
+                human_tokens(old_w as u64),
+                human_tokens(new_w as u64)
+            );
         }
+    }
+    *cached_context_window = resolved;
+
+    let mut settings = crate::config::settings::Settings::load();
+    commit_model_choice(&mut settings, &target, resolved);
+    if settings.save().is_err() {
+        eprintln!("[grace] warning: could not save ~/.grace/config.toml");
+        return;
+    }
+    println!("model switched to \"{}\" (saved to config).", target.model);
+}
+
+/// Write the chosen model/endpoint/window into settings (the endpoint list
+/// stays one-entry-per-endpoint so the picker's list follows usage).
+fn commit_model_choice(
+    settings: &mut crate::config::settings::Settings,
+    target: &ModelCandidate,
+    context_window: Option<u32>,
+) {
+    settings.default_model = Some(target.model.clone());
+    settings.default_context_window = context_window;
+    settings.default_base_url = Some(target.base_url.clone());
+    crate::config::settings::upsert_endpoint(
+        &mut settings.endpoints,
+        crate::config::settings::Endpoint {
+            name: target.name.clone(),
+            base_url: target.base_url.clone(),
+            model: target.model.clone(),
+            key_env: target.key_env.clone(),
+        },
+    );
+}
+
+/// Persist-for-next-launch variant used when the running transport can't
+/// re-point: the change lands on the next startup, not this session.
+fn persist_model_choice(target: &ModelCandidate, context_window: Option<u32>) {
+    let mut settings = crate::config::settings::Settings::load();
+    commit_model_choice(&mut settings, target, context_window);
+    if let Err(e) = settings.save() {
+        eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
     }
 }
 
-/// Two-level model picker: providers first, then models for that provider.
-/// `PickedModel` = `(model_id, optional_context_window, optional (base_url,
-/// env_var) when a different provider than the transport's current one
-/// was picked)`. Used by `/model` mid-chat. Returns `None` on
-/// unparsable/EOF input (no-op).
-type PickedModel = (String, Option<u32>, Option<(String, &'static str)>);
+/// `/model` (no arg) — crossterm picker over the endpoints the candidates
+/// know about (persisted ones first), then a model list: what the endpoint
+/// reports, merged with the known static models, plus an "other" escape
+/// hatch for ids we don't know. Returns `None` on cancel/EOF (no-op).
+fn pick_model_interactive(
+    candidates: &[ModelCandidate],
+    reader: &mut LineReader,
+    skin: &Skin,
+) -> Option<ModelCandidate> {
+    use crate::ui::picker::{pick, Pick};
 
-fn pick_model_interactive(reader: &mut LineReader) -> Option<PickedModel> {
-    println!("\nproviders:\n");
-    for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
-        println!("  {}) {}", i + 1, p.label);
+    // Stage 1: which endpoint — one row per distinct (name, base_url).
+    let mut endpoints: Vec<(String, String, String)> = Vec::new(); // name, base_url, model
+    for c in candidates {
+        if !endpoints
+            .iter()
+            .any(|(n, u, _)| *n == c.name && *u == c.base_url)
+        {
+            endpoints.push((c.name.clone(), c.base_url.clone(), c.model.clone()));
+        }
     }
-    let n_providers = PROVIDER_PRESETS.len();
-    let raw = reader.read_line("\nselect a provider [number]: ")?;
-    let choice: usize = match raw.trim().parse::<usize>() {
-        Ok(n) if n >= 1 && n <= n_providers => n - 1,
-        _ => {
-            println!("not a valid choice.");
+    let items: Vec<Pick> = endpoints
+        .iter()
+        .map(|(name, base_url, model)| Pick {
+            id: format!("{name}\u{1}{base_url}"),
+            label: name.clone(),
+            sublabel: Some(format!("{model} · {}", short_url(base_url))),
+        })
+        .chain(std::iter::once(Pick {
+            id: "\u{1}custom".to_string(),
+            label: "Custom OpenAI-compatible endpoint".to_string(),
+            sublabel: Some("type a base URL".to_string()),
+        }))
+        .collect();
+    let choice = pick(&items, skin, "pick an endpoint to switch to")?;
+
+    let (name, base_url) = if choice == "\u{1}custom" {
+        let raw = reader.read_line("base URL (e.g. https://host/v1): ")?;
+        let url = raw.trim().to_string();
+        if url.is_empty() {
             return None;
         }
-    };
-    let preset = &PROVIDER_PRESETS[choice];
-    let endpoint = if preset.base_url.is_empty() {
-        None
+        (short_url(&url), url)
     } else {
-        Some((preset.base_url.to_string(), preset.env_var))
+        let mut it = choice.splitn(2, '\u{1}');
+        (
+            it.next().unwrap_or("").to_string(),
+            it.next().unwrap_or("").to_string(),
+        )
     };
-    if preset.models.is_empty() {
-        // Provider with no known models (e.g. "Custom endpoint"): type one.
-        let typed = reader.read_line("model id: ")?.trim().to_string();
-        return if typed.is_empty() { None } else { Some((typed, None, endpoint)) };
-    }
-    println!("\n{label} models:\n", label = preset.label);
-    for (i, m) in preset.models.iter().enumerate() {
-        println!(
-            "  {i}) {}  ({}k ctx)",
-            m.id,
-            m.context_window / 1000,
-            i = i + 1
-        );
-    }
-    // Add "other" option for custom model ID
-    println!("  {}) other (type a model id)", preset.models.len() + 1);
-    let n_models = preset.models.len();
-    let raw = reader.read_line("\nselect a model [number]: ")?;
-    match raw.trim().parse::<usize>() {
-        Ok(n) if n >= 1 && n <= n_models => Some((
-            preset.models[n - 1].id.to_string(),
-            Some(preset.models[n - 1].context_window),
-            endpoint,
-        )),
-        Ok(n) if n == n_models + 1 => {
-            // Custom model ID
-            let typed = reader.read_line("model id: ")?.trim().to_string();
-            if typed.is_empty() { None } else { Some((typed, None, endpoint)) }
-        }
-        _ => {
-            println!("not a valid choice.");
-            None
-        }
-    }
+
+    // Which key var + known models does this endpoint have?
+    let (key_env, known): (String, Vec<(String, Option<u32>)>) = candidates
+        .iter()
+        .filter(|c| c.name == name && short_url(&c.base_url) == short_url(&base_url))
+        .fold(
+        (String::new(), Vec::new()),
+        |(mut ke, mut known), c| {
+            if ke.is_empty() && !c.key_env.is_empty() {
+                ke = c.key_env.clone();
+            }
+            known.push((c.model.clone(), c.context_window));
+            (ke, known)
+        },
+    );
+    let key_env = if key_env.is_empty() {
+        crate::config::settings::env_var_for_base_url(&base_url).to_string()
+    } else {
+        key_env
+    };
+
+    let (model, ctx) = pick_model_for_endpoint(&base_url, &key_env, &known, reader, skin)?;
+    Some(ModelCandidate {
+        name,
+        model,
+        base_url,
+        key_env,
+        context_window: ctx,
+    })
 }
 
-/// Look up which provider preset a model ID belongs to, returning its
-/// `(base_url, env_var)` so a direct `/model <name>` switch can re-point the
-/// transport at the correct endpoint (not just swap the model string).
-fn find_provider_for_model(model_id: &str) -> Option<(String, &'static str)> {
-    for preset in PROVIDER_PRESETS {
-        if !preset.base_url.is_empty()
-            && preset.models.iter().any(|m| m.id == model_id)
-        {
-            return Some((preset.base_url.to_string(), preset.env_var));
+/// Stage 2 of the `/model` picker: the endpoint's reported models (best-
+/// effort) merged with its known static models, plus "other". Returns
+/// `(model_id, context_window_if_known)`.
+fn pick_model_for_endpoint(
+    base_url: &str,
+    key_env: &str,
+    known: &[(String, Option<u32>)],
+    reader: &mut LineReader,
+    skin: &Skin,
+) -> Option<(String, Option<u32>)> {
+    use crate::ui::picker::{pick, Pick};
+
+    let mut models: Vec<(String, Option<u32>)> = Vec::new();
+    for info in fetched_models(base_url, key_env) {
+        models.push((info.id, info.context_window));
+    }
+    for (id, ctx) in known {
+        if !models.iter().any(|(m, _)| m == id) {
+            models.push((id.clone(), *ctx));
         }
     }
-    None
+    if models.is_empty() {
+        let typed = reader.read_line("model id: ")?;
+        let id = typed.trim().to_string();
+        return if id.is_empty() { None } else { Some((id, None)) };
+    }
+
+    let items: Vec<Pick> = models
+        .iter()
+        .enumerate()
+        .map(|(i, (id, ctx))| Pick {
+            id: format!("m{i}"),
+            label: id.clone(),
+            sublabel: ctx.map(|w| format!("{}k ctx", w / 1000)),
+        })
+        .chain(std::iter::once(Pick {
+            id: "other".to_string(),
+            label: "other — type a model id".to_string(),
+            sublabel: None,
+        }))
+        .collect();
+    let choice = pick(&items, skin, "pick a model")?;
+    if choice == "other" {
+        let typed = reader.read_line("model id: ")?;
+        let id = typed.trim().to_string();
+        return if id.is_empty() { None } else { Some((id, None)) };
+    }
+    let idx = choice.strip_prefix('m')?.parse::<usize>().ok()?;
+    Some(models[idx].clone())
 }
 
 /// `/skin` (interactive picker, same as `--select-skin`) or `/skin <name>`
@@ -1336,6 +1582,111 @@ mod context_bar_tests {
         assert_eq!(human_tokens(950), "950");
         assert_eq!(human_tokens(1_200), "1.2k");
         assert_eq!(human_tokens(32_000), "32k");
+    }
+}
+
+#[cfg(test)]
+mod model_command_tests {
+    use super::*;
+
+    fn cand(name: &str, model: &str, base_url: &str, ctx: Option<u32>) -> ModelCandidate {
+        ModelCandidate {
+            name: name.into(),
+            model: model.into(),
+            base_url: base_url.into(),
+            key_env: "SOME_KEY".into(),
+            context_window: ctx,
+        }
+    }
+
+    #[test]
+    fn exact_model_match_wins_case_insensitively() {
+        let items = vec![cand("OpenAI", "gpt-4o", "https://api.openai.com/v1", Some(128_000))];
+        assert_eq!(match_model_query(&items, "GPT-4O"), vec![0]);
+    }
+
+    #[test]
+    fn exact_endpoint_name_matches_only_that_endpoint() {
+        let items = vec![
+            cand(
+                "OpenRouter",
+                "openai/gpt-4o-mini",
+                "https://openrouter.ai/api/v1",
+                Some(128_000),
+            ),
+            cand("OpenAI", "gpt-4o-mini", "https://api.openai.com/v1", Some(128_000)),
+        ];
+        assert_eq!(match_model_query(&items, "openai"), vec![1]);
+    }
+
+    #[test]
+    fn substring_match_is_the_fallback_and_can_be_ambiguous() {
+        let items = vec![
+            cand("OpenRouter", "openai/gpt-4o-mini", "https://openrouter.ai/api/v1", None),
+            cand("OpenAI", "gpt-4o-mini", "https://api.openai.com/v1", None),
+        ];
+        // "gpt-4o" is no exact name/model; it substrings both models.
+        assert_eq!(match_model_query(&items, "gpt-4o"), vec![0, 1]);
+        assert!(match_model_query(&items, "flux").is_empty());
+    }
+
+    #[test]
+    fn a_persisted_endpoint_dedups_the_preset_model() {
+        let mut settings = crate::config::settings::Settings::default();
+        settings.endpoints.push(crate::config::settings::Endpoint {
+            name: "MyOpenAI".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-4o".into(),
+            key_env: "OPENAI_API_KEY".into(),
+        });
+        let candidates = model_candidates(&settings);
+        let hits: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.model == "gpt-4o" && c.base_url == "https://api.openai.com/v1")
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "MyOpenAI");
+    }
+
+    #[test]
+    fn upsert_keeps_one_entry_per_base_url() {
+        let mut list = Vec::new();
+        crate::config::settings::upsert_endpoint(
+            &mut list,
+            crate::config::settings::Endpoint {
+                name: "a".into(),
+                base_url: "u".into(),
+                model: "m1".into(),
+                key_env: "K".into(),
+            },
+        );
+        crate::config::settings::upsert_endpoint(
+            &mut list,
+            crate::config::settings::Endpoint {
+                name: "b".into(),
+                base_url: "u".into(),
+                model: "m2".into(),
+                key_env: "K".into(),
+            },
+        );
+        crate::config::settings::upsert_endpoint(
+            &mut list,
+            crate::config::settings::Endpoint {
+                name: "c".into(),
+                base_url: "v".into(),
+                model: "m3".into(),
+                key_env: "K".into(),
+            },
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "b");
+        assert_eq!(list[1].name, "c");
+    }
+
+    #[test]
+    fn short_url_keeps_only_the_host() {
+        assert_eq!(short_url("https://api.openai.com/v1"), "api.openai.com");
+        assert_eq!(short_url("http://localhost:11434/v1"), "localhost:11434");
     }
 }
 

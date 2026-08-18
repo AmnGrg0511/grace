@@ -423,6 +423,12 @@ impl ProviderTransport for CopilotTransport {
         // different provider replaces the whole transport upstream instead.
     }
 
+    fn can_repoint_endpoint(&self) -> bool {
+        // The endpoint is fixed by the OAuth identity — `/model` can swap the
+        // model name for it, but never point it elsewhere mid-session.
+        false
+    }
+
     fn current_base_url(&self) -> Option<String> {
         Some(BASE_URL.to_string())
     }

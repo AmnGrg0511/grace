@@ -29,6 +29,37 @@ pub struct Settings {
     /// Name of the color skin to use (see [`crate::skin`]). `None` (or an
     /// unrecognized name) falls back to the default "solaris" skin.
     pub skin: Option<String>,
+    /// Model endpoints previously selected via `/model`, persisted so the
+    /// picker can offer them again (a bare model string + base_url pair is
+    /// forgotten otherwise). `#[serde(default)]` keeps older configs
+    /// loadable.
+    #[serde(default)]
+    pub endpoints: Vec<Endpoint>,
+}
+
+/// A named model endpoint — where `/model` can re-point the transport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Endpoint {
+    /// Picker label and `/model <name>` match target (e.g. "OpenRouter").
+    pub name: String,
+    /// OpenAI-compatible base URL.
+    pub base_url: String,
+    /// The model id to use when this endpoint is selected.
+    pub model: String,
+    /// Env var holding the API key for this endpoint ("" = OAuth device
+    /// flow, i.e. GitHub Copilot).
+    #[serde(default)]
+    pub key_env: String,
+}
+
+/// Replace any endpoint entry with the same `base_url`, else append. Keeps
+/// the list one-entry-per-endpoint as the user switches around.
+pub fn upsert_endpoint(list: &mut Vec<Endpoint>, endpoint: Endpoint) {
+    if let Some(existing) = list.iter_mut().find(|e| e.base_url == endpoint.base_url) {
+        *existing = endpoint;
+    } else {
+        list.push(endpoint);
+    }
 }
 
 /// A model Grace can suggest during onboarding, with its context window (for

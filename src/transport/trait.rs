@@ -116,6 +116,14 @@ pub trait ProviderTransport {
     /// mid-chat picking a provider other than the one it started with.
     fn set_endpoint(&self, _base_url: &str, _api_key: &str) {}
 
+    /// Whether [`set_endpoint`](ProviderTransport::set_endpoint) actually
+    /// takes effect. A transport whose endpoint is fixed (GitHub Copilot)
+    /// must say so, so `/model` can tell the user to restart instead of
+    /// flipping a model string the endpoint will never accept.
+    fn can_repoint_endpoint(&self) -> bool {
+        true
+    }
+
     /// Current base_url, if this transport has a swappable one (used by
     /// `/model` to detect "you picked a different provider than the one this
     /// session is currently wired to").
