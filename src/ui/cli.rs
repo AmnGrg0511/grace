@@ -601,7 +601,18 @@ fn run_one_shot(
         let _ = sessions.append(sid, &Message::user(user_text));
     }
 
-    let interrupted = std::sync::atomic::AtomicBool::new(false);
+    // Same Ctrl-C semantics as chat mode: the handler (installed once) sets
+    // the flag the agent loop polls; the loop unwinds with `Interrupted`
+    // instead of the default SIGINT killing the process mid-request. A
+    // bash child running in the same foreground process group still gets
+    // the tty's SIGINT and dies, so an interrupt lands even mid-tool.
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let flag = interrupted.clone();
+        let _ = ctrlc::set_handler(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
     let mut stream_state = crate::ui::chat::StreamState::default();
 
     // `--stream` is no longer a separate code path that skips the tool loop.
@@ -626,6 +637,17 @@ fn run_one_shot(
     };
     let outcome = match turn {
         Ok(outcome) => outcome,
+        // Ctrl-C: not an error report — the same "stop, I'm going" as a
+        // shell would give. Rewind the user row (one-shot never persists
+        // the partial tool traffic a chat turn would keep) and exit with
+        // the conventional SIGINT status.
+        Err(crate::util::AgentError::Interrupted) => {
+            if let Some(sid) = session_id {
+                let _ = sessions.delete_last_user_row(sid);
+            }
+            eprintln!("interrupted");
+            return Ok(ExitCode::from(130));
+        }
         Err(e) => {
             // The user row is persisted before the turn runs; a failed one
             // must not leave it dangling in the session history.
