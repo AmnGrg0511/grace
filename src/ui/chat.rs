@@ -173,11 +173,6 @@ pub fn run_chat(
             };
             line
         };
-// Backslash continuation: a trailing `\` joins the next physical
-        // line, so a long prompt can be typed across lines; a line without a
-        // trailing backslash ends the input. Trailing spaces after the
-        // backslash don't cancel it.
-        let line = read_input_line(line, || reader.read_line("\u{2506} "));
         let text = line.trim();
         if text.is_empty() {
             continue;
@@ -1261,75 +1256,6 @@ pub fn prompt_label(skin: &Skin) -> String {
         return format!("{} ", skin.prompt_glyph);
     }
     skin.paint(Role::Prompt, &format!("{} ", skin.prompt_glyph))
-}
-
-/// Backslash continuation for the chat prompt: a physical line ending in `\`
-/// is joined with the next one (backslash and pad spaces around it dropped)
-/// so long prompts and multi-line `/remember` payloads can span lines; a line
-/// without a trailing backslash ends the read. If input runs out
-/// mid-continuation the dangling marker is dropped and what was typed stands.
-/// The `next_line` closure is the single-line reader (one `LineReader`),
-/// injected so the join rule is testable without a tty.
-fn read_input_line(first: String, mut next_line: impl FnMut() -> Option<String>) -> String {
-    let mut line = first;
-    while let Some(prefix) = line.trim_end().strip_suffix('\\') {
-        // Drop the continuation backslash *and* the pad spaces before it, so
-        // `first \` + `second` joins to `first\nsecond`, not `first \nsecond`.
-        let prefix = prefix.trim_end();
-        match next_line() {
-            Some(cont) => line = format!("{prefix}\n{cont}"),
-            None => {
-                line = prefix.to_string();
-                break;
-            }
-        }
-    }
-    line
-}
-
-#[cfg(test)]
-mod read_input_line_tests {
-    use super::*;
-
-    fn join(first: &str, following: &[&str]) -> String {
-        let mut it = following.iter().copied();
-        read_input_line(first.to_string(), || it.next().map(String::from))
-    }
-
-    #[test]
-    fn a_plain_line_is_returned_unchanged() {
-        assert_eq!(join("hello", &[]), "hello");
-    }
-
-    #[test]
-    fn a_trailing_backslash_joins_the_next_line() {
-        assert_eq!(join("first \\", &["second"]), "first\nsecond");
-    }
-
-    #[test]
-    fn continuations_chain_across_multiple_lines() {
-        assert_eq!(
-            join("a \\", &["b \\", "c"]),
-            "a\nb\nc"
-        );
-    }
-
-    #[test]
-    fn trailing_spaces_after_the_backslash_still_continue() {
-        assert_eq!(join("a \\  ", &["b"]), "a\nb");
-    }
-
-    #[test]
-    fn end_of_input_mid_continuation_keeps_what_was_typed() {
-        // The final physical line still ends in a backslash but there is no
-        // following line: the backslash is dropped, nothing fabricated.
-        assert_eq!(join("a \\", &[]), "a");
-    }
-
-    #[test]
-    fn an_interior_backslash_is_not_a_continuation() {
-        assert_eq!(join("a \\ b", &["ignored"]), "a \\ b");
-    }
 }
 
 /// Best-effort API fetch to discover a model's context window — thin
