@@ -162,6 +162,20 @@ fn render_frame(
 ) -> usize {
     use crate::ui::skin::Role;
 
+    // The picker redraws its bounded region by counting *physical* lines, so
+    // a row must never wrap on the terminal. Labels are therefore truncated
+    // to what one line actually holds (resolved fresh per frame — the picker
+    // re-renders everything each key anyway, unlike the stream path which
+    // pins one width because committed bytes may not move). Facts and other
+    // user text used to be cut to a hardcoded 76 chars even on a 200-column
+    // terminal; now the row grows with the terminal.
+    let width = crate::ui::markdown::terminal_width().unwrap_or(100);
+    // The sublabel is a short hint (a path, a count, "fact #N"); cap it low
+    // so the label — the primary content — gets the rest of the row.
+    let sub_max = 24.min(width.saturating_sub(12) / 2);
+    // Overhead: bullet + space + two-space gap to the sublabel.
+    let label_max = |has_sub: bool| width.saturating_sub(if has_sub { sub_max + 8 } else { 5 });
+
     let mut lines: Vec<String> = vec![format!("  {hint}")];
     if visible.is_empty() {
         lines.push("    no match".into());
@@ -190,9 +204,9 @@ fn render_frame(
         } else {
             ("  ".to_string(), Role::ToolDim)
         };
-        let mut row = format!("{bullet} {}", truncate_utf8(&it.label, 76));
+        let mut row = format!("{bullet} {}", truncate_utf8(&it.label, label_max(it.sublabel.is_some())));
         if let Some(sub) = it.sublabel.as_deref() {
-            row.push_str(&format!("  {}", truncate_utf8(sub, 40)));
+            row.push_str(&format!("  {}", truncate_utf8(sub, sub_max)));
         }
         lines.push(skin.paint(row_style, &row));
     }
@@ -398,6 +412,39 @@ mod tests {
             "every \\n must be preceded by \\r (raw-mode LF-only drift): {text:?}"
         );
         assert!(text.ends_with("\r\n"), "last line must end with \\r\\n: {text:?}");
+    }
+
+    #[test]
+    fn label_caps_scale_with_terminal_width() {
+        // A long label used to be cut at a hardcoded 76 chars even on a wide
+        // terminal; now the row budget grows with the width (and never wraps,
+        // because a wrapped row would break the line-counted redraw).
+        let long = "fact ".to_string() + &"x".repeat(200);
+        let items = vec![Pick {
+            id: "1".into(),
+            label: long.clone(),
+            sublabel: None,
+        }];
+        let visible = filter_items(&items, "");
+        let state = PickState::default();
+
+        let render = || {
+            let mut out: Vec<u8> = Vec::new();
+            render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
+            String::from_utf8(out).unwrap()
+        };
+
+        // On a 100-col fallback the label is cut to fit one row.
+        let narrow = render();
+        assert!(narrow.contains(&"x".repeat(90)), "narrow row too short: {narrow}");
+        assert!(!narrow.contains(&"x".repeat(96)), "narrow row must not wrap: {narrow}");
+
+        // On a wide COLUMNS the same label gets far more room.
+        {
+            let _guard = crate::util::test_support::EnvVarGuard::set("COLUMNS", "240");
+            let wide = render();
+            assert!(wide.contains(&"x".repeat(200)), "wide row should keep more: {wide}");
+        }
     }
 
     #[test]
