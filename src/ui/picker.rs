@@ -166,7 +166,7 @@ fn render_frame(
     if visible.is_empty() {
         lines.push("    no match".into());
         for line in &lines {
-            let _ = writeln!(w, "{line}");
+            let _ = write!(w, "{line}\r\n");
         }
         return lines.len();
     }
@@ -208,7 +208,7 @@ fn render_frame(
     ));
 
     for line in &lines {
-        let _ = writeln!(w, "{line}");
+        let _ = write!(w, "{line}\r\n");
     }
     lines.len()
 }
@@ -378,6 +378,26 @@ mod tests {
             }
         }
         outcome
+    }
+
+    #[test]
+    fn rendered_frames_use_crlf_line_endings() {
+        // In raw mode the terminal's ONLCR translation is off, so a bare \n
+        // moves down without returning to column 0 — each subsequent line
+        // drifts right by the width of the previous one. Every frame line
+        // must therefore be \r\n terminated. (Regression: / <Enter> rendered
+        // the palette with every row shunted right.)
+        let mut out: Vec<u8> = Vec::new();
+        let items = items();
+        let visible = filter_items(&items, "");
+        let state = PickState::default();
+        render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.replace("\r\n", "").contains('\n'),
+            "every \\n must be preceded by \\r (raw-mode LF-only drift): {text:?}"
+        );
+        assert!(text.ends_with("\r\n"), "last line must end with \\r\\n: {text:?}");
     }
 
     #[test]
