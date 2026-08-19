@@ -12,6 +12,7 @@
 //! interactive session makes stdin ownership unambiguous.
 
 use rustyline::history::History;
+use rustyline::{Cmd, KeyCode, KeyEvent, Modifiers};
 
 /// The one and only stdin consumer for an interactive chat session.
 /// Prefers rustyline (arrow-key history/editing); falls back to plain
@@ -26,6 +27,15 @@ pub enum LineReader {
     },
 }
 
+/// The key events for multi-line input in the rustyline editor. Defined as
+/// constants (not inline in `new`) so the tests can assert, against the raw
+/// bytes the terminal actually emits, that *exactly* these keys are bound to
+/// insert (not submit) — i.e. Ctrl+J continues the prompt and plain Enter
+/// still submits. See `rustyline`'s `keys` module for the byte→event map.
+const CTRL_J: KeyEvent = KeyEvent(KeyCode::Char('J'), Modifiers::CTRL);
+const SHIFT_ENTER: KeyEvent = KeyEvent(KeyCode::Enter, Modifiers::SHIFT);
+const PLAIN_ENTER: KeyEvent = KeyEvent(KeyCode::Enter, Modifiers::NONE);
+
 impl LineReader {
     pub fn new(history_path: std::path::PathBuf, skin: crate::ui::skin::Skin) -> Self {
         if let Ok(mut editor) = rustyline::Editor::<
@@ -34,6 +44,15 @@ impl LineReader {
         >::new()
         {
             editor.set_helper(Some(crate::ui::completer::CommandHelper { skin }));
+            // Multi-line input, terminal-side. Ctrl+J (reliable — it sends \n)
+            // and Shift+Enter (best-effort: many terminals report it as the
+            // same \r as plain Enter) insert a newline instead of submitting.
+            // Plain Enter always submits. rustyline's default otherwise maps
+            // Enter, Ctrl+J, and Ctrl+M all to AcceptOrInsertLine (submit at
+            // end of input), which would make Ctrl+J submit the prompt.
+            editor.bind_sequence(CTRL_J, Cmd::Newline);
+            editor.bind_sequence(SHIFT_ENTER, Cmd::Newline);
+            editor.bind_sequence(PLAIN_ENTER, Cmd::AcceptLine);
             let _ = editor.load_history(&history_path);
             return LineReader::Rustyline {
                 editor: Box::new(editor),
@@ -141,7 +160,26 @@ pub fn history_file_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustyline::Event;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn soft_newline_key_is_the_raw_newline_byte_and_not_submit() {
+        // The terminal emits '\n' (0x0A) for Ctrl+J and '\r' (0x0D) for a
+        // plain Enter. We bind Ctrl+J to *insert* and plain Enter to *submit*,
+        // so those two raw bytes must normalize to distinct events — and the
+        // keys we bind must equal what the bytes actually parse to, else the
+        // binding silently never fires. If these matched each other, the
+        // soft-newline key would swallow a submit (or the reverse).
+        let ctrl_j = Event::from(CTRL_J);
+        let from_newline_byte = Event::from(KeyEvent::from('\n'));
+        let enter = Event::from(PLAIN_ENTER);
+        let from_cr_byte = Event::from(KeyEvent::from('\r'));
+
+        assert_eq!(ctrl_j, from_newline_byte, "bound key != raw Ctrl+J byte");
+        assert_eq!(enter, from_cr_byte, "bound key != raw Enter byte");
+        assert_ne!(ctrl_j, enter, "soft-newline key must not be the submit key");
+    }
 
     #[test]
     fn each_session_gets_its_own_history_file() {
