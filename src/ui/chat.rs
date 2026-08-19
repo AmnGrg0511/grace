@@ -231,23 +231,6 @@ pub fn run_chat(
                 handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills);
                 continue;
             }
-            Some("remember") => {
-                // Durable facts, not chat context: this lands in the facts DB
-                // and is re-injected into the system prompt on every start
-                // (and re-derived at every `/session` switch).
-                if rest.is_empty() {
-                    println!("usage: /remember <thing to remember>");
-                } else if let Err(e) = memory.remember(rest) {
-                    println!("error saving the fact: {e}");
-                } else {
-                    println!("remembered: {rest}");
-                }
-                continue;
-            }
-            Some("forget") => {
-                handle_forget_command(memory, &skin);
-                continue;
-            }
             Some("verbose") => {
                 verbose = !verbose;
                 println!(
@@ -1345,37 +1328,6 @@ pub fn compact_args(arguments: &str) -> String {
 }
 
 /// Print available slash commands for the chat REPL.
-/// `/forget` — pick a remembered fact and delete it.
-fn handle_forget_command(memory: &crate::memory::Memory, skin: &Skin) {
-    let facts = match memory.all() {
-        Ok(f) => f,
-        Err(e) => {
-            println!("error listing remembered facts: {e}");
-            return;
-        }
-    };
-    if facts.is_empty() {
-        println!("nothing has been remembered yet.");
-        return;
-    }
-    let items: Vec<crate::ui::picker::Pick> = facts
-        .iter()
-        .map(|f| crate::ui::picker::Pick {
-            id: f.id.to_string(),
-            label: f.content.clone(),
-            sublabel: Some(format!("fact #{}", f.id)),
-        })
-        .collect();
-    match crate::ui::picker::pick(&items, skin, "forget one fact?") {
-        Some(id) => match memory.forget(id.parse::<i64>().unwrap_or(0)) {
-            Ok(true) => println!("forgotten."),
-            Ok(false) => println!("that fact is already gone."),
-            Err(e) => println!("error forgetting: {e}"),
-        },
-        None => println!("kept everything."),
-    }
-}
-
 /// `/help` — rendered from the single command registry in two columns, so
 /// the help screen can never list (or omit) a command whose dispatching
 /// differs.
@@ -1430,8 +1382,7 @@ mod slash_command_agreement_tests {
     /// G14), and a registry entry without a handler is a phantom. Update
     /// this constant whenever an arm in the dispatch match changes.
     const DISPATCHED: &[&str] = &[
-        "exit", "quit", "help", "commands", "model", "skin", "session", "remember", "forget",
-        "verbose",
+        "exit", "quit", "help", "commands", "model", "skin", "session", "verbose",
     ];
 
     #[test]
