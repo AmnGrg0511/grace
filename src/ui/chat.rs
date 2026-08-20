@@ -1453,12 +1453,12 @@ pub fn print_agent_event_to(
             let compact = compact_args(arguments);
             let bullet = skin.paint(Role::ToolBullet, "●");
             // Name in the ToolName role (same as the `/skin` preview's
-            // mini-transcript), args dimmed so the call recedes behind the
-            // undimmed answer text above/below it.
+            // mini-transcript), args in the skin's ToolDim color so the
+            // call recedes behind the undimmed answer text above/below it.
             let call = format!(
                 "{}{}",
                 skin.paint(Role::ToolName, name),
-                dim(&format!("({compact})"))
+                skin.paint(Role::ToolDim, &format!("({compact})"))
             );
             writeln!(out, "{} {call}", bullet).ok();
         }
