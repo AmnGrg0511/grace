@@ -156,6 +156,12 @@ pub fn context_window_for(model: &str) -> Option<u32> {
         ("gpt-3.5", 16_000),
         ("llama-3", 128_000),
         ("mistral", 32_000),
+        // Provider gateway models, measured against the live endpoint: each
+        // figure is the context window the gateway reports when a request
+        // exceeds it.
+        ("qwen-3.8-27b", 262_144),
+        ("deepseek-v4-flash", 1_048_576),
+        ("gpt-oss-120b", 131_072),
     ];
     table
         .iter()
