@@ -307,7 +307,25 @@ struct ModelCandidate {
 fn model_candidates(settings: &crate::config::settings::Settings) -> Vec<ModelCandidate> {
     let mut out: Vec<ModelCandidate> = Vec::new();
     let mut known: Vec<(String, String)> = Vec::new();
+    // The endpoint the user is currently configured on, so `/model` can
+    // always offer "switch back to where I am now" without the user typing
+    // its URL as a custom endpoint.
+    if let (Some(url), Some(model)) = (&settings.default_base_url, &settings.default_model) {
+        out.push(ModelCandidate {
+            name: friendly_endpoint_name(url),
+            model: model.clone(),
+            base_url: url.clone(),
+            key_env: crate::config::settings::env_var_for_base_url(url).to_string(),
+            context_window: settings
+                .default_context_window
+                .or_else(|| crate::config::settings::context_window_for(model)),
+        });
+        known.push((url.clone(), model.clone()));
+    }
     for e in &settings.endpoints {
+        if known.contains(&(e.base_url.clone(), e.model.clone())) {
+            continue;
+        }
         out.push(ModelCandidate {
             name: e.name.clone(),
             model: e.model.clone(),
@@ -387,6 +405,27 @@ fn short_url(url: &str) -> String {
         .next()
         .unwrap_or(url)
         .to_string()
+}
+
+/// A human label for an endpoint URL: the host without scheme, port, common
+/// `api.`/`www.` prefix, and TLD. `https://api.siemens.com/llm/v1` →
+/// `siemens`; `http://localhost:11434/v1` → `localhost`.
+fn friendly_endpoint_name(url: &str) -> String {
+    let host = short_url(url);
+    let host = host.split(':').next().unwrap_or(&host);
+    let host = host
+        .strip_prefix("api.")
+        .or_else(|| host.strip_prefix("www."))
+        .unwrap_or(host);
+    let mut labels = host.split('.');
+    let first = labels.next().unwrap_or(host);
+    // Drop the TLD for multi-label hosts (`api.siemens.com` → `siemens`),
+    // keep single-label hosts (`localhost`) as-is.
+    if labels.next().is_some() {
+        first.to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 /// Fetch the target endpoint's own model list (best-effort; a slow or
@@ -641,7 +680,7 @@ fn pick_model_interactive(
         if url.is_empty() {
             return None;
         }
-        (short_url(&url), url)
+        (friendly_endpoint_name(&url), url)
     } else {
         let mut it = choice.splitn(2, '\u{1}');
         (
@@ -1687,6 +1726,31 @@ mod model_command_tests {
     fn short_url_keeps_only_the_host() {
         assert_eq!(short_url("https://api.openai.com/v1"), "api.openai.com");
         assert_eq!(short_url("http://localhost:11434/v1"), "localhost:11434");
+    }
+
+    #[test]
+    fn friendly_endpoint_name_strips_scheme_prefix_and_port() {
+        assert_eq!(friendly_endpoint_name("https://api.siemens.com/llm/v1"), "siemens");
+        assert_eq!(friendly_endpoint_name("http://localhost:11434/v1"), "localhost");
+        assert_eq!(friendly_endpoint_name("https://api.openai.com/v1"), "openai");
+    }
+
+    #[test]
+    fn the_currently_configured_endpoint_is_a_candidate() {
+        let settings = crate::config::settings::Settings {
+            default_model: Some("qwen-3.8-27b".into()),
+            default_base_url: Some("https://api.siemens.com/llm/v1".into()),
+            default_context_window: Some(262_144),
+            ..Default::default()
+        };
+        let candidates = model_candidates(&settings);
+        let cur = candidates
+            .iter()
+            .find(|c| c.base_url == "https://api.siemens.com/llm/v1")
+            .expect("configured endpoint is a candidate");
+        assert_eq!(cur.name, "siemens");
+        assert_eq!(cur.model, "qwen-3.8-27b");
+        assert_eq!(cur.context_window, Some(262_144));
     }
 }
 
