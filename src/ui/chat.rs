@@ -1485,7 +1485,7 @@ pub fn print_agent_event_to(
                 format!("{}ms", (secs * 1000.0) as u64)
             };
             let prefix = format!(
-                "    {} {}Σ",
+                "    {} {}",
                 skin.paint(Role::ToolDim, "·"),
                 skin.paint(Role::ToolBullet, "Σ")
             );
@@ -1916,6 +1916,7 @@ fn print_slash_commands_help() {
 #[cfg(test)]
 mod verbose_gate_tests {
     use super::should_show_tool_output;
+    use super::{print_agent_event_to, StreamState};
 
     #[test]
     fn non_edit_tools_hidden_unless_verbose() {
@@ -1929,6 +1930,28 @@ mod verbose_gate_tests {
     fn edit_always_shown_regardless_of_verbose() {
         assert!(should_show_tool_output("edit", false));
         assert!(should_show_tool_output("edit", true));
+    }
+
+    #[test]
+    fn tool_end_line_has_a_single_sigma_and_the_timing() {
+        use crate::core::lifecycle::AgentEvent;
+        let skin = crate::ui::skin::by_name(None);
+        let mut out = Vec::new();
+        let mut stream = StreamState::default();
+        print_agent_event_to(
+            AgentEvent::ToolCallEnd {
+                name: "read",
+                result: "x",
+                elapsed: std::time::Duration::from_millis(10),
+            },
+            &skin,
+            true, // disable_color
+            &mut stream,
+            &mut out,
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(s.matches('Σ').count(), 1, "exactly one Σ glyph: {s:?}");
+        assert!(s.contains("10ms"), "timing present: {s:?}");
     }
 }
 
