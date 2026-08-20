@@ -63,7 +63,11 @@ impl SseAccumulator {
     /// error *inside* the stream — that is an `Err`, not a silently dropped
     /// frame. Chunks that merely lack `choices` (e.g. Qwen/vLLM trailing
     /// usage chunks) are still fine: the key is `error`, not missing choices.
-    pub fn feed(&mut self, payload: &str, mut on_fragment: impl FnMut(&str)) -> Result<bool> {
+    pub fn feed(
+        &mut self,
+        payload: &str,
+        mut on_fragment: impl FnMut(&str) -> Result<()>,
+    ) -> Result<bool> {
         let trimmed = payload.trim();
         if trimmed == "[DONE]" {
             return Ok(true);
@@ -98,7 +102,7 @@ impl SseAccumulator {
             if let Some(piece) = delta.get("content").and_then(Value::as_str) {
                 if !piece.is_empty() {
                     self.content.push_str(piece);
-                    on_fragment(piece);
+                    on_fragment(piece)?;
                 }
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -158,7 +162,7 @@ impl SseAccumulator {
 /// byte slice.
 pub fn parse_sse_stream(
     body: impl Read,
-    mut on_fragment: impl FnMut(&str),
+    mut on_fragment: impl FnMut(&str) -> Result<()>,
 ) -> Result<ModelResponse> {
     use std::io::BufRead;
     let reader = std::io::BufReader::new(body);
@@ -196,7 +200,7 @@ pub fn stream_complete(
     model: &str,
     messages: &[Message],
     tools: &[ToolSpec],
-    on_fragment: impl FnMut(&str),
+    on_fragment: impl FnMut(&str) -> Result<()>,
 ) -> Result<ModelResponse> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let msgs_json = serde_json::to_value(messages).unwrap_or(Value::Array(vec![]));
@@ -249,6 +253,7 @@ mod tests {
         let mut collected = String::new();
         let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |frag| {
             collected.push_str(frag);
+            Ok(())
         })
         .unwrap();
         assert_eq!(collected, "Hello, world!");
@@ -271,6 +276,7 @@ mod tests {
         let mut collected = String::new();
         let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |frag| {
             collected.push_str(frag);
+            Ok(())
         })
         .unwrap();
         assert_eq!(collected, "\n\nPONG");
@@ -288,7 +294,7 @@ mod tests {
     fn a_stream_without_any_usage_frames_yields_none_not_zero() {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\
                    data: [DONE]\n";
-        let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| {}).unwrap();
+        let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| Ok(())).unwrap();
         assert!(response.usage.is_none());
         assert_eq!(response.content, "hi");
     }
@@ -299,7 +305,7 @@ mod tests {
                     data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"echo hi\\\"}\"}}]}}]}\n\
                     data: {\"choices\":[{\"delta\":{}, \"finish_reason\":\"tool_calls\"}]}\n\
                     data: [DONE]\n";
-        let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| {}).unwrap();
+        let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| Ok(())).unwrap();
         assert_eq!(response.tool_calls.len(), 1);
         let call = &response.tool_calls[0];
         assert_eq!(call.name(), "bash");
@@ -312,7 +318,7 @@ mod tests {
         let sse = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"foo\",\"arguments\":\"{}\"}}]}}]}\n\
                     data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_b\",\"function\":{\"name\":\"bar\",\"arguments\":\"{}\"}}]}}]}\n\
                     data: [DONE]\n";
-        let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| {}).unwrap();
+        let response = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| Ok(())).unwrap();
         assert_eq!(response.tool_calls.len(), 2);
         assert_eq!(response.tool_calls[0].name(), "foo");
         assert_eq!(response.tool_calls[1].name(), "bar");
@@ -367,7 +373,10 @@ mod tests {
                     chunk,
                     open_after_end: false,
                 },
-                |frag| collected.push_str(frag),
+                |frag| {
+                    collected.push_str(frag);
+                    Ok(())
+                },
             )
             .unwrap_or_else(|e| panic!("chunk={chunk}: {e}"));
             assert_eq!(collected, "Hello, world!", "chunk={chunk}");
@@ -385,7 +394,7 @@ mod tests {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\
                    data: {\"error\":{\"message\":\"rate limited by upstream\"}}\n\
                    data: [DONE]\n";
-        let err = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| {}).unwrap_err();
+        let err = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| Ok(())).unwrap_err();
         assert!(err.to_string().contains("rate limited by upstream"), "{err}");
         assert!(err.to_string().contains("provider stream error"), "{err}");
     }
@@ -396,7 +405,7 @@ mod tests {
         // dead stream — the turn must say so, not present the fragment.
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\
                    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n";
-        let err = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| {}).unwrap_err();
+        let err = parse_sse_stream(std::io::Cursor::new(sse.as_bytes()), |_| Ok(())).unwrap_err();
         assert!(err.to_string().contains("[DONE]"), "{err}");
     }
 
@@ -414,7 +423,7 @@ mod tests {
                 chunk: 2,
                 open_after_end: true,
             },
-            |_| {},
+            |_| Ok(()),
         )
         .expect("[DONE] must end the parse even though the reader never EOFs");
         assert_eq!(response.content, "ok");

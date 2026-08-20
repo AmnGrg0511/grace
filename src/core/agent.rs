@@ -154,6 +154,7 @@ pub fn run_turn_with_options(
             messages,
             &specs,
             options.stream,
+            options.interrupted,
             &mut options.on_event,
         )?;
 
@@ -285,16 +286,28 @@ fn complete_with_retry(
     messages: &[Message],
     specs: &[ToolSpec],
     stream: bool,
+    interrupted: Option<&AtomicBool>,
     sink: &mut Option<&mut dyn FnMut(AgentEvent)>,
 ) -> Result<ModelResponse> {
     const MAX_RETRIES: u32 = 2;
     let mut last_err = None;
     for _ in 0..=MAX_RETRIES {
-        let attempt = if stream && transport.supports_streaming() {
-            let mut on_fragment = |frag: &str| {
-                if let Some(cb) = sink.as_deref_mut() {
-                    cb(AgentEvent::ContentFragment(frag));
+        // Stream whenever the transport can, even when the caller asked for a
+        // blocking one-shot: the fragment callback then polls the interrupt
+        // flag on every token, so a Ctrl-C lands mid-generation instead of
+        // waiting for the whole response. Fragments are only *surfaced* when
+        // `stream` is on — a blocking caller still renders the answer once.
+        let attempt = if transport.supports_streaming() {
+            let mut on_fragment = |frag: &str| -> Result<()> {
+                if interrupted.is_some_and(|f| f.load(Ordering::SeqCst)) {
+                    return Err(AgentError::Interrupted);
                 }
+                if stream {
+                    if let Some(cb) = sink.as_deref_mut() {
+                        cb(AgentEvent::ContentFragment(frag));
+                    }
+                }
+                Ok(())
             };
             transport.complete_streaming(messages, specs, "", &mut on_fragment)
         } else {
@@ -781,10 +794,10 @@ mod tests {
                 _m: &[Message],
                 _t: &[ToolSpec],
                 _model: &str,
-                on_fragment: &mut dyn FnMut(&str),
+                on_fragment: &mut dyn FnMut(&str) -> Result<()>,
             ) -> Result<ModelResponse> {
                 for piece in ["a", "b", "c"] {
-                    on_fragment(piece);
+                    on_fragment(piece)?;
                 }
                 Ok(ModelResponse {
                     content: "abc".into(),
@@ -842,9 +855,9 @@ mod tests {
                 _m: &[Message],
                 _t: &[ToolSpec],
                 _model: &str,
-                on_fragment: &mut dyn FnMut(&str),
+                on_fragment: &mut dyn FnMut(&str) -> Result<()>,
             ) -> Result<ModelResponse> {
-                on_fragment("hi");
+                on_fragment("hi")?;
                 Ok(ModelResponse {
                     content: "hi".into(),
                     tool_calls: vec![],
@@ -896,5 +909,58 @@ mod tests {
         )
         .unwrap();
         assert!(!outcome.streamed);
+    }
+
+    #[test]
+    fn an_interrupt_mid_stream_aborts_before_the_generation_finishes() {
+        // Ctrl-C during a long generation used to wait for the whole
+        // response: the SSE read loop never polled the flag. The fragment
+        // callback must abort the stream on the next token instead.
+        struct AbortableStreamer;
+        impl ProviderTransport for AbortableStreamer {
+            fn name(&self) -> &str {
+                "abortable"
+            }
+            fn complete(
+                &self,
+                _m: &[Message],
+                _t: &[ToolSpec],
+                _model: &str,
+            ) -> Result<ModelResponse> {
+                unreachable!("streaming path must be used")
+            }
+            fn supports_streaming(&self) -> bool {
+                true
+            }
+            fn complete_streaming(
+                &self,
+                _m: &[Message],
+                _t: &[ToolSpec],
+                _model: &str,
+                on_fragment: &mut dyn FnMut(&str) -> Result<()>,
+            ) -> Result<ModelResponse> {
+                // Emit a token, then let the flag get set between tokens and
+                // verify the next fragment call aborts with Interrupted.
+                on_fragment("first")?;
+                let err = on_fragment("second");
+                assert!(
+                    matches!(err, Err(AgentError::Interrupted)),
+                    "fragment callback must surface the interrupt: {err:?}"
+                );
+                unreachable!("aborted stream must not be treated as complete")
+            }
+        }
+        let mut messages = base_messages();
+        let flag = AtomicBool::new(true);
+        let res = run_turn_with_options(
+            &AbortableStreamer,
+            &ToolRegistry::new(),
+            &mut messages,
+            4,
+            TurnOptions::new()
+                .with_interrupt(&flag)
+                .streaming(true),
+        );
+        assert!(matches!(res, Err(AgentError::Interrupted)));
     }
 }

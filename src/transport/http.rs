@@ -344,7 +344,7 @@ impl ProviderTransport for HttpTransport {
         messages: &[Message],
         tools: &[ToolSpec],
         _model: &str,
-        on_fragment: &mut dyn FnMut(&str),
+        on_fragment: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<ModelResponse> {
         let model_owned = self.model.borrow().clone();
         let model = if model_owned.is_empty() {

@@ -157,11 +157,11 @@ pub trait ProviderTransport {
         messages: &[Message],
         tools: &[ToolSpec],
         model: &str,
-        on_fragment: &mut dyn FnMut(&str),
+        on_fragment: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<ModelResponse> {
         let resp = self.complete(messages, tools, model)?;
         if !resp.content.is_empty() {
-            on_fragment(&resp.content);
+            on_fragment(&resp.content)?;
         }
         Ok(resp)
     }
@@ -233,7 +233,10 @@ mod tests {
         let t = Minimal;
         let mut seen = String::new();
         let resp = t
-            .complete_streaming(&[], &[], "m", &mut |f| seen.push_str(f))
+            .complete_streaming(&[], &[], "m", &mut |f| {
+                seen.push_str(f);
+                Ok(())
+            })
             .unwrap();
         assert_eq!(seen, "hello");
         assert_eq!(resp.content, "hello");
