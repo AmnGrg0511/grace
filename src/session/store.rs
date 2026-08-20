@@ -7,6 +7,7 @@
 
 use crate::util::{AgentError, Result};
 use crate::message::{Message, Role};
+use crate::transport::TokenUsage;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
@@ -39,6 +40,12 @@ impl SessionStore {
             CREATE TABLE IF NOT EXISTS session_titles (
                 session_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS session_usage (
+                session_id TEXT PRIMARY KEY,
+                prompt_tokens INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                 content, session_id UNINDEXED, content='messages', content_rowid='id'
@@ -250,6 +257,57 @@ impl SessionStore {
         }
         Ok(out)
     }
+
+    /// Persist the provider's measured token usage for a session — the
+    /// "how full is the window" number that survives restarts so a resumed
+    /// session's status bar starts from the real count instead of an
+    /// estimate (which made it look like usage jumped on the first turn).
+    /// Upserts by session id: a newer turn's usage replaces the older one.
+    pub fn save_usage(&self, session_id: &str, usage: TokenUsage) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO session_usage (session_id, prompt_tokens, completion_tokens, total_tokens)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     prompt_tokens = excluded.prompt_tokens,
+                     completion_tokens = excluded.completion_tokens,
+                     total_tokens = excluded.total_tokens",
+                (
+                    session_id,
+                    usage.prompt_tokens as i64,
+                    usage.completion_tokens as i64,
+                    usage.total_tokens as i64,
+                ),
+            )
+            .map_err(|e| AgentError::Tool(format!("save usage: {e}")))?;
+        Ok(())
+    }
+
+    /// The last measured usage saved for a session, if any. `None` when the
+    /// session never produced a provider-reported count (brand-new session,
+    /// or a provider that doesn't report usage).
+    pub fn load_usage(&self, session_id: &str) -> Result<Option<TokenUsage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT prompt_tokens, completion_tokens, total_tokens
+                 FROM session_usage WHERE session_id = ?1",
+            )
+            .map_err(|e| AgentError::Tool(format!("prepare load usage: {e}")))?;
+        let mut rows = stmt
+            .query_map([session_id], |row| {
+                Ok(TokenUsage {
+                    prompt_tokens: row.get::<_, i64>(0)? as u64,
+                    completion_tokens: row.get::<_, i64>(1)? as u64,
+                    total_tokens: row.get::<_, i64>(2)? as u64,
+                })
+            })
+            .map_err(|e| AgentError::Tool(format!("query load usage: {e}")))?;
+        match rows.next() {
+            Some(r) => r.map(Some).map_err(|e| AgentError::Tool(format!("row: {e}"))),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +337,44 @@ mod tests {
 
         // A different session id must not see s1's history.
         assert!(store.load("s2").unwrap().is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn usage_survives_a_reopen_and_upserts_in_place() {
+        let path = scratch_db("usage");
+        let _ = std::fs::remove_file(&path);
+        let store = SessionStore::open(&path).unwrap();
+
+        // Nothing saved yet → None, not Some(zero).
+        assert!(store.load_usage("s1").unwrap().is_none());
+
+        let first = TokenUsage {
+            prompt_tokens: 900,
+            completion_tokens: 40,
+            total_tokens: 940,
+        };
+        store.save_usage("s1", first).unwrap();
+        assert_eq!(store.load_usage("s1").unwrap(), Some(first));
+
+        // A newer turn replaces the older count (upsert, not accumulate).
+        let second = TokenUsage {
+            prompt_tokens: 1_200,
+            completion_tokens: 55,
+            total_tokens: 1_255,
+        };
+        store.save_usage("s1", second).unwrap();
+        assert_eq!(store.load_usage("s1").unwrap(), Some(second));
+
+        // Reopen the same db file → the count is durable across a restart,
+        // which is the whole point (resume shouldn't fall back to an estimate).
+        drop(store);
+        let reopened = SessionStore::open(&path).unwrap();
+        assert_eq!(reopened.load_usage("s1").unwrap(), Some(second));
+
+        // Sessions are independent: s2 never had usage recorded.
+        assert!(reopened.load_usage("s2").unwrap().is_none());
 
         let _ = std::fs::remove_file(&path);
     }

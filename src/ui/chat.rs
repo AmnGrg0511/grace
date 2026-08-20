@@ -134,8 +134,13 @@ pub fn run_chat(
     let mut cached_context_window = crate::config::settings::Settings::load().default_context_window;
     // The provider's token count from the last completed turn — the status
     // line's context bar prefers this real number over the local estimate.
-    // `None` until the first turn lands one (or the provider omits usage).
-    let mut last_usage: Option<crate::transport::TokenUsage> = None;
+    // Seeded from the session store so a resumed session starts at the real
+    // count instead of an estimate that "jumps" once the first turn lands a
+    // provider-measured number. `None` for a brand-new session or a provider
+    // that omits usage.
+    let mut last_usage: Option<crate::transport::TokenUsage> = current_session
+        .as_deref()
+        .and_then(|sid| sessions.load_usage(sid).ok().flatten());
 
     let history_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -240,7 +245,7 @@ pub fn run_chat(
                 continue;
             }
             Some("session") => {
-                handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills);
+                handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills, &mut last_usage);
                 continue;
             }
             Some("verbose") => {
@@ -285,6 +290,13 @@ pub fn run_chat(
             compression_config,
             verbose,
         );
+        // Persist the provider's real count so a later resume of this session
+        // starts from it (see the startup seed above) instead of an estimate.
+        if let (Some(sid), Some(usage)) = (current_session.as_deref(), last_usage) {
+            if let Err(e) = sessions.save_usage(sid, usage) {
+                println!("warning: could not persist usage: {e}");
+            }
+        }
     }
 }
 
@@ -512,6 +524,7 @@ fn handle_session_command(
     session_lock: &mut Option<crate::session::SessionLock>,
     system_override: Option<&str>,
     skills: &crate::skill::SkillStore,
+    last_usage: &mut Option<crate::transport::TokenUsage>,
 ) {
     // The same assembly path as startup (`config::build_system_prompt`): the
     // `--system` override is honored, durable facts are appended, and a
@@ -595,6 +608,9 @@ fn handle_session_command(
             *current_session = Some(new_id.clone());
             *session_lock = crate::session::SessionLock::acquire(&new_id).ok();
             reader.set_history_scope(Some(&new_id));
+            // A brand-new session has no measured usage yet — the status bar
+            // falls back to the estimate until the first turn reports one.
+            *last_usage = None;
             println!("started a fresh session.");
         }
         Ok(n) if n >= 1 && n <= session_list.len() => {
@@ -623,6 +639,11 @@ fn handle_session_command(
                     *current_session = Some(sid.clone());
                     *session_lock = crate::session::SessionLock::acquire(sid).ok();
                     reader.set_history_scope(Some(sid));
+                    // Pick up the switched-to session's own measured usage so
+                    // the status bar doesn't keep showing the outgoing
+                    // session's count (or an estimate) for a session that has
+                    // real usage on record.
+                    *last_usage = sessions.load_usage(sid).ok().flatten();
                     let label = titles.get(sid).cloned().unwrap_or_else(|| sid.clone());
                     println!("switched to session \"{label}\" ({} messages loaded).", messages.len());
                 }
