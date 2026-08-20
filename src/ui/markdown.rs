@@ -212,7 +212,14 @@ pub fn render_terminal_width(md: &str, skin: &Skin, color: bool, width: Option<u
                 }
                 TagEnd::CodeBlock => {
                     if !code_buf.is_empty() {
-                        out.push_str(&render_code_block(&code_buf, &code_lang, ss, theme, &gold));
+                        out.push_str(&render_code_block(
+                            &code_buf,
+                            &code_lang,
+                            ss,
+                            theme,
+                            &gold,
+                            width,
+                        ));
                     }
                     in_code = false;
                     code_lang.clear();
@@ -447,12 +454,17 @@ fn heading_ansi(skin: &Skin) -> String {
 }
 
 /// Render a fenced code block with syntax highlighting and a content-width box.
+///
+/// A single very long line (e.g. a pasted command) would otherwise stretch the
+/// box across the whole terminal. When a terminal `width` is known, the box is
+/// capped to it and long lines are wrapped to fit, so the box stays on-screen.
 fn render_code_block(
     code: &str,
     lang: &str,
     ss: &SyntaxSet,
     theme: &syntect::highlighting::Theme,
     _gold: &str,
+    width: Option<usize>,
 ) -> String {
     let syntax = ss
         .find_syntax_by_token(lang.trim())
@@ -461,8 +473,10 @@ fn render_code_block(
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     let lines: Vec<&str> = code.lines().collect();
-    let max_len = lines.iter().map(|l| display_width(l)).max().unwrap_or(0);
-    let box_width = max_len.max(20) + 2;
+    let natural = lines.iter().map(|l| display_width(l)).max().unwrap_or(0);
+    // The box has two border columns plus two inner padding columns.
+    let cap = width.map(|w| w.saturating_sub(4)).unwrap_or(usize::MAX);
+    let box_width = natural.min(cap).max(20) + 2;
 
     let mut out = String::new();
 
@@ -474,24 +488,31 @@ fn render_code_block(
     out.push_str(RESET);
 
     for line in &lines {
-        let ranges = highlighter.highlight_line(line, ss).unwrap_or_default();
-        let visible_len = display_width(line);
-        let pad = box_width.saturating_sub(visible_len + 2);
+        let wrapped: Vec<String> = if display_width(line) <= box_width.saturating_sub(2) {
+            vec![(*line).to_string()]
+        } else {
+            wrap_line(line, box_width.saturating_sub(2))
+        };
+        for piece in &wrapped {
+            let ranges = highlighter.highlight_line(piece, ss).unwrap_or_default();
+            let visible_len = display_width(piece);
+            let pad = box_width.saturating_sub(visible_len + 2);
 
-        out.push_str(DIM);
-        out.push_str("│ ");
-        out.push_str(RESET);
-        for (style, text) in &ranges {
-            let color = syntect_style_to_ansi(*style);
-            out.push_str(&color);
-            out.push_str(text);
+            out.push_str(DIM);
+            out.push_str("│ ");
+            out.push_str(RESET);
+            for (style, text) in &ranges {
+                let color = syntect_style_to_ansi(*style);
+                out.push_str(&color);
+                out.push_str(text);
+                out.push_str(RESET);
+            }
+            out.push_str(&" ".repeat(pad));
+            out.push_str(DIM);
+            out.push_str(" │");
+            out.push('\n');
             out.push_str(RESET);
         }
-        out.push_str(&" ".repeat(pad));
-        out.push_str(DIM);
-        out.push_str(" │");
-        out.push('\n');
-        out.push_str(RESET);
     }
 
     out.push_str(DIM);
@@ -883,7 +904,7 @@ mod tests {
         let gold = code_color(&crate::ui::skin::SOLARIS);
 
         let code = "fn main() {\n    println!(\"hi\");\n}";
-        let rendered = render_code_block(code, "rust", &ss, theme, &gold);
+        let rendered = render_code_block(code, "rust", &ss, theme, &gold, None);
         assert!(rendered.contains('┌'));
         assert!(rendered.contains('└'));
         assert!(rendered.contains('│'));
@@ -908,7 +929,7 @@ mod tests {
                     |\n\
                     |shout(\"hi\");              // ✅ literal\n\
                     |shout(&my_string);        // ✅ &String auto-derefs to &str";
-        let rendered = render_code_block(code, "rust", &ss, theme, &gold);
+        let rendered = render_code_block(code, "rust", &ss, theme, &gold, None);
 
         let widths: Vec<usize> = rendered
             .lines()
@@ -920,6 +941,42 @@ mod tests {
             widths.iter().max(),
             widths.iter().min(),
             "box rows must all be the same display width: {rendered:?} widths={widths:?}"
+        );
+    }
+
+    #[test]
+    fn code_block_with_a_huge_single_line_wraps_to_the_terminal_width() {
+        // A one-line code block the length of a pasted command used to draw a
+        // box spanning the whole terminal.  With a known width the box must be
+        // capped to it and the line wrapped, so every row fits on-screen.
+        let ss = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+        let theme = &ts.themes["base16-ocean.dark"];
+        let gold = code_color(&crate::ui::skin::SOLARIS);
+
+        let long = "grace --remember \"On 2026-08-20 the model was observed fabricating tool-call results as plain text when prompted for repeated tool calls; verify filesystem claims with a fresh call.\"";
+        assert!(display_width(long) > 80, "fixture must exceed the cap");
+        let rendered = render_code_block(long, "sh", &ss, theme, &gold, Some(80));
+
+        let widths: Vec<usize> = rendered
+            .lines()
+            .map(display_width)
+            .filter(|&w| w > 0)
+            .collect();
+        assert!(!widths.is_empty(), "expected a wrapped box: {rendered:?}");
+        assert_eq!(
+            widths.iter().max(),
+            widths.iter().min(),
+            "wrapped box rows must all match: {rendered:?} widths={widths:?}"
+        );
+        assert!(
+            widths[0] <= 80,
+            "box must not exceed the terminal width: {} > 80 ({rendered:?})",
+            widths[0]
+        );
+        assert!(
+            rendered.lines().count() > 3,
+            "a wrapped single line must produce extra content rows: {rendered:?}"
         );
     }
 
