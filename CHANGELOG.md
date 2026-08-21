@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.3.5
+
+**Added**
+- `/readonly [on|off]` — a shared read-only posture that hides write,
+  edit, bash, and delegate from the model's tool list and refuses them
+  if attempted (covering delegated sub-agents); the idle status line
+  shows an `[RO]` badge while active.
+- `/jump` — context rewind within the current session: pick a message
+  from a transcript picker and everything after it is dropped from the
+  session store (FTS kept in sync) and the live transcript.
+- A dim thinking spinner (`⠙ thinking 0:07`, braille frames at 100 ms)
+  renders while the model is silent between turns, on the TTY only;
+  piped output is byte-identical to before.
+
+**Fixed**
+- Ctrl-C during the silence before the first streamed token aborted
+  nothing — the turn ran to completion and only the next input was
+  affected. The stream read is now interruptible, so Ctrl-C ends the
+  turn in well under a second and the prompt recovers cleanly.
+- The idle status line could wrap onto the prompt row when model name
+  plus context bar exceeded the terminal width; it is now capped to one
+  row.
+
 ## v0.3.4
 
 **Fixed**
