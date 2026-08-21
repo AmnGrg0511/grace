@@ -256,7 +256,7 @@ pub fn run_chat(
                 continue;
             }
             Some("skin") => {
-                handle_skin_command(rest, &mut skin, &mut reader);
+                handle_skin_command(rest, &mut skin);
                 reader.set_skin(skin);
                 continue;
             }
@@ -1103,10 +1103,18 @@ mod spinner_tests {
 /// `/skin` (interactive picker, same as `--select-skin`) or `/skin <name>`
 /// (direct switch) mid-chat. Session-only — use `--select-skin` to persist
 /// a default across runs.
-fn handle_skin_command(arg: &str, skin: &mut Skin, reader: &mut LineReader) {
+fn handle_skin_command(arg: &str, skin: &mut Skin) {
     let names = crate::ui::skin::all_names();
     let picked = if arg.is_empty() {
-        match pick_skin_interactive(&names, reader) {
+        let items: Vec<crate::ui::picker::Pick> = names
+            .iter()
+            .map(|n| crate::ui::picker::Pick {
+                id: n.clone(),
+                label: n.clone(),
+                sublabel: None,
+            })
+            .collect();
+        match crate::ui::picker::pick(&items, skin, "switch to a skin") {
             Some(n) => n,
             None => return,
         }
@@ -1277,9 +1285,9 @@ fn handle_session_command(
     }
 }
 
-/// Shared skin list+preview+select flow, identical presentation to
-/// `--select-skin` so muscle memory carries over between startup and
-/// mid-chat. Returns `None` on unparsable/EOF input (no-op).
+/// Skin list+preview+select flow for the startup wizard (`--select-skin`),
+/// where the multi-line color preview is worth its screen space. The mid-chat
+/// `/skin` uses the shared picker instead.
 pub fn pick_skin_interactive(names: &[String], reader: &mut LineReader) -> Option<String> {
     println!("\navailable skins:\n");
     for (i, name) in names.iter().enumerate() {
