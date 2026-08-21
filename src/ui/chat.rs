@@ -278,7 +278,6 @@ pub fn run_chat(
             &interrupted,
             compression_config,
             verbose,
-            cached_context_window,
         );
         // Persist the provider's real count so a later resume of this session
         // starts from it (see the startup seed above) instead of an estimate.
@@ -771,286 +770,6 @@ fn pick_model_for_endpoint(
     Some(models[idx].clone())
 }
 
-/// The status line text shared by the idle line (printed each loop) and
-/// the turn-live line (the 1 Hz ticker) so the two can't drift apart:
-/// `· model · [context bar] · elapsed`.
-fn status_line_content(
-    model: &str,
-    count: usize,
-    measured: bool,
-    window: Option<u32>,
-    trigger_fraction: f32,
-    started: std::time::Instant,
-) -> String {
-    let secs = started.elapsed().as_secs();
-    let time = if secs >= 3600 {
-        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-    } else {
-        format!("{}:{:02}", secs / 60, secs % 60)
-    };
-    let bar = context_bar(count, measured, window, trigger_fraction);
-    format!("· {model} · {bar} · {time}")
-}
-
-/// The 1 Hz turn-live status line: a writer thread that keeps ONE line —
-/// the terminal's last line — current while a turn is running, ticking
-/// through the model's silence (thinking, tool execution, compression).
-///
-/// The stream path never touches it: every event write goes through
-/// [`note_write`](LiveStatus::note_write), which erases the live line
-/// first under the same lock the ticker holds while rendering, so the two
-/// can never interleave bytes. The live line is never newline-terminated,
-/// so it always sits exactly on the cursor's line and needs no cursor
-/// travel to replace — only column-home + clear-line. Piped (non-TTY)
-/// output never sees it at all: everything stays append-only there.
-struct LiveStatusCore {
-    stop: bool,
-    /// True while the line directly above the cursor is this ticker's live
-    /// status line (newline-terminated).
-    live_above: bool,
-    /// True while the cursor sits at column 0 of an empty line. The claim
-    /// path (writing the live line for the first time after an event) may
-    /// only start there; otherwise it must break the line first.
-    at_line_start: bool,
-    /// Last rendered text — the rewrite is skipped while it is unchanged so
-    /// the visible tick stays 1 Hz (the seconds field).
-    prev_text: String,
-    model: String,
-    count: usize,
-    window: Option<u32>,
-    trigger_fraction: f32,
-    started: std::time::Instant,
-    dim: String,
-}
-
-pub(crate) struct LiveStatus {
-    core: std::sync::Arc<std::sync::Mutex<LiveStatusCore>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-/// Holds the core lock for the duration of one event write, so the ticker
-/// thread can never interleave its rewrite inside a multi-line event. Drop
-/// is the conservative fallback (treats the write as line-breaking) in case
-/// `end_write` is skipped by an early return.
-pub(crate) struct LiveWriteGuard<'a> {
-    core: std::sync::MutexGuard<'a, LiveStatusCore>,
-}
-
-impl Drop for LiveWriteGuard<'_> {
-    fn drop(&mut self) {
-        // Conservative: an unterminated write is possible, so the next claim
-        // breaks the line first. (Normal end_write reports the exact state.)
-        self.core.at_line_start = false;
-    }
-}
-
-impl LiveStatus {
-    const UP: &'static str = "\x1b[F";
-    const CLR: &'static str = "\x1b[2K";
-
-    /// Arm the ticker. `None` (and a no-op downstream) whenever stdout is
-    /// not a terminal — cursor control is a TTY privilege.
-    pub(crate) fn start(
-        model: String,
-        count: usize,
-        window: Option<u32>,
-        trigger_fraction: f32,
-        skin: &Skin,
-    ) -> Option<Self> {
-        use std::io::IsTerminal;
-        if !std::io::stdout().is_terminal() {
-            return None;
-        }
-        let dim = if no_color() {
-            String::new()
-        } else {
-            skin.style(Role::ToolDim).to_string()
-        };
-        let core = std::sync::Arc::new(std::sync::Mutex::new(LiveStatusCore {
-            stop: false,
-            live_above: false,
-            // The input echo that ended the prompt carried a newline, so the
-            // cursor starts on a fresh empty line.
-            at_line_start: true,
-            prev_text: String::new(),
-            model,
-            count,
-            window,
-            trigger_fraction,
-            started: std::time::Instant::now(),
-            dim,
-        }));
-        let shared = core.clone();
-        let thread = std::thread::spawn(move || {
-            use std::io::Write;
-            loop {
-                // 200 ms polling, not 1000: the turn-end join must not wait
-                // out a full tick; the visible pace stays 1 Hz because the
-                // rewrite only fires when the rendered text changed.
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let mut core = shared.lock().unwrap();
-                if core.stop {
-                    break;
-                }
-                let text = Self::render(&core);
-                if core.live_above && core.prev_text == text {
-                    continue; // same second — repaint would only flicker
-                }
-                {
-                    let mut out = std::io::stdout().lock();
-                    if core.live_above {
-                        // Redraw in place: the cursor sits on the empty line
-                        // BELOW the live one (the previous write ended \n).
-                        let _ = write!(out, "{}{}", Self::UP, Self::CLR);
-                    } else if !core.at_line_start {
-                        // A partial (newline-less) fragment owns the rest of
-                        // this line — break it first so the live line never
-                        // glues onto other output.
-                        let _ = writeln!(out);
-                    }
-                    let _ = writeln!(out, "{text}");
-                    let _ = out.flush();
-                }
-                core.live_above = true;
-                core.at_line_start = true;
-                core.prev_text = text;
-            }
-        });
-        Some(Self {
-            core,
-            thread: Some(thread),
-        })
-    }
-
-    fn render(core: &LiveStatusCore) -> String {
-        let window = core
-            .window
-            .or_else(|| crate::config::settings::context_window_for(&core.model));
-        let line = status_line_content(
-            &core.model,
-            core.count,
-            false,
-            window,
-            core.trigger_fraction,
-            core.started,
-        );
-        if core.dim.is_empty() {
-            line
-        } else {
-            format!("{}{line}{}", core.dim, reset())
-        }
-    }
-
-    /// Begin an event write: erases the live line (when we own it) so the
-    /// event lands on a clean line, and blocks the ticker for the write's
-    /// duration. Call
-    /// [`end_write`](LiveStatus::end_write) when the write is done.
-    pub(crate) fn begin_write(&self) -> LiveWriteGuard<'_> {
-        use std::io::Write;
-        let mut core = self.core.lock().unwrap();
-        if !core.stop && core.live_above {
-            core.live_above = false;
-            core.prev_text.clear();
-            let mut out = std::io::stdout().lock();
-            let _ = write!(out, "{}{}", Self::UP, Self::CLR);
-            let _ = out.flush();
-        }
-        LiveWriteGuard { core }
-    }
-
-    /// Report how the guarded event write left the cursor: at column 0 of an
-    /// empty line, or mid-line (a raw fragment that was not newline-
-    /// terminated). The next claim uses this to decide about the break.
-    pub(crate) fn end_write(&self, mut guard: LiveWriteGuard<'_>, at_line_start: bool) {
-        guard.core.at_line_start = at_line_start;
-    }
-
-    /// Grow the live context estimate from passing traffic, so the bar
-    /// moves during the turn instead of freezing at the arm-time count.
-    pub(crate) fn extend(&self, event: &crate::core::lifecycle::AgentEvent<'_>) {
-        let add = match event {
-            crate::core::lifecycle::AgentEvent::ContentFragment(f) => estimate_tokens(f),
-            crate::core::lifecycle::AgentEvent::ToolCallEnd { result, .. } => {
-                estimate_tokens(result)
-            }
-            _ => 0,
-        };
-        if add > 0 {
-            let mut core = self.core.lock().unwrap();
-            core.count += add;
-        }
-    }
-
-    /// Stop the thread and clear the live line so the turn's closing
-    /// output (answer, next status line) starts on a clean line.
-    pub(crate) fn finish(&mut self) {
-        use std::io::Write;
-        {
-            let mut core = self.core.lock().unwrap();
-            if core.live_above {
-                core.live_above = false;
-                core.prev_text.clear();
-                let mut out = std::io::stdout().lock();
-                let _ = write!(out, "{}{}", Self::UP, Self::CLR);
-                let _ = out.flush();
-                core.at_line_start = true;
-            }
-            core.stop = true;
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-/// Whether one event's terminal output leaves the cursor at the start of an
-/// empty line. Everything except the raw (non-colored) stream fragment
-/// newline-terminates its output; a raw fragment may end mid-line.
-pub(crate) fn event_ends_at_line_start(
-    event: &crate::core::lifecycle::AgentEvent<'_>,
-    disable_color: bool,
-) -> bool {
-    match event {
-        crate::core::lifecycle::AgentEvent::ContentFragment(f) if disable_color => {
-            f.is_empty() || f.ends_with('\n')
-        }
-        _ => true,
-    }
-}
-
-impl Drop for LiveStatus {
-    fn drop(&mut self) {
-        // A turn that returns early (interrupt, error) must not leak the
-        // ticker thread or leave a half-line on screen.
-        self.finish();
-    }
-}
-
-#[cfg(test)]
-mod status_line_tests {
-    use super::*;
-
-    #[test]
-    fn the_idle_and_live_lines_share_one_format() {
-        let started = std::time::Instant::now();
-        let line = status_line_content(
-            "gpt-4o",
-            4_000,
-            false,
-            Some(10_000),
-            0.75,
-            started,
-        );
-        // `· model · [context bar] · elapsed`. Heuristic count (measured=
-        // false) marks the percent with `~`; a fresh start reads 0:00.
-        assert!(
-            line.starts_with("· gpt-4o · [███░░░░░] ~40% · "),
-            "unexpected line: {line}"
-        );
-        assert!(line.ends_with("0:00"), "unexpected line: {line}");
-    }
-}
-
 /// `/skin` (interactive picker, same as `--select-skin`) or `/skin <name>`
 /// (direct switch) mid-chat. Session-only — use `--select-skin` to persist
 /// a default across runs.
@@ -1272,7 +991,6 @@ pub fn run_one_chat_turn(
     interrupted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     compression_config: &ContextCompressionConfig,
     verbose: bool,
-    cached_context_window: Option<u32>,
 ) -> Option<crate::transport::TokenUsage> {
     // Snapshot turn count BEFORE appending — drives auto-(re)titling below.
     // History alternates user/assistant, so history_len/2 is the 0-based
@@ -1294,35 +1012,11 @@ pub fn run_one_chat_turn(
     // Clear any interrupt latched from a previous turn before starting a new
     // one — otherwise a stale Ctrl-C would abort every turn from here on.
     interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
-    // 1 Hz live status line while the turn runs (TTY only; a no-op on piped
-    // output). Armed now so it ticks through the first model call.
-    let mut live = LiveStatus::start(
-        transport
-            .current_model()
-            .unwrap_or_else(|| transport.name().to_string()),
-        {
-            use crate::util::tokens::TokenCounter;
-            crate::util::tokens::default_counter()
-                .count_messages(messages)
-                .max(1)
-        },
-        cached_context_window,
-        compression_config.normalized().trigger_fraction,
-        skin,
-    );
     let mut stream_state = StreamState::default();
     let outcome = {
         let mut sink =
             |event: crate::core::lifecycle::AgentEvent<'_>| {
-                if let Some(live) = &live {
-                    live.extend(&event);
-                    let at_start = event_ends_at_line_start(&event, no_color());
-                    let guard = live.begin_write();
-                    print_agent_event(event, skin, verbose, &mut stream_state);
-                    live.end_write(guard, at_start);
-                } else {
-                    print_agent_event(event, skin, verbose, &mut stream_state);
-                }
+                print_agent_event(event, skin, verbose, &mut stream_state);
             };
         crate::core::run_turn_with_options(
             transport,
@@ -1343,9 +1037,6 @@ pub fn run_one_chat_turn(
     // trailing line that arrived without a newline would otherwise stay
     // buffered.  Flush it now, before anything else is printed for the turn.
     // (The closure that held the mutable borrow has gone out of scope.)
-    if let Some(live) = &mut live {
-        live.finish();
-    }
     flush_stream_to_stdout(&mut stream_state, skin);
     match outcome {
         Ok(crate::core::TurnOutcome {
@@ -2099,6 +1790,13 @@ pub fn print_status_line(
     last_usage: Option<crate::transport::TokenUsage>,
     compression_config: &ContextCompressionConfig,
 ) {
+    let elapsed = started_at.elapsed();
+    let secs = elapsed.as_secs();
+    let time = if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    };
     let model = transport
         .current_model()
         .unwrap_or_else(|| transport.name().to_string());
@@ -2120,14 +1818,16 @@ pub fn print_status_line(
     // only known at runtime.
     let ctx = cached_context_window.or_else(|| crate::config::settings::context_window_for(&model));
 
-    let line = status_line_content(
-        &model,
+    // `normalized()` like the compressor uses, so an out-of-range fraction
+    // in the config file can't make the line and the trigger disagree.
+    let bar = context_bar(
         count,
         measured,
         ctx,
         compression_config.normalized().trigger_fraction,
-        started_at,
     );
+
+    let line = format!("· {model} · {bar} · {time}");
     if no_color() {
         println!("{line}");
     } else {
@@ -2162,7 +1862,7 @@ fn context_bar(count: usize, measured: bool, ctx: Option<u32>, trigger_fraction:
             let pct = ((count as f64) / (limit as f64) * 100.0) as usize;
             let filled = (pct * 8 / 100).min(8);
             let empty = 8 - filled;
-            format!("[{}] {approx}{pct}%", "█".repeat(filled) + &"░".repeat(empty))
+            format!("[{}] {pct}%", "█".repeat(filled) + &"░".repeat(empty))
         }
         None => {
             // No trustworthy window: show the running count and the point at
