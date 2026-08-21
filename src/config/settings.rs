@@ -35,6 +35,10 @@ pub struct Settings {
     /// loadable.
     #[serde(default)]
     pub endpoints: Vec<Endpoint>,
+    /// Reasoning-effort hint for the configured model ("low", "medium",
+    /// "high"). `None` sends no `reasoning_effort` parameter at all.
+    #[serde(default)]
+    pub default_reasoning: Option<String>,
 }
 
 /// A named model endpoint — where `/model` can re-point the transport.

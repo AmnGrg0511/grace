@@ -433,6 +433,11 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
     // the value is what "advertised" means.
     config.request_timeout_secs = settings.request_timeout_secs;
     let transport: Rc<dyn crate::transport::ProviderTransport> = Rc::from(config.build_transport()?);
+    // The persisted reasoning-effort hint rides along at startup, same as the
+    // model and endpoint themselves.
+    if let Some(level) = settings.default_reasoning.clone() {
+        transport.set_reasoning(Some(&level));
+    }
 
     // Seed the default skills into ~/.grace/skills on first run.
     let skills_root = skills_dir

@@ -91,6 +91,9 @@ pub struct HttpTransport {
     /// and the provider genuinely does not report one.
     #[allow(clippy::option_option)]
     context_window: std::cell::RefCell<Option<Option<u32>>>,
+    /// Reasoning-effort hint ("low"/"medium"/"high") sent as
+    /// `reasoning_effort` on chat requests; `None` sends nothing.
+    reasoning_effort: std::cell::RefCell<Option<String>>,
 }
 
 /// The per-request timeout for provider calls: the configured
@@ -137,6 +140,7 @@ impl HttpTransport {
             model: std::cell::RefCell::new(model.into()),
             chat_path: String::from("/chat/completions"),
             context_window: std::cell::RefCell::new(None),
+            reasoning_effort: std::cell::RefCell::new(None),
         }
     }
 
@@ -239,6 +243,9 @@ impl ProviderTransport for HttpTransport {
             body["tools"] = tools_to_json(tools);
             body["tool_choice"] = Value::String("auto".to_string());
         }
+        if let Some(effort) = self.reasoning_effort.borrow().as_deref() {
+            body["reasoning_effort"] = json!(effort);
+        }
 
         let parsed = self.send_with_retry(&body)?;
 
@@ -282,6 +289,14 @@ impl ProviderTransport for HttpTransport {
         // swap mid-chat must not keep budgeting against the old model's
         // (possibly 10x larger) window.
         *self.context_window.borrow_mut() = None;
+    }
+
+    fn set_reasoning(&self, level: Option<&str>) {
+        *self.reasoning_effort.borrow_mut() = level.map(str::to_string);
+    }
+
+    fn current_reasoning(&self) -> Option<String> {
+        self.reasoning_effort.borrow().clone()
     }
 
     fn current_model(&self) -> Option<String> {

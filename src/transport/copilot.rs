@@ -263,6 +263,8 @@ pub struct CopilotTransport {
     oauth_token: String,
     session: RefCell<Option<SessionToken>>,
     model: RefCell<String>,
+    /// Reasoning-effort hint sent as `reasoning_effort`; `None` sends nothing.
+    reasoning_effort: RefCell<Option<String>>,
 }
 
 impl CopilotTransport {
@@ -277,6 +279,7 @@ impl CopilotTransport {
             oauth_token: oauth_token.into(),
             session: RefCell::new(None),
             model: RefCell::new(model.into()),
+            reasoning_effort: RefCell::new(None),
         }
     }
 
@@ -338,6 +341,9 @@ impl ProviderTransport for CopilotTransport {
             "messages": msg_json,
             "temperature": 0.0,
         });
+        if let Some(effort) = self.reasoning_effort.borrow().as_deref() {
+            body["reasoning_effort"] = serde_json::json!(effort);
+        }
         if !tools.is_empty() {
             body["tools"] = crate::transport::tools_to_json(tools);
             body["tool_choice"] = Value::String("auto".to_string());
@@ -407,6 +413,14 @@ impl ProviderTransport for CopilotTransport {
 
     fn set_model(&self, model: &str) {
         *self.model.borrow_mut() = model.to_string();
+    }
+
+    fn set_reasoning(&self, level: Option<&str>) {
+        *self.reasoning_effort.borrow_mut() = level.map(str::to_string);
+    }
+
+    fn current_reasoning(&self) -> Option<String> {
+        self.reasoning_effort.borrow().clone()
     }
 
     fn current_model(&self) -> Option<String> {

@@ -132,6 +132,17 @@ pub trait ProviderTransport {
         None
     }
 
+    /// Set the reasoning-effort hint sent with chat requests — "low",
+    /// "medium" or "high"; `None` clears it (no parameter sent). Endpoints
+    /// that don't know the field ignore it; it stays off unless asked for.
+    fn set_reasoning(&self, _level: Option<&str>) {}
+
+    /// The active reasoning effort, so `/model`'s level stage can mark the
+    /// current choice as already-active.
+    fn current_reasoning(&self) -> Option<String> {
+        None
+    }
+
     /// Fetch available models from the provider. Defaults to empty — a
     /// transport that cannot enumerate models is not an error, it just has
     /// nothing to offer the model picker.
