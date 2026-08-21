@@ -852,7 +852,7 @@ fn hard_break(word: &str, limit: usize) -> Vec<String> {
     out
 }
 /// Strip ANSI escape sequences for width calculation.
-fn strip_ansi(s: &str) -> String {
+pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::new();
     let mut in_escape = false;
     for c in s.chars() {

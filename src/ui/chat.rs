@@ -200,10 +200,9 @@ pub fn run_chat(
         if text == "/" {
             let items: Vec<crate::ui::picker::Pick> = crate::ui::commands::SLASH_COMMANDS
                 .iter()
-                .map(|c| crate::ui::picker::Pick {
-                    id: c.name.to_string(),
-                    label: format!("/{}", c.name),
-                    sublabel: Some(c.summary.to_string()),
+                .map(|c| {
+                    crate::ui::picker::Pick::new(c.name, format!("/{}", c.name))
+                        .hint(c.summary)
                 })
                 .collect();
             if let Some(name) = crate::ui::picker::pick(&items, &skin, "pick a command (type to filter)")
@@ -228,10 +227,9 @@ pub fn run_chat(
                     many => {
                         let items: Vec<crate::ui::picker::Pick> = many
                             .iter()
-                            .map(|c| crate::ui::picker::Pick {
-                                id: c.name.to_string(),
-                                label: format!("/{}", c.name),
-                                sublabel: Some(c.summary.to_string()),
+                            .map(|c| {
+                                crate::ui::picker::Pick::new(c.name, format!("/{}", c.name))
+                                    .hint(c.summary)
                             })
                             .collect();
                         if let Some(name) = crate::ui::picker::pick(
@@ -726,16 +724,13 @@ fn pick_model_interactive(
     }
     let items: Vec<Pick> = endpoints
         .iter()
-        .map(|(name, base_url, model)| Pick {
-            id: format!("{name}\u{1}{base_url}"),
-            label: name.clone(),
-            sublabel: Some(format!("{model} · {}", short_url(base_url))),
+        .map(|(name, base_url, model)| {
+            Pick::new(format!("{name}\u{1}{base_url}"), name.clone())
+                .hint(format!("{model} · {}", short_url(base_url)))
         })
-        .chain(std::iter::once(Pick {
-            id: "\u{1}custom".to_string(),
-            label: "Custom OpenAI-compatible endpoint".to_string(),
-            sublabel: Some("type a base URL".to_string()),
-        }))
+        .chain(std::iter::once(
+            Pick::new("\u{1}custom", "Custom OpenAI-compatible endpoint").hint("type a base URL"),
+        ))
         .collect();
     let choice = pick(&items, skin, "pick an endpoint to switch to")?;
 
@@ -814,16 +809,17 @@ fn pick_model_for_endpoint(
     let items: Vec<Pick> = models
         .iter()
         .enumerate()
-        .map(|(i, (id, ctx))| Pick {
-            id: format!("m{i}"),
-            label: id.clone(),
-            sublabel: ctx.map(|w| format!("{}k ctx", w / 1000)),
+        .map(|(i, (id, ctx))| {
+            let row = Pick::new(format!("m{i}"), id.clone());
+            match ctx {
+                Some(w) => row.hint(format!("{}k ctx", w / 1000)),
+                None => row,
+            }
         })
-        .chain(std::iter::once(Pick {
-            id: "other".to_string(),
-            label: "other — type a model id".to_string(),
-            sublabel: None,
-        }))
+        .chain(std::iter::once(Pick::new(
+            "other",
+            "other — type a model id",
+        )))
         .collect();
     let choice = pick(&items, skin, "pick a model")?;
     if choice == "other" {
@@ -1116,11 +1112,7 @@ fn handle_skin_command(arg: &str, skin: &mut Skin) {
     let picked = if arg.is_empty() {
         let items: Vec<crate::ui::picker::Pick> = names
             .iter()
-            .map(|n| crate::ui::picker::Pick {
-                id: n.clone(),
-                label: n.clone(),
-                sublabel: None,
-            })
+            .map(|n| crate::ui::picker::Pick::new(n.clone(), n.clone()))
             .collect();
         match crate::ui::picker::pick(&items, skin, "switch to a skin") {
             Some(n) => n,
@@ -1213,11 +1205,7 @@ fn handle_session_command(
         *counts.entry(l.as_str()).or_insert(0) += 1;
     }
     let mut items: Vec<Pick> = Vec::with_capacity(session_list.len() + 1);
-    items.push(Pick {
-        id: "\u{1}new".to_string(),
-        label: "start a fresh session".to_string(),
-        sublabel: None,
-    });
+    items.push(Pick::new("\u{1}new", "start a fresh session"));
     for (i, sid) in session_list.iter().enumerate() {
         let label = &labels[i];
         let disambiguated = if counts.get(label.as_str()).copied().unwrap_or(0) > 1 {
@@ -1230,11 +1218,7 @@ fn handle_session_command(
         } else {
             ""
         };
-        items.push(Pick {
-            id: sid.clone(),
-            label: disambiguated,
-            sublabel: Some(format!("{sid}{lock_marker}")),
-        });
+        items.push(Pick::new(sid.clone(), disambiguated).hint(format!("{sid}{lock_marker}")));
     }
     let Some(choice) = pick(&items, skin, "switch to a session") else {
         println!("staying on current session.");
@@ -2291,13 +2275,16 @@ fn handle_jump_command(
                 crate::message::Role::Assistant => "assistant",
                 _ => "?",
             };
-            let snippet: String =
-                crate::util::truncate_utf8(&m.content.trim().replace('\n', " "), 60);
-            crate::ui::picker::Pick {
-                id: i.to_string(),
-                label: format!("{}) [{role}] {snippet}", i + 1),
-                sublabel: None,
-            }
+            // The renderer wraps and applies its own row budget, so the only
+            // cap here is a generous character bound to keep absurd messages
+            // from dominating the window; overflow is marked with `…`.
+            let flat = m.content.trim().replace('\n', " ");
+            let snippet = if flat.chars().count() > 240 {
+                format!("{}…", flat.chars().take(240).collect::<String>())
+            } else {
+                flat
+            };
+            crate::ui::picker::Pick::new(i.to_string(), format!("{}) [{role}] {snippet}", i + 1))
         })
         .collect();
     let Some(id) = crate::ui::picker::pick(&items, skin, "jump to (keeps this message, drops everything after)") else {

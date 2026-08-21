@@ -13,7 +13,6 @@
 //! cursor movement; the picker runs between turns, when the stream is idle.
 
 use crate::ui::skin::Skin;
-use crate::util::truncate_utf8;
 use std::io::{self, IsTerminal, Write};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -32,8 +31,62 @@ fn move_up(n: usize) -> String {
     format!("\x1b[{n}A")
 }
 
-/// How many rows of the filtered list are shown at once.
+/// How many entries of the filtered list are shown at once (an entry may
+/// occupy several physical rows).
 const WINDOW: usize = 9;
+
+/// The most physical rows one entry may occupy before its tail is cut with
+/// a bare ellipsis — a bound relative to the window so even a pathological
+/// entry can't push the frame taller than the screen.
+const MAX_ENTRY_LINES: usize = 7;
+
+/// Display width of `s`, ignoring ANSI escape sequences (rows mix plain
+/// text with skin-painted accents).
+fn visible_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    crate::ui::markdown::strip_ansi(s).width()
+}
+
+/// Greedy word wrap to a display-width budget; words longer than the budget
+/// are hard-broken at the boundary so no row ever wraps on its own (the
+/// redraw counts physical lines).
+pub fn wrap_words(text: &str, budget: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    if budget == 0 {
+        return vec![text.to_string()];
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let mut cur = String::new();
+        let mut w = 0usize;
+        for c in word.chars() {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if w + cw > budget && !cur.is_empty() {
+                chunks.push(std::mem::take(&mut cur));
+                w = 0;
+            }
+            cur.push(c);
+            w += cw;
+        }
+        if !cur.is_empty() {
+            chunks.push(cur);
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for chunk in chunks {
+        match lines.last_mut() {
+            Some(last) if visible_width(last) + 1 + visible_width(&chunk) <= budget => {
+                last.push(' ');
+                last.push_str(&chunk);
+            }
+            _ => lines.push(chunk),
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
 
 /// One selectable row (owned strings — callers build labels at runtime).
 /// `id` is returned on selection (stable, not display text); `label` is what
@@ -44,6 +97,46 @@ pub struct Pick {
     pub id: String,
     pub label: String,
     pub sublabel: Option<String>,
+    /// Shown but not selectable — the already-active choice (current skin,
+    /// current model, the session that's open right now). Navigation skips
+    /// over it and Enter on it does nothing.
+    pub disabled: bool,
+    /// The sublabel carries its own ANSI accent colors (e.g. a timestamp
+    /// painted differently from the title) — written verbatim instead of
+    /// being repainted with the row style. Verbatim sublabels render on one
+    /// line; keep them short.
+    pub sub_verbatim: bool,
+}
+
+impl Pick {
+    /// A plain, enabled row.
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Pick {
+            id: id.into(),
+            label: label.into(),
+            sublabel: None,
+            disabled: false,
+            sub_verbatim: false,
+        }
+    }
+
+    /// Attach a hint shown after the label.
+    pub fn hint(mut self, sub: impl Into<String>) -> Self {
+        self.sublabel = Some(sub.into());
+        self
+    }
+
+    /// Mark the row as the already-active choice.
+    pub fn disabled(mut self) -> Self {
+        self.disabled = true;
+        self
+    }
+
+    /// Let the sublabel carry its own paint (accent colors).
+    pub fn verbatim_sub(mut self) -> Self {
+        self.sub_verbatim = true;
+        self
+    }
 }
 
 /// Mutable filter/selection state of a [`pick`] run — split out so the
@@ -134,24 +227,61 @@ pub fn pick_step(
         return (PickOutcome::Continue, Vec::new());
     }
     state.sel = state.sel.min(visible.len() - 1);
+    // The already-active row is visible but dead: navigation steps over it
+    // and Enter refuses it, so "selecting the current skin" can never
+    // happen by accident.
+    let selectable = visible
+        .iter()
+        .enumerate()
+        .filter(|(_, &idx)| !items[idx].disabled)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
     match key {
-        PickKey::Up => {
-            state.sel = (state.sel + visible.len() - 1) % visible.len();
+        PickKey::Up if !selectable.is_empty() => {
+            let cur = nearest_selectable(&selectable, state.sel);
+            let pos = selectable.iter().position(|&i| i == cur).unwrap_or(0);
+            let prev = selectable[(pos + selectable.len() - 1) % selectable.len()];
+            state.sel = prev;
         }
-        PickKey::Down => {
-            state.sel = (state.sel + 1) % visible.len();
+        PickKey::Down if !selectable.is_empty() => {
+            let cur = nearest_selectable(&selectable, state.sel);
+            let pos = selectable.iter().position(|&i| i == cur).unwrap_or(0);
+            state.sel = selectable[(pos + 1) % selectable.len()];
         }
-        PickKey::Home => state.sel = 0,
-        PickKey::End => state.sel = visible.len() - 1,
-        PickKey::Enter => return (PickOutcome::Selected(visible[state.sel]), visible.clone()),
+        PickKey::Home if !selectable.is_empty() => state.sel = selectable[0],
+        PickKey::End if !selectable.is_empty() => state.sel = *selectable.last().unwrap(),
+        PickKey::Enter => {
+            if items[visible[state.sel]].disabled {
+                return (PickOutcome::Continue, visible.clone());
+            }
+            return (PickOutcome::Selected(visible[state.sel]), visible.clone());
+        }
         PickKey::Escape => return (PickOutcome::Cancelled, visible.clone()),
-        PickKey::Type(_) | PickKey::Backspace => {}
+        PickKey::Type(_) | PickKey::Backspace | PickKey::Up | PickKey::Down | PickKey::Home
+        | PickKey::End => {}
     }
     (PickOutcome::Continue, visible.clone())
 }
 
+/// The closest selectable position to `sel` — `sel` itself if it points at a
+/// live row (the common case), else the next one down, since filtering can
+/// leave the clamped cursor on a dead row.
+fn nearest_selectable(selectable: &[usize], sel: usize) -> usize {
+    if selectable.contains(&sel) {
+        sel
+    } else {
+        *selectable.iter().find(|&&i| i > sel).unwrap_or(&selectable[0])
+    }
+}
+
 /// Render one frame of the dropdown into `w`. Returns the number of lines
 /// written so the caller knows how many to clear before the next frame.
+///
+/// Rows are wrapped to the terminal width instead of cut: a long title or
+/// model id flows onto indented continuation lines. Only one thing is ever
+/// shortened, deliberately and with a bare ellipsis: an entry exceeding
+/// [`MAX_ENTRY_LINES`] rows. No "(truncated N bytes)" anywhere — pickers
+/// show text, not byte counts.
 fn render_frame(
     w: &mut dyn Write,
     items: &[Pick],
@@ -162,19 +292,15 @@ fn render_frame(
 ) -> usize {
     use crate::ui::skin::Role;
 
-    // The picker redraws its bounded region by counting *physical* lines, so
-    // a row must never wrap on the terminal. Labels are therefore truncated
-    // to what one line actually holds (resolved fresh per frame — the picker
-    // re-renders everything each key anyway, unlike the stream path which
-    // pins one width because committed bytes may not move). Facts and other
-    // user text used to be cut to a hardcoded 76 chars even on a 200-column
-    // terminal; now the row grows with the terminal.
+    // The picker redraws everything each key, unlike the stream path which
+    // pins one width because committed bytes may not move — re-resolving the
+    // width per frame is safe here.
     let width = crate::ui::markdown::terminal_width().unwrap_or(100);
-    // The sublabel is a short hint (a path, a count, "fact #N"); cap it low
-    // so the label — the primary content — gets the rest of the row.
-    let sub_max = 24.min(width.saturating_sub(12) / 2);
-    // Overhead: bullet + space + two-space gap to the sublabel.
-    let label_max = |has_sub: bool| width.saturating_sub(if has_sub { sub_max + 8 } else { 5 });
+    // Overhead per label row: bullet + space on the left, a small safety
+    // margin on the right so a rounding-wide glyph can never spill into a
+    // terminal wrap.
+    let label_budget = width.saturating_sub(6).max(20);
+    let sub_budget = label_budget.saturating_sub(2);
 
     let mut lines: Vec<String> = vec![format!("  {hint}")];
     if visible.is_empty() {
@@ -185,7 +311,7 @@ fn render_frame(
         return lines.len();
     }
 
-    // Window of at most WINDOW rows around the selection.
+    // Window of at most WINDOW entries around the selection.
     let total = visible.len();
     let start = if total <= WINDOW {
         0
@@ -196,19 +322,73 @@ fn render_frame(
     if start > 0 {
         lines.push("    …".into());
     }
-    for (rel, &idx) in visible[start..(start + WINDOW).min(total)].iter().enumerate() {
+    for rel in 0..WINDOW.min(total - start) {
         let i = start + rel;
-        let it = &items[idx];
-        let (bullet, row_style) = if i == state.sel {
+        let it = &items[visible[i]];
+        let selected = i == state.sel;
+        let (bullet, row_style) = if selected && it.disabled {
+            // Cursor parked on the active choice (only possible right after
+            // filtering): mark the dead state instead of letting Enter look
+            // broken.
+            ("·".to_string(), Role::ToolDim)
+        } else if selected {
             (skin.paint(Role::Prompt, "❯"), Role::Answer)
         } else {
             ("  ".to_string(), Role::ToolDim)
         };
-        let mut row = format!("{bullet} {}", truncate_utf8(&it.label, label_max(it.sublabel.is_some())));
+
+        let mut body = wrap_words(&it.label, label_budget);
+        let mut raw_tail: Option<String> = None;
         if let Some(sub) = it.sublabel.as_deref() {
-            row.push_str(&format!("  {}", truncate_utf8(sub, sub_max)));
+            if it.sub_verbatim {
+                if visible_width(sub) <= sub_budget {
+                    raw_tail = Some(sub.to_string());
+                } else {
+                    // Pathologically wide accent text degrades to plain
+                    // wrapped text rather than risking an overflowing row.
+                    body.extend(wrap_words(&crate::ui::markdown::strip_ansi(sub), sub_budget));
+                    raw_tail = None;
+                }
+            } else {
+                let mut sub_lines = wrap_words(sub, sub_budget);
+                let fits_inline = body.last().is_some_and(|last| {
+                    visible_width(last) + 2 + visible_width(&sub_lines[0]) <= label_budget
+                });
+                if fits_inline {
+                    if let Some(last) = body.last_mut() {
+                        last.push_str("  ");
+                        last.push_str(&sub_lines.remove(0));
+                    }
+                } else {
+                    for sl in sub_lines {
+                        body.push(format!("  {sl}"));
+                    }
+                }
+            }
         }
-        lines.push(skin.paint(row_style, &row));
+
+        // Per-entry row budget: keep the head, mark the cut with `…`.
+        if body.len() > MAX_ENTRY_LINES {
+            body.truncate(MAX_ENTRY_LINES - 1);
+            if let Some(last) = body.last_mut() {
+                let cut = visible_width(last).saturating_sub(1).max(1);
+                *last = format!("{}…", crate::util::truncate_utf8_display(last, cut));
+            }
+        }
+
+        for (n, bl) in body.iter().enumerate() {
+            let prefix = if n == 0 {
+                format!("{bullet} ")
+            } else {
+                "    ".to_string()
+            };
+            match raw_tail.as_ref().filter(|_| n + 1 == body.len()) {
+                Some(tail) => {
+                    lines.push(format!("{prefix}{}  {tail}", skin.paint(row_style, bl)));
+                }
+                None => lines.push(skin.paint(row_style, &format!("{prefix}{bl}"))),
+            }
+        }
     }
     if start + WINDOW < total {
         lines.push("    …".into());
@@ -345,22 +525,32 @@ fn map_event(ev: Event) -> Option<PickKey> {
 fn pick_plain(items: &[Pick], hint: &str) -> Option<String> {
     println!("\n{hint}");
     for (i, it) in items.iter().enumerate() {
-        let mut line = format!("  {}) {}", i + 1, it.label);
+        let marker = if it.disabled { " (current)" } else { "" };
+        let mut line = format!("  {}) {}{marker}", i + 1, it.label);
         if let Some(sub) = it.sublabel.as_deref() {
-            line.push_str(&format!("  {}", truncate_utf8(sub, 60)));
+            let plain = crate::ui::markdown::strip_ansi(sub);
+            line.push_str(&format!("  {}", crate::util::truncate_utf8_display(&plain, 60)));
         }
         println!("{line}");
     }
-    print!("select [number, or 0 to cancel]: ");
-    let _ = io::stdout().flush();
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
-        return None;
-    }
-    match line.trim().parse::<usize>() {
-        Ok(0) => None,
-        Ok(n) if (1..=items.len()).contains(&n) => Some(items[n - 1].id.clone()),
-        _ => None,
+    loop {
+        print!("select [number, or 0 to cancel]: ");
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).is_err() {
+            return None;
+        }
+        match line.trim().parse::<usize>() {
+            Ok(0) => return None,
+            Ok(n) if (1..=items.len()).contains(&n) => {
+                if items[n - 1].disabled {
+                    println!("that choice is already active.");
+                    continue;
+                }
+                return Some(items[n - 1].id.clone());
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -370,10 +560,10 @@ mod tests {
 
     fn items() -> Vec<Pick> {
         vec![
-            Pick { id: "solaris".into(), label: "solaris".into(), sublabel: Some("warm ambers".into()) },
-            Pick { id: "ocean".into(), label: "ocean".into(), sublabel: Some("cool blues".into()) },
-            Pick { id: "royal".into(), label: "royal".into(), sublabel: Some("deep purple".into()) },
-            Pick { id: "mono".into(), label: "mono".into(), sublabel: None },
+            Pick::new("solaris", "solaris").hint("warm ambers"),
+            Pick::new("ocean", "ocean").hint("cool blues"),
+            Pick::new("royal", "royal").hint("deep purple"),
+            Pick::new("mono", "mono"),
         ]
     }
 
@@ -415,36 +605,109 @@ mod tests {
     }
 
     #[test]
-    fn label_caps_scale_with_terminal_width() {
-        // A long label used to be cut at a hardcoded 76 chars even on a wide
-        // terminal; now the row budget grows with the width (and never wraps,
-        // because a wrapped row would break the line-counted redraw).
-        let long = "fact ".to_string() + &"x".repeat(200);
-        let items = vec![Pick {
-            id: "1".into(),
-            label: long.clone(),
-            sublabel: None,
-        }];
+    fn long_labels_wrap_instead_of_truncating() {
+        // A long label used to be cut at the row width; now it flows onto
+        // indented continuation rows, and nothing is ever cut with a byte
+        // count — the only shortening is the per-entry `…` row budget.
+        let long = format!("fact {} end", "x ".repeat(120));
+        let items = vec![Pick::new("1", long)];
         let visible = filter_items(&items, "");
         let state = PickState::default();
 
-        let render = || {
-            let mut out: Vec<u8> = Vec::new();
-            render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
-            String::from_utf8(out).unwrap()
-        };
+        let mut out: Vec<u8> = Vec::new();
+        render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
+        let text = strip_frames_ansi(&String::from_utf8(out).unwrap());
 
-        // On a 100-col fallback the label is cut to fit one row.
-        let narrow = render();
-        assert!(narrow.contains(&"x".repeat(90)), "narrow row too short: {narrow}");
-        assert!(!narrow.contains(&"x".repeat(96)), "narrow row must not wrap: {narrow}");
+        let body: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains('x') || l.contains("end"))
+            .collect();
+        assert!(body.len() > 1, "label must span several rows: {text:?}");
+        assert!(
+            text.lines()
+                .any(|l| strip_frames_ansi(l).trim_end().ends_with("end")),
+            "the tail must survive wrapping: {text:?}"
+        );
+        assert!(!text.contains("truncated"), "no byte-count markers: {text:?}");
+    }
 
-        // On a wide COLUMNS the same label gets far more room.
-        {
-            let _guard = crate::util::test_support::EnvVarGuard::set("COLUMNS", "240");
-            let wide = render();
-            assert!(wide.contains(&"x".repeat(200)), "wide row should keep more: {wide}");
+    #[test]
+    fn wrap_words_respects_display_width_and_hard_breaks_long_words() {
+        assert_eq!(wrap_words("one two three", 8), vec!["one two", "three"]);
+        // A single word longer than the budget is split, never dropped.
+        assert_eq!(wrap_words("abcdef", 3), vec!["abc", "def"]);
+        // Wide chars count as two columns.
+        assert_eq!(wrap_words("日本語テスト", 4), vec!["日本", "語テ", "スト"]);
+    }
+
+    #[test]
+    fn an_entry_taller_than_the_budget_is_cut_with_a_bare_ellipsis() {
+        let long = (0..200)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let items = vec![Pick::new("1", long)];
+        let visible = filter_items(&items, "");
+        let state = PickState::default();
+        let mut out: Vec<u8> = Vec::new();
+        render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
+        let plain = strip_frames_ansi(&String::from_utf8(out).unwrap());
+        let entry_rows = plain.lines().count().saturating_sub(2); // hint + footer
+        assert!(entry_rows <= MAX_ENTRY_LINES, "entry exceeded its row budget: {plain:?}");
+        assert!(plain.contains('…'), "the cut must be marked with an ellipsis: {plain:?}");
+    }
+
+    #[test]
+    fn navigation_skips_disabled_rows_and_enter_refuses_them() {
+        let mut items = items();
+        items[2].disabled = true; // royal is "current"
+        // From ocean (sel 1), Down lands on mono (3), never on royal (2).
+        let mut state = PickState { filter: String::new(), sel: 1 };
+        let mut visible = filter_items(&items, "");
+        let (o, _) = pick_step(&items, &mut state, &mut visible, PickKey::Down);
+        assert_eq!(o, PickOutcome::Continue);
+        assert_eq!(state.sel, 3);
+        // Filtering down to only the disabled row leaves Enter powerless.
+        let mut state = PickState::default();
+        let mut visible = filter_items(&items, "");
+        for k in [
+            PickKey::Type('r'),
+            PickKey::Type('o'),
+            PickKey::Type('y'),
+            PickKey::Type('a'),
+            PickKey::Type('l'),
+        ] {
+            let (_, v) = pick_step(&items, &mut state, &mut visible, k);
+            visible = v;
         }
+        assert_eq!(visible, vec![2]);
+        let (o, _) = pick_step(&items, &mut state, &mut visible, PickKey::Enter);
+        assert_eq!(o, PickOutcome::Continue, "the current choice must not be selectable");
+        // Navigation from a parked-on-dead cursor still reaches live rows.
+        let (_, _) = pick_step(&items, &mut state, &mut visible, PickKey::Down);
+        assert_ne!(state.sel, 2);
+    }
+
+    #[test]
+    fn a_verbatim_sublabel_keeps_accent_text_on_the_row() {
+        let accent = "\x1b[38;2;255;0;0m14:32\x1b[0m";
+        let items = vec![Pick::new("s1", "debug session").hint(accent).verbatim_sub()];
+        let visible = filter_items(&items, "");
+        let state = PickState::default();
+        let mut out: Vec<u8> = Vec::new();
+        render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
+        let raw = String::from_utf8(out).unwrap();
+        assert!(raw.contains("14:32"), "accent text present: {raw:?}");
+        let row = raw.lines().nth(1).unwrap();
+        assert!(
+            !strip_frames_ansi(row).contains('\x1b'),
+            "row must carry no torn escapes after stripping: {row:?}"
+        );
+    }
+
+    /// Escape stripper for frame assertions (rows are skin-painted).
+    fn strip_frames_ansi(s: &str) -> String {
+        crate::ui::markdown::strip_ansi(s)
     }
 
     #[test]
