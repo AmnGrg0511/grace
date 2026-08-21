@@ -272,6 +272,10 @@ pub fn run_chat(
                 handle_compact_command(messages, transport, compression_config, &skin);
                 continue;
             }
+            Some("dump") => {
+                handle_dump_command(messages, rest);
+                continue;
+            }
             Some("verbose") => {
                 verbose = !verbose;
                 println!(
@@ -2356,6 +2360,57 @@ fn handle_compact_command(
     }
 }
 
+/// `/dump [FILE]` — serialize the whole context (system prompt included, so
+/// the dump is a complete picture of what the model sees). With an argument
+/// it writes a file; without one it copies through the OSC52 clipboard
+/// escape, which needs no external clipboard binary and works over SSH —
+/// but only if the terminal permits it.
+fn handle_dump_command(messages: &[Message], arg: &str) {
+    if messages.iter().all(|m| m.role == crate::message::Role::System) {
+        println!("nothing to dump yet.");
+        return;
+    }
+    let mut text = String::new();
+    for m in messages {
+        let role = match m.role {
+            crate::message::Role::User => "user",
+            crate::message::Role::Assistant => "assistant",
+            crate::message::Role::Tool => "tool",
+            crate::message::Role::System => "system",
+        };
+        text.push_str(&format!("[{role}] {}\n\n", m.content));
+    }
+    if let Some(path) = arg.split_whitespace().next() {
+        match std::fs::write(path, &text) {
+            Ok(()) => println!("wrote {} bytes to {path}", text.len()),
+            Err(e) => println!("could not write {path}: {e}"),
+        }
+        return;
+    }
+    use std::io::IsTerminal as _;
+    if !std::io::stdout().is_terminal() {
+        println!("the clipboard needs a TTY — use /dump FILE instead.");
+        return;
+    }
+    // Terminals cap OSC52 payloads (tmux defaults to ~74 KB); beyond that,
+    // silently truncating or dropping is worse than pointing at /dump FILE.
+    let b64 = crate::util::base64_encode(text.as_bytes());
+    if b64.len() > 100_000 {
+        println!(
+            "context too large for the clipboard escape ({} KB encoded) — use /dump FILE.",
+            b64.len() / 1024
+        );
+        return;
+    }
+    use std::io::Write as _;
+    print!("\x1b]52;c;{b64}\x07");
+    let _ = std::io::stdout().flush();
+    println!(
+        "copied {} chars to the clipboard (OSC52 — nothing appeared if your terminal refuses it).",
+        text.chars().count()
+    );
+}
+
 #[cfg(test)]
 mod verbose_gate_tests {
     use super::should_show_tool_output;
@@ -2406,7 +2461,7 @@ mod slash_command_agreement_tests {
     /// G14), and a registry entry without a handler is a phantom. Update
     /// this constant whenever an arm in the dispatch match changes.
     const DISPATCHED: &[&str] = &[
-        "exit", "model", "skin", "session", "jump", "compact", "verbose", "readonly",
+        "exit", "model", "skin", "session", "jump", "compact", "dump", "verbose", "readonly",
     ];
 
     #[test]

@@ -59,6 +59,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "Compress context now (summary + drop old turns)",
     },
     SlashCommand {
+        name: "dump",
+        aliases: &[],
+        summary: "Copy the whole context to the clipboard; /dump FILE writes a file",
+    },
+    SlashCommand {
         name: "verbose",
         aliases: &[],
         summary: "Toggle tool-output visibility",
