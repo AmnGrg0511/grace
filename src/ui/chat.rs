@@ -361,6 +361,9 @@ struct ModelCandidate {
     base_url: String,
     key_env: String,
     context_window: Option<u32>,
+    /// `None` = leave the reasoning level alone (direct `/model <arg>`);
+    /// `Some("")` = clear it; `Some(level)` = set it.
+    reasoning: Option<String>,
 }
 
 /// Everything `/model` can target right now: the endpoints the user has
@@ -375,6 +378,7 @@ fn model_candidates(settings: &crate::config::settings::Settings) -> Vec<ModelCa
     // its URL as a custom endpoint.
     if let (Some(url), Some(model)) = (&settings.default_base_url, &settings.default_model) {
         out.push(ModelCandidate {
+            reasoning: None,
             name: friendly_endpoint_name(url),
             model: model.clone(),
             base_url: url.clone(),
@@ -390,6 +394,7 @@ fn model_candidates(settings: &crate::config::settings::Settings) -> Vec<ModelCa
             continue;
         }
         out.push(ModelCandidate {
+            reasoning: None,
             name: e.name.clone(),
             model: e.model.clone(),
             base_url: e.base_url.clone(),
@@ -404,6 +409,7 @@ fn model_candidates(settings: &crate::config::settings::Settings) -> Vec<ModelCa
                 continue;
             }
             out.push(ModelCandidate {
+            reasoning: None,
                 name: preset.label.to_string(),
                 model: m.id.to_string(),
                 base_url: preset.base_url.to_string(),
@@ -527,7 +533,7 @@ fn handle_model_command(
     let candidates = model_candidates(&settings);
 
     let target = if arg.is_empty() {
-        match pick_model_interactive(&candidates, reader, skin) {
+        match pick_model_interactive(&candidates, reader, skin, transport) {
             Some(t) => t,
             None => return,
         }
@@ -559,12 +565,33 @@ fn handle_model_command(
 /// Execute a resolved switch: key handling (env/OAuth/prompt), endpoint
 /// re-point, model swap, context-window re-resolution + change notice, and
 /// persistence (config.toml endpoint upsert + .env key upsert).
+#[allow(clippy::too_many_arguments)]
 fn apply_model_switch(
     transport: &(dyn crate::transport::ProviderTransport + '_),
     target: ModelCandidate,
     reader: &mut LineReader,
     cached_context_window: &mut Option<u32>,
 ) {
+    // Stage-3 decision applies regardless of which endpoint won: the hint is
+    // per-request state on the transport plus a persisted default.
+    if let Some(reasoning) = &target.reasoning {
+        let level = if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning.as_str())
+        };
+        transport.set_reasoning(level);
+        let mut settings = crate::config::settings::Settings::load();
+        settings.default_reasoning = level.map(str::to_string);
+        if let Err(e) = settings.save() {
+            eprintln!("[grace] warning: could not save reasoning level: {e}");
+        } else if let Some(l) = level {
+            println!("reasoning effort set to {l}.");
+        } else {
+            println!("reasoning effort cleared.");
+        }
+    }
+
     let is_copilot_target = target.base_url == crate::transport::copilot::BASE_URL;
     let same_endpoint = transport
         .current_base_url()
@@ -709,8 +736,14 @@ fn pick_model_interactive(
     candidates: &[ModelCandidate],
     reader: &mut LineReader,
     skin: &Skin,
+    transport: &(dyn crate::transport::ProviderTransport + '_),
 ) -> Option<ModelCandidate> {
+    use crate::ui::skin::{reset, Role};
     use crate::ui::picker::{pick, Pick};
+
+    // Accent paint shared by the endpoint/context sublabels — a skin color
+    // distinct from the dim row text, so the eye splits name from fact.
+    let accent = |t: &str| skin.paint(Role::Code, t);
 
     // Stage 1: which endpoint — one row per distinct (name, base_url).
     let mut endpoints: Vec<(String, String, String)> = Vec::new(); // name, base_url, model
@@ -722,17 +755,20 @@ fn pick_model_interactive(
             endpoints.push((c.name.clone(), c.base_url.clone(), c.model.clone()));
         }
     }
+    // Stage 1 shows only the provider and its endpoint (accent-painted);
+    // models come in stage 2 so the two decisions stay clean.
     let items: Vec<Pick> = endpoints
         .iter()
-        .map(|(name, base_url, model)| {
+        .map(|(name, base_url, _)| {
             Pick::new(format!("{name}\u{1}{base_url}"), name.clone())
-                .hint(format!("{model} · {}", short_url(base_url)))
+                .hint(format!("{}{}", accent(&short_url(base_url)), reset()))
+                .verbatim_sub()
         })
         .chain(std::iter::once(
             Pick::new("\u{1}custom", "Custom OpenAI-compatible endpoint").hint("type a base URL"),
         ))
         .collect();
-    let choice = pick(&items, skin, "pick an endpoint to switch to")?;
+    let choice = pick(&items, skin, "pick a provider to switch to")?;
 
     let (name, base_url) = if choice == "\u{1}custom" {
         let raw = reader.read_line("base URL (e.g. https://host/v1): ")?;
@@ -769,14 +805,59 @@ fn pick_model_interactive(
         key_env
     };
 
-    let (model, ctx) = pick_model_for_endpoint(&base_url, &key_env, &known, reader, skin)?;
+    let current_model = transport.current_model();
+    let same_endpoint = transport
+        .current_base_url()
+        .as_deref()
+        .map(|b| short_url(b) == short_url(&base_url))
+        .unwrap_or(false);
+    let (model, ctx) = pick_model_for_endpoint(
+        &base_url,
+        &key_env,
+        &known,
+        reader,
+        skin,
+        current_model.as_deref().filter(|_| same_endpoint),
+    )?;
+    // Stage 3: how hard should the model think?
+    let reasoning = pick_reasoning_level(transport.current_reasoning(), skin)?;
     Some(ModelCandidate {
         name,
         model,
         base_url,
         key_env,
         context_window: ctx,
+        reasoning: Some(reasoning),
     })
+}
+
+/// Stage 3 of the `/model` picker: the reasoning-effort hint sent as
+/// `reasoning_effort` on every chat request. Returns "" for "none" (send no
+/// parameter), or "low"/"medium"/"high". The already-active level is shown
+/// but not selectable.
+fn pick_reasoning_level(current: Option<String>, skin: &Skin) -> Option<String> {
+    use crate::ui::picker::{pick, Pick};
+
+    let options: [(&str, &str); 4] = [
+        ("none", "no reasoning parameter is sent"),
+        ("low", "quick answers, light thinking"),
+        ("medium", "balanced depth"),
+        ("high", "deepest reasoning — slower and costlier"),
+    ];
+    let items: Vec<Pick> = options
+        .iter()
+        .map(|(id, blurb)| {
+            let mut row = Pick::new(*id, *id).hint(*blurb);
+            if current.as_deref() == Some(id) || (*id == "none" && current.is_none()) {
+                row = row.disabled().hint("current");
+            }
+            row
+        })
+        .collect();
+    match pick(&items, skin, "pick a reasoning level")? {
+        id if id == "none" => Some(String::new()),
+        id => Some(id.to_string()),
+    }
 }
 
 /// Stage 2 of the `/model` picker: the endpoint's reported models (best-
@@ -788,7 +869,9 @@ fn pick_model_for_endpoint(
     known: &[(String, Option<u32>)],
     reader: &mut LineReader,
     skin: &Skin,
+    current_model: Option<&str>,
 ) -> Option<(String, Option<u32>)> {
+    use crate::ui::skin::{reset, Role};
     use crate::ui::picker::{pick, Pick};
 
     let mut models: Vec<(String, Option<u32>)> = Vec::new();
@@ -806,15 +889,26 @@ fn pick_model_for_endpoint(
         return if id.is_empty() { None } else { Some((id, None)) };
     }
 
+    // Context window in the same skin accent as stage 1's endpoint; the
+    // model this session already runs stays visible but unselectable.
     let items: Vec<Pick> = models
         .iter()
         .enumerate()
         .map(|(i, (id, ctx))| {
-            let row = Pick::new(format!("m{i}"), id.clone());
-            match ctx {
-                Some(w) => row.hint(format!("{}k ctx", w / 1000)),
-                None => row,
+            let mut row = Pick::new(format!("m{i}"), id.clone());
+            if let Some(w) = ctx {
+                row = row
+                    .hint(format!(
+                        "{}{}",
+                        skin.paint(Role::Code, &format!("{w}k")),
+                        reset()
+                    ))
+                    .verbatim_sub();
             }
+            if current_model == Some(id.as_str()) {
+                row = row.disabled().hint("current");
+            }
+            row
         })
         .chain(std::iter::once(Pick::new(
             "other",
@@ -2052,6 +2146,7 @@ mod model_command_tests {
 
     fn cand(name: &str, model: &str, base_url: &str, ctx: Option<u32>) -> ModelCandidate {
         ModelCandidate {
+            reasoning: None,
             name: name.into(),
             model: model.into(),
             base_url: base_url.into(),
