@@ -347,21 +347,7 @@ pub fn render_terminal_width(md: &str, skin: &Skin, color: bool, width: Option<u
                     out.push_str(&text);
                     out.push_str(RESET);
                 } else if list_item_started {
-                    let indent = list_depth(&list_stack);
-                    // Ensure we're on a new line before printing the bullet
-                    if !out.ends_with('\n') {
-                        out.push('\n');
-                    }
-                    out.push_str(&"  ".repeat(indent));
-                    let (is_ordered, idx) = list_stack.last().copied().unwrap_or((false, 0));
-                    if is_ordered {
-                        out.push_str(&format!("{}. ", idx + 1));
-                    } else {
-                        out.push_str(BOLD);
-                        out.push_str("• ");
-                        out.push_str(RESET);
-                    }
-                    list_item_started = false;
+                    emit_list_item_prefix(&mut out, &list_stack, &mut list_item_started);
                     open_style(&mut out);
                     out.push_str(&text);
                 } else if !list_stack.is_empty() {
@@ -383,6 +369,12 @@ pub fn render_terminal_width(md: &str, skin: &Skin, color: bool, width: Option<u
                     cell_buf.push_str(&text);
                     cell_buf.push_str(RESET);
                 } else {
+                    // A list item can open with inline code just as well as
+                    // with plain text — the bullet must come first either
+                    // way, or the code word pops out above the list row.
+                    if list_item_started {
+                        emit_list_item_prefix(&mut out, &list_stack, &mut list_item_started);
+                    }
                     out.push_str(&gold);
                     out.push_str(&text);
                     out.push_str(RESET);
@@ -445,6 +437,27 @@ pub fn render_terminal_width(md: &str, skin: &Skin, color: bool, width: Option<u
 fn list_depth(stack: &[(bool, usize)]) -> usize {
     // The current item is in the last-pushed list; its indent is `depth - 1`
     stack.len().saturating_sub(1)
+}
+
+/// Emit everything a list item needs before its first visible content: the
+/// newline that starts the row, the nesting indent, and the bullet (or
+/// ordered number). Shared by the text and inline-code paths — an item may
+/// begin with either, and both must open the row the same way.
+fn emit_list_item_prefix(out: &mut String, list_stack: &[(bool, usize)], started: &mut bool) {
+    let indent = list_depth(list_stack);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&"  ".repeat(indent));
+    let (is_ordered, idx) = list_stack.last().copied().unwrap_or((false, 0));
+    if is_ordered {
+        out.push_str(&format!("{}. ", idx + 1));
+    } else {
+        out.push_str(BOLD);
+        out.push_str("• ");
+        out.push_str(RESET);
+    }
+    *started = false;
 }
 
 /// ANSI color for headings, derived from the skin's answer color.
@@ -877,6 +890,28 @@ mod tests {
         let gold = code_color(&crate::ui::skin::SOLARIS);
         assert!(!gold.is_empty());
         assert!(gold.contains("\x1b[38;2;"));
+    }
+
+    #[test]
+    fn a_list_item_opening_with_inline_code_keeps_the_code_on_the_bullet_row() {
+        // Regression: the inline-code path skipped the bullet prefix, so in
+        // "- `foo` bar" the word `foo` was emitted bare and "bar" got the
+        // bullet — the first word visually popped out of its list item.
+        let skin = &crate::ui::skin::SOLARIS;
+        let rendered = render_terminal_colored("- `foo` bar\n- plain\n", skin, true);
+
+        let plain = strip_ansi(&rendered);
+        let lines: Vec<&str> = plain.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["• foo bar", "• plain"], "rendered: {rendered:?}");
+    }
+
+    #[test]
+    fn an_ordered_item_opening_with_inline_code_gets_its_number() {
+        let skin = &crate::ui::skin::SOLARIS;
+        let rendered = render_terminal_colored("1. `x` first\n2. second\n", skin, true);
+        let plain = strip_ansi(&rendered);
+        let lines: Vec<&str> = plain.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["1. x first", "2. second"], "rendered: {rendered:?}");
     }
 
     #[test]
