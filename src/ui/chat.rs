@@ -805,6 +805,7 @@ fn pick_model_interactive(
         key_env
     };
 
+    let fetched = fetched_models(&base_url, &key_env);
     let current_model = transport.current_model();
     let same_endpoint = transport
         .current_base_url()
@@ -812,8 +813,7 @@ fn pick_model_interactive(
         .map(|b| short_url(b) == short_url(&base_url))
         .unwrap_or(false);
     let (model, ctx) = pick_model_for_endpoint(
-        &base_url,
-        &key_env,
+        fetched,
         &known,
         reader,
         skin,
@@ -863,9 +863,8 @@ fn pick_reasoning_level(current: Option<String>, skin: &Skin) -> Option<String> 
 /// Stage 2 of the `/model` picker: the endpoint's reported models (best-
 /// effort) merged with its known static models, plus "other". Returns
 /// `(model_id, context_window_if_known)`.
-fn pick_model_for_endpoint(
-    base_url: &str,
-    key_env: &str,
+pub(crate) fn pick_model_for_endpoint(
+    fetched: Vec<crate::transport::ModelInfo>,
     known: &[(String, Option<u32>)],
     reader: &mut LineReader,
     skin: &Skin,
@@ -875,7 +874,7 @@ fn pick_model_for_endpoint(
     use crate::ui::picker::{pick, Pick};
 
     let mut models: Vec<(String, Option<u32>)> = Vec::new();
-    for info in fetched_models(base_url, key_env) {
+    for info in fetched {
         models.push((info.id, info.context_window));
     }
     for (id, ctx) in known {

@@ -4,95 +4,103 @@
 use crate::config::settings::PROVIDER_PRESETS;
 use crate::transport::ProviderTransport;
 
-/// What a numbered menu entry the user typed refers to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuChoice {
-    /// A zero-based index into the listed options.
-    Item(usize),
-    /// The trailing "other (type it yourself)" entry.
-    Other,
-    /// Not a number, or out of range.
-    Invalid,
-}
+/// Read one line from the terminal with echo suppressed — API keys must not
+/// land on screen or in scrollback. Uses `stty -echo` against `/dev/tty`
+/// (std-only, no crate); falls back to plain stdin reading when no TTY is
+/// reachable (piped input can't hide anything anyway). Returns `None` on EOF.
+fn read_hidden(prompt: &str) -> Option<String> {
+    use std::io::{BufRead, BufReader, Write};
 
-/// Interpret a typed menu selection against a list of `len` options where
-/// entry `len + 1` is an "other" escape hatch.
-///
-/// Pure, so the off-by-one boundaries — which are easy to get wrong and
-/// impossible to notice without walking through the wizard by hand — are
-/// directly testable.
-pub fn parse_menu_choice(raw: &str, len: usize, has_other: bool) -> MenuChoice {
-    let Ok(n) = raw.trim().parse::<usize>() else {
-        return MenuChoice::Invalid;
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+
+    let stty = |arg: &str| -> bool {
+        let Ok(tty) = std::fs::File::open("/dev/tty") else {
+            return false;
+        };
+        std::process::Command::new("stty")
+            .arg(arg)
+            .stdin(std::process::Stdio::from(tty))
+            .status()
+            .is_ok_and(|s| s.success())
     };
-    if n >= 1 && n <= len {
-        return MenuChoice::Item(n - 1);
+    let hidden = stty("-echo");
+    let line = (|| {
+        let tty = std::fs::File::open("/dev/tty").ok()?;
+        let mut buf = String::new();
+        BufReader::new(tty).read_line(&mut buf).ok()?;
+        Some(buf)
+    })()
+    .or_else(|| {
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf).ok()?;
+        Some(buf)
+    });
+    if hidden {
+        stty("echo");
     }
-    if has_other && n == len + 1 {
-        return MenuChoice::Other;
-    }
-    MenuChoice::Invalid
+    // The typed Enter left the cursor mid-row; close the line invisibly.
+    println!();
+    line.map(|l| l.trim().to_string())
 }
 
-/// Interactive first-run picker: provider -> key -> model. Every provider
-/// goes through the exact same three steps — the only branch is *how* step
-/// 2 (the "key") is obtained: typed for a normal HTTP provider, or minted
-/// via OAuth device flow for GitHub Copilot. Once the key exists, Copilot
-/// is wired up exactly like any other provider (base_url + api_key), no
-/// separate flag or code path downstream. Step 3 asks the provider's real
-/// `/models` endpoint for the live list + context windows, falling back to
-/// the built-in preset list only if that call fails.
+/// Interactive first-run setup, entirely picker-based: provider -> key ->
+/// model -> reasoning level. Every provider goes through the exact same
+/// steps — the only branch is *how* the "key" step is obtained: typed with
+/// echo suppressed for a normal HTTP provider, or minted via OAuth device
+/// flow for GitHub Copilot. Once the key exists, Copilot is wired up exactly
+/// like any other provider (base_url + api_key), no separate flag or code
+/// path downstream. The model stage asks the provider's real `/models`
+/// endpoint for the live list + context windows, falling back to the
+/// built-in preset list only if that call fails.
 ///
-/// Persists the choice to `~/.grace/config.toml` (model/base_url) and
-/// `~/.grace/.env` (the key, so it's never asked twice and never lives in
-/// shell history). Returns (model, base_url, api_key) to wire up for *this*
-/// invocation.
+/// Persists the choice to `~/.grace/config.toml` (model/base_url/reasoning)
+/// and `~/.grace/.env` (the key, so it's never asked twice and never lives
+/// in shell history). Returns (model, base_url, api_key) to wire up for
+/// *this* invocation.
 pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::error::Error>> {
-    use std::io::Write;
-    let mut stdin_lines = std::io::stdin().lines();
-    // Returns `None` on real EOF (piped/closed stdin) so callers can bail
-    // out with a clear error instead of looping forever re-prompting on an
-    // input source that will never produce another line — e.g. `grace`
-    // run under a non-interactive script/CI with no stdin attached.
-    let mut prompt_read = |label: &str| -> Option<String> {
-        print!("{label}");
-        let _ = std::io::stdout().flush();
-        Some(stdin_lines.next()?.ok()?.trim().to_string())
-    };
-    let no_stdin = || -> Box<dyn std::error::Error> {
-        "no model/provider configured and stdin is not interactive (EOF) — \
-         run `grace --base-url <url> --api-key <key> --model <id>` non-interactively, \
-         or run once from a real terminal to complete onboarding"
-            .into()
-    };
+    use crate::ui::picker::{pick, Pick};
+    use crate::ui::skin::{reset, Role};
 
     println!(
         "\ngrace needs a model provider — this only runs once, choices are saved to ~/.grace/\n"
     );
-    for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
-        println!("  {}) {}", i + 1, p.label);
-    }
-    let choice: usize = loop {
-        let Some(raw) = prompt_read("\nselect a provider [number]: ") else {
-            return Err(no_stdin());
-        };
-        match parse_menu_choice(&raw, PROVIDER_PRESETS.len(), false) {
-            MenuChoice::Item(i) => break i,
-            _ => println!("enter a number between 1 and {}", PROVIDER_PRESETS.len()),
-        }
-    };
-    let preset = &PROVIDER_PRESETS[choice];
+    let skin = crate::ui::skin::by_name(None);
+    let accent = |t: &str| skin.paint(Role::Code, t);
+
+    // Stage 1: provider — name plus its endpoint in the accent color.
+    let items: Vec<Pick> = PROVIDER_PRESETS
+        .iter()
+        .map(|p| {
+            if p.base_url.is_empty() {
+                Pick::new(p.label, p.label).hint("type the base URL next")
+            } else {
+                Pick::new(p.label, p.label)
+                    .hint(format!("{}{}", accent(&short_url_of(p.base_url)), reset()))
+                    .verbatim_sub()
+            }
+        })
+        .collect();
+    let choice = pick(&items, &skin, "pick a provider").ok_or("no provider selected")?;
+    let preset = PROVIDER_PRESETS
+        .iter()
+        .find(|p| p.label == choice)
+        .ok_or("unknown provider selection")?;
     let is_copilot = preset.label == "GitHub Copilot";
 
     let base_url = if is_copilot || !preset.base_url.is_empty() {
         preset.base_url.to_string()
     } else {
-        prompt_read("base URL (OpenAI-compatible /chat/completions endpoint): ")
-            .ok_or_else(no_stdin)?
+        let raw = read_hidden("base URL (OpenAI-compatible /chat/completions endpoint): ")
+            .ok_or("no base URL provided")?;
+        if raw.is_empty() {
+            return Err("no base URL provided".into());
+        }
+        raw
     };
 
     // Step 2, "the key": every provider gets asked for one. A normal HTTP
-    // provider's key is typed in (or read from an already-exported env
+    // provider's key is typed in blind (or read from an already-exported env
     // var). Copilot's "key" is minted via OAuth device flow instead — same
     // conceptual step, just non-interactive input.
     let api_key = if is_copilot {
@@ -102,16 +110,15 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
         // input, since an empty key would be persisted and sent as an empty
         // bearer instead of getting another chance.
         loop {
-            if let Some(k) =
-                std::env::var(preset.env_var).ok().filter(|k| !k.is_empty())
-            {
+            if let Some(k) = std::env::var(preset.env_var).ok().filter(|k| !k.is_empty()) {
                 break k;
             }
-            let Some(typed) = prompt_read(&format!(
-                "API key for {} (or set ${} and re-run): ",
-                preset.label, preset.env_var
+            let Some(typed) = read_hidden(&format!(
+                "API key for {} (${env_var} not set): ",
+                preset.label,
+                env_var = preset.env_var
             )) else {
-                return Err(no_stdin());
+                return Err("no API key provided".into());
             };
             if typed.is_empty() {
                 println!("key is empty — enter the key again");
@@ -123,7 +130,7 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
 
     // Step 3: ask the provider itself what models it has, rather than
     // trusting only the hard-coded preset list. Falls back to the preset
-    // (or free-typed input) if the live call fails or returns nothing.
+    // list inside the shared stage-2 picker when the live call fails.
     let live_models: Vec<crate::transport::ModelInfo> = if is_copilot {
         crate::transport::copilot::fetch_models(&api_key).unwrap_or_default()
     } else if !base_url.is_empty() {
@@ -133,57 +140,24 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     } else {
         Vec::new()
     };
+    if live_models.is_empty() && !preset.models.is_empty() {
+        println!("(couldn't reach {}'s /models endpoint — showing known models)", preset.label);
+    }
 
-    let (model, ctx_window) = if !live_models.is_empty() {
-        println!();
-        for (i, m) in live_models.iter().enumerate() {
-            match m.context_window {
-                Some(ctx) => println!("  {}) {} (context: {ctx})", i + 1, m.id),
-                None => println!("  {}) {}", i + 1, m.id),
-            }
-        }
-        println!("  {}) other (type a model id)", live_models.len() + 1);
-        loop {
-            let raw = prompt_read("\nselect a model [number]: ").ok_or_else(no_stdin)?;
-            match parse_menu_choice(&raw, live_models.len(), true) {
-                MenuChoice::Item(i) => {
-                    let m = &live_models[i];
-                    break (m.id.clone(), m.context_window);
-                }
-                MenuChoice::Other => {
-                    let typed = prompt_read("model id: ").ok_or_else(no_stdin)?;
-                    let ctx = crate::ui::chat::fetch_context_window(&typed, &base_url, &api_key);
-                    break (typed, ctx);
-                }
-                MenuChoice::Invalid => println!("enter a valid number"),
-            }
-        }
-    } else if !preset.models.is_empty() {
-        println!(
-            "\n(couldn't reach {}'s /models endpoint — showing known models)",
-            preset.label
-        );
-        for (i, m) in preset.models.iter().enumerate() {
-            println!("  {}) {} (context: {})", i + 1, m.id, m.context_window);
-        }
-        println!("  {}) other (type a model id)", preset.models.len() + 1);
-        loop {
-            let raw = prompt_read("\nselect a model [number]: ").ok_or_else(no_stdin)?;
-            match parse_menu_choice(&raw, preset.models.len(), true) {
-                MenuChoice::Item(i) => {
-                    let m = &preset.models[i];
-                    break (m.id.to_string(), Some(m.context_window));
-                }
-                MenuChoice::Other => {
-                    let typed = prompt_read("model id: ").ok_or_else(no_stdin)?;
-                    let ctx = crate::ui::chat::fetch_context_window(&typed, &base_url, &api_key);
-                    break (typed, ctx);
-                }
-                MenuChoice::Invalid => println!("enter a valid number"),
-            }
-        }
-    } else {
-        (prompt_read("model id: ").ok_or_else(no_stdin)?, None)
+    let known: Vec<(String, Option<u32>)> = preset
+        .models
+        .iter()
+        .map(|m| (m.id.to_string(), Some(m.context_window)))
+        .collect();
+    let history_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".grace")
+        .join("history.txt");
+    let mut reader = crate::ui::line_reader::LineReader::new(history_path, skin);
+    let Some((model, ctx_window)) =
+        crate::ui::chat::pick_model_for_endpoint(live_models, &known, &mut reader, &skin, None)
+    else {
+        return Err("no model selected".into());
     };
 
     // Persist: model + base_url + context window go to config.toml; the
@@ -192,6 +166,7 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     settings.default_model = Some(model.clone());
     settings.default_base_url = Some(base_url.clone());
     settings.default_context_window = ctx_window;
+    settings.default_reasoning = None;
     if let Err(e) = settings.save() {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
     }
@@ -208,10 +183,20 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     Ok((model, base_url, api_key))
 }
 
-/// Interactive skin picker: same list+preview flow as `/skin` mid-chat
-/// ([`pick_skin_interactive`]), but persists the choice to
-/// `~/.grace/config.toml` — same "choose once, remembered forever" pattern
-/// as [`run_onboarding_wizard`]'s provider pick.
+/// Host of a URL for picker display — the wizard's rows show where requests
+/// will actually go, without the scheme/path noise.
+fn short_url_of(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
+/// Interactive skin picker with color previews, shared with `/skin`
+/// mid-chat; persists the choice to `~/.grace/config.toml`. The
+/// already-active skin is shown but not selectable.
 pub fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
     use crate::ui::picker::{pick, Pick};
 
@@ -253,50 +238,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_valid_selection_maps_to_a_zero_based_index() {
-        assert_eq!(parse_menu_choice("1", 3, true), MenuChoice::Item(0));
-        assert_eq!(parse_menu_choice("3", 3, true), MenuChoice::Item(2));
-    }
-
-    #[test]
-    fn the_trailing_entry_is_the_other_escape_hatch() {
-        assert_eq!(parse_menu_choice("4", 3, true), MenuChoice::Other);
-    }
-
-    #[test]
-    fn zero_is_invalid_because_menus_are_one_based() {
-        // The classic off-by-one: accepting 0 would silently select item 1
-        // via an underflowing subtraction.
-        assert_eq!(parse_menu_choice("0", 3, true), MenuChoice::Invalid);
-    }
-
-    #[test]
-    fn a_number_past_the_end_is_invalid() {
-        assert_eq!(parse_menu_choice("5", 3, true), MenuChoice::Invalid);
-        assert_eq!(parse_menu_choice("99", 3, true), MenuChoice::Invalid);
-    }
-
-    #[test]
-    fn without_an_other_entry_the_trailing_number_is_invalid() {
-        assert_eq!(parse_menu_choice("4", 3, false), MenuChoice::Invalid);
-    }
-
-    #[test]
-    fn non_numeric_input_is_invalid_rather_than_panicking() {
-        assert_eq!(parse_menu_choice("gpt-4o", 3, true), MenuChoice::Invalid);
-        assert_eq!(parse_menu_choice("", 3, true), MenuChoice::Invalid);
-        assert_eq!(parse_menu_choice("-1", 3, true), MenuChoice::Invalid);
-    }
-
-    #[test]
-    fn surrounding_whitespace_is_tolerated() {
-        assert_eq!(parse_menu_choice("  2  ", 3, true), MenuChoice::Item(1));
-    }
-
-    #[test]
-    fn an_empty_menu_accepts_only_the_other_entry() {
-        assert_eq!(parse_menu_choice("1", 0, true), MenuChoice::Other);
-        assert_eq!(parse_menu_choice("1", 0, false), MenuChoice::Invalid);
+    fn short_url_keeps_only_the_host() {
+        assert_eq!(short_url_of("https://api.openai.com/v1"), "api.openai.com");
+        assert_eq!(short_url_of("http://localhost:11434/v1"), "localhost:11434");
+        assert_eq!(short_url_of("weird"), "weird");
     }
 
     #[test]
@@ -306,16 +251,6 @@ mod tests {
         assert!(!PROVIDER_PRESETS.is_empty());
         for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
             assert!(!p.label.is_empty(), "preset {i} has no label");
-            assert_eq!(
-                parse_menu_choice(&(i + 1).to_string(), PROVIDER_PRESETS.len(), false),
-                MenuChoice::Item(i)
-            );
-        }
-    }
-
-    #[test]
-    fn each_preset_names_the_env_var_its_key_is_read_from() {
-        for p in PROVIDER_PRESETS {
             assert!(
                 !p.env_var.is_empty(),
                 "{} has no env var, so an exported key can never be picked up",
