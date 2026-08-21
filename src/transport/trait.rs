@@ -11,6 +11,7 @@ use crate::message::{Message, ToolCall};
 use crate::util::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::AtomicBool;
 
 /// The set of tools, in the OpenAI tool-spec shape, that the model may call.
 #[derive(Debug, Clone)]
@@ -157,6 +158,7 @@ pub trait ProviderTransport {
         messages: &[Message],
         tools: &[ToolSpec],
         model: &str,
+        _interrupted: Option<&AtomicBool>,
         on_fragment: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<ModelResponse> {
         let resp = self.complete(messages, tools, model)?;
@@ -233,7 +235,7 @@ mod tests {
         let t = Minimal;
         let mut seen = String::new();
         let resp = t
-            .complete_streaming(&[], &[], "m", &mut |f| {
+            .complete_streaming(&[], &[], "m", None, &mut |f| {
                 seen.push_str(f);
                 Ok(())
             })

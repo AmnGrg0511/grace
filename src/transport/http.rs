@@ -12,6 +12,7 @@ use crate::transport::r#trait::{
 use crate::transport::wire::{parse_openai_message, parse_usage, tools_to_json};
 use crate::util::{truncate_utf8, AgentError, Result};
 use serde_json::{json, Value};
+use std::sync::atomic::AtomicBool;
 
 /// Best-effort API fetch to discover a model's context window. Covers
 /// OpenRouter (GET /api/v1/models) and OpenAI (GET /v1/models/{id});
@@ -344,6 +345,7 @@ impl ProviderTransport for HttpTransport {
         messages: &[Message],
         tools: &[ToolSpec],
         _model: &str,
+        interrupted: Option<&AtomicBool>,
         on_fragment: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<ModelResponse> {
         let model_owned = self.model.borrow().clone();
@@ -360,6 +362,7 @@ impl ProviderTransport for HttpTransport {
             &model,
             messages,
             tools,
+            interrupted,
             on_fragment,
         )
     }

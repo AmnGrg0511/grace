@@ -309,7 +309,7 @@ fn complete_with_retry(
                 }
                 Ok(())
             };
-            transport.complete_streaming(messages, specs, "", &mut on_fragment)
+            transport.complete_streaming(messages, specs, "", interrupted, &mut on_fragment)
         } else {
             transport.complete(messages, specs, "")
         };
@@ -794,6 +794,7 @@ mod tests {
                 _m: &[Message],
                 _t: &[ToolSpec],
                 _model: &str,
+                _interrupted: Option<&AtomicBool>,
                 on_fragment: &mut dyn FnMut(&str) -> Result<()>,
             ) -> Result<ModelResponse> {
                 for piece in ["a", "b", "c"] {
@@ -855,6 +856,7 @@ mod tests {
                 _m: &[Message],
                 _t: &[ToolSpec],
                 _model: &str,
+                _interrupted: Option<&AtomicBool>,
                 on_fragment: &mut dyn FnMut(&str) -> Result<()>,
             ) -> Result<ModelResponse> {
                 on_fragment("hi")?;
@@ -937,6 +939,7 @@ mod tests {
                 _m: &[Message],
                 _t: &[ToolSpec],
                 _model: &str,
+                _interrupted: Option<&AtomicBool>,
                 on_fragment: &mut dyn FnMut(&str) -> Result<()>,
             ) -> Result<ModelResponse> {
                 // Emit a token, then let the flag get set between tokens and

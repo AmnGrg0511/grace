@@ -19,7 +19,14 @@ use crate::util::{AgentError, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
+
+/// How often the main thread re-checks the interrupt flag while the helper
+/// thread is blocked in a socket read. Bounds Ctrl-C latency during the
+/// pre-first-token silence (where no data ever arrives to wake the read).
+const INTERRUPT_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Default, Clone)]
 struct PartialToolCall {
@@ -191,15 +198,110 @@ pub fn parse_sse_stream(
     Ok(acc.finish())
 }
 
+/// A `Read` adapter that lets an interrupt flag abort a blocked socket read.
+///
+/// reqwest's blocking `Response` has no cancel handle: once `read()` blocks
+/// waiting for the first token, nothing else can observe Ctrl-C until data
+/// arrives. This wrapper moves the blocking read onto a helper thread that
+/// forwards chunks over an mpsc channel; the main thread polls the channel
+/// every [`INTERRUPT_POLL`] and, when the flag is set, returns
+/// `ErrorKind::Interrupted` so the SSE parse aborts the turn immediately.
+/// The connection closes once the helper thread wakes (its `send` fails when
+/// the channel's receiver is dropped) and the response is dropped.
+struct InterruptibleRead<'a> {
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+    interrupted: Option<&'a AtomicBool>,
+}
+
+impl<'a> InterruptibleRead<'a> {
+    fn new(mut resp: reqwest::blocking::Response, interrupted: Option<&'a AtomicBool>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match resp.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = tx.send(Ok(Vec::new()));
+                        break;
+                    }
+                    Ok(n) => {
+                        // Receiver dropped = turn aborted; the abandoned
+                        // generation stops being consumed and `resp` closes
+                        // the connection when this thread exits.
+                        if tx.send(Ok(buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            rx,
+            pending: Vec::new(),
+            interrupted,
+        }
+    }
+}
+
+impl Read for InterruptibleRead<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if !self.pending.is_empty() {
+            let n = self.pending.len().min(out.len());
+            out[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            return Ok(n);
+        }
+        loop {
+            match self.rx.recv_timeout(INTERRUPT_POLL) {
+                Ok(Ok(chunk)) if chunk.is_empty() => return Ok(0),
+                Ok(Ok(chunk)) => {
+                    let n = chunk.len().min(out.len());
+                    out[..n].copy_from_slice(&chunk[..n]);
+                    if chunk.len() > n {
+                        self.pending = chunk[n..].to_vec();
+                    }
+                    return Ok(n);
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(RecvTimeoutError::Timeout) => {
+                    if self.interrupted.is_some_and(|f| f.load(Ordering::SeqCst)) {
+                        // Pretend EOF. `read_line` retries a real
+                        // `Interrupted` error forever, so a distinct abort
+                        // signal is needed; `stream_complete` converts this
+                        // early EOF into `AgentError::Interrupted` by checking
+                        // the flag again.
+                        return Ok(0);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(std::io::Error::other(
+                        "stream reader thread exited unexpectedly",
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Perform a streaming completion against an OpenAI-compatible endpoint.
 /// POSTs with `"stream": true`, parses SSE as it arrives, and calls
 /// `on_fragment` per content fragment for live printing.
+///
+/// `interrupted` is polled while the socket read is silent (see
+/// [`InterruptibleRead`]); when set, the turn aborts with
+/// `AgentError::Interrupted` instead of waiting for the next token.
 pub fn stream_complete(
     base_url: &str,
     api_key: &str,
     model: &str,
     messages: &[Message],
     tools: &[ToolSpec],
+    interrupted: Option<&AtomicBool>,
     on_fragment: impl FnMut(&str) -> Result<()>,
 ) -> Result<ModelResponse> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
@@ -236,7 +338,18 @@ pub fn stream_complete(
     // `Response` implements io::Read, so this reads the body incrementally
     // and each fragment is delivered as it arrives — `resp.bytes()` would
     // buffer the whole generation and fire everything in one burst at the end.
-    parse_sse_stream(resp, on_fragment)
+    // The interruptible wrapper is what makes Ctrl-C land during the
+    // pre-first-token silence, not just between tokens.
+    let outcome = parse_sse_stream(InterruptibleRead::new(resp, interrupted), on_fragment);
+    // An early-EOF driven by the interrupt flag is a cancellation, not a
+    // cut-off stream: it must surface as `AgentError::Interrupted` so the turn
+    // unwinds to the prompt (and never as a silent no-answer).
+    match outcome {
+        Err(AgentError::Transport(_)) if interrupted.is_some_and(|f| f.load(Ordering::SeqCst)) => {
+            Err(AgentError::Interrupted)
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -427,5 +540,51 @@ mod tests {
         )
         .expect("[DONE] must end the parse even though the reader never EOFs");
         assert_eq!(response.content, "ok");
+    }
+
+    /// A `Read` whose only act is to fail with a specific error kind — used to
+    /// prove non-interrupt I/O errors still map to `AgentError::Io`.
+    struct FailingRead(std::io::ErrorKind);
+
+    impl Read for FailingRead {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0, "synthetic"))
+        }
+    }
+
+    #[test]
+    fn a_non_interrupt_io_error_is_reported_as_such() {
+        // A genuine I/O failure (reset, disconnect) must surface as an error,
+        // never as a silently truncated answer.
+        let err = parse_sse_stream(FailingRead(std::io::ErrorKind::ConnectionAborted), |_| Ok(()))
+            .unwrap_err();
+        assert!(matches!(err, AgentError::Io(_)), "{err:?}");
+    }
+
+    #[test]
+    fn interruptible_read_pretends_eof_when_the_flag_is_set_while_silent() {
+        // Simulates the silence before the first token: the channel has no
+        // data and never will, but the flag is set, so the read must abort
+        // promptly (EOF, since read_line would retry an Interrupted error
+        // forever) instead of blocking until the server sends data.
+        let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<Vec<u8>>>();
+        let flag = AtomicBool::new(false);
+        let mut body = InterruptibleRead {
+            rx,
+            pending: Vec::new(),
+            interrupted: Some(&flag),
+        };
+        let start = std::time::Instant::now();
+        flag.store(true, Ordering::SeqCst);
+        let n = body.read(&mut [0u8; 16]).unwrap();
+        assert_eq!(n, 0, "interrupt must read as EOF");
+        // Prompt: well under the poll interval plus slack. (The `tx` keeps the
+        // channel alive so recv_timeout is what fires, not a disconnect.)
+        assert!(
+            start.elapsed() < Duration::from_millis(300),
+            "interrupt must land promptly, took {:?}",
+            start.elapsed()
+        );
+        drop(tx);
     }
 }
