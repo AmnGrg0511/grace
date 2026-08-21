@@ -237,6 +237,18 @@ impl<C: TokenCounter> Compressor<C> {
         if !self.should_compress(messages) {
             return None;
         }
+        self.force_compress_in_place_with_model(messages, transport)
+    }
+
+    /// [`Self::compress_in_place_with_model`] without the trigger gate — for
+    /// `/compact`, where the user asked explicitly. Still refuses a pass that
+    /// does not strictly help (see below), so an already-minimal context
+    /// yields `None` rather than churn.
+    pub fn force_compress_in_place_with_model(
+        &self,
+        messages: &mut Vec<Message>,
+        transport: &(dyn ProviderTransport + '_),
+    ) -> Option<CompressionResult> {
         let before_len = messages.len();
         let before_tokens = self.estimate(messages);
         let result = self.compress_with_model(messages, transport);

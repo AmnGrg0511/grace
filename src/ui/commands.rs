@@ -54,6 +54,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "Rewind context to an earlier message (picker)",
     },
     SlashCommand {
+        name: "compact",
+        aliases: &[],
+        summary: "Compress context now (summary + drop old turns)",
+    },
+    SlashCommand {
         name: "verbose",
         aliases: &[],
         summary: "Toggle tool-output visibility",

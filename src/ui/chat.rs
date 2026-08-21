@@ -268,6 +268,10 @@ pub fn run_chat(
                 handle_jump_command(sessions, messages, &current_session, &skin);
                 continue;
             }
+            Some("compact") => {
+                handle_compact_command(messages, transport, compression_config, &skin);
+                continue;
+            }
             Some("verbose") => {
                 verbose = !verbose;
                 println!(
@@ -2313,6 +2317,45 @@ fn handle_jump_command(
     }
 }
 
+/// `/compact` — compress the context on demand instead of waiting for the
+/// automatic trigger. Same model-summarized pass as the automatic path, minus
+/// the trigger gate; still refuses a pass that would not strictly help.
+fn handle_compact_command(
+    messages: &mut Vec<Message>,
+    transport: &(dyn crate::transport::ProviderTransport + '_),
+    compression_config: &ContextCompressionConfig,
+    skin: &Skin,
+) {
+    if messages
+        .iter()
+        .all(|m| m.role == crate::message::Role::System)
+    {
+        println!("nothing to compact yet.");
+        return;
+    }
+    let compressor = crate::core::context::Compressor::for_transport(compression_config, transport);
+    match compressor.force_compress_in_place_with_model(messages, transport) {
+        Some(res) => {
+            let o = &res.outcome;
+            let summary_suffix = match res.summary.as_deref() {
+                Some(s) if !s.is_empty() => format!("\n  · summary: {s}"),
+                _ => String::new(),
+            };
+            println!(
+                "{}",
+                skin.paint(
+                    Role::ToolDim,
+                    &format!(
+                        "  · context compacted: {} → {} tok ({} message(s) summarized){summary_suffix}",
+                        o.before_tokens, o.after_tokens, o.dropped_messages
+                    )
+                )
+            );
+        }
+        None => println!("nothing to compact — the context is already minimal."),
+    }
+}
+
 #[cfg(test)]
 mod verbose_gate_tests {
     use super::should_show_tool_output;
@@ -2362,7 +2405,9 @@ mod slash_command_agreement_tests {
     /// handler without a registry entry is an undiscoverable command (audit
     /// G14), and a registry entry without a handler is a phantom. Update
     /// this constant whenever an arm in the dispatch match changes.
-    const DISPATCHED: &[&str] = &["exit", "model", "skin", "session", "jump", "verbose", "readonly"];
+    const DISPATCHED: &[&str] = &[
+        "exit", "model", "skin", "session", "jump", "compact", "verbose", "readonly",
+    ];
 
     #[test]
     fn every_dispatched_word_is_registered() {
