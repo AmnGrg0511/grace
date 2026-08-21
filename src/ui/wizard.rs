@@ -213,17 +213,28 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
 /// `~/.grace/config.toml` — same "choose once, remembered forever" pattern
 /// as [`run_onboarding_wizard`]'s provider pick.
 pub fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::ui::picker::{pick, Pick};
+
     let names = crate::ui::skin::all_names();
     if names.is_empty() {
         println!("no skins available.");
         return Ok(());
     }
-    let history_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".grace")
-        .join("history.txt");
-    let mut reader = crate::ui::line_reader::LineReader::new(history_path, crate::ui::skin::SOLARIS);
-    let Some(picked) = crate::ui::chat::pick_skin_interactive(&names, &mut reader) else {
+    let settings = crate::config::settings::Settings::load();
+    let active_skin = crate::ui::skin::by_name(settings.skin.as_deref());
+    let items: Vec<Pick> = names
+        .iter()
+        .map(|n| {
+            let mut row = Pick::new(n.clone(), n.clone()).extra_lines(
+                crate::ui::chat::skin_preview_lines(&crate::ui::skin::by_name(Some(n))),
+            );
+            if settings.skin.as_deref() == Some(n.as_str()) {
+                row = row.disabled().hint("already active");
+            }
+            row
+        })
+        .collect();
+    let Some(picked) = pick(&items, &active_skin, "pick a skin") else {
         return Ok(());
     };
 

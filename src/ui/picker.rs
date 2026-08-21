@@ -106,6 +106,9 @@ pub struct Pick {
     /// being repainted with the row style. Verbatim sublabels render on one
     /// line; keep them short.
     pub sub_verbatim: bool,
+    /// Pre-rendered lines under the row (skin color snapshots). Written
+    /// verbatim and excluded from type-to-filter.
+    pub extra_lines: Vec<String>,
 }
 
 impl Pick {
@@ -117,6 +120,7 @@ impl Pick {
             sublabel: None,
             disabled: false,
             sub_verbatim: false,
+            extra_lines: Vec::new(),
         }
     }
 
@@ -135,6 +139,14 @@ impl Pick {
     /// Let the sublabel carry its own paint (accent colors).
     pub fn verbatim_sub(mut self) -> Self {
         self.sub_verbatim = true;
+        self
+    }
+
+    /// Attach pre-rendered lines under the row (a color snapshot for skins).
+    /// Written verbatim — the caller paints every byte — and never matched
+    /// by type-to-filter, so preview words can't shadow real filtering.
+    pub fn extra_lines(mut self, lines: Vec<String>) -> Self {
+        self.extra_lines = lines;
         self
     }
 }
@@ -338,6 +350,7 @@ fn render_frame(
         };
 
         let mut body = wrap_words(&it.label, label_budget);
+        let mut extras_rows: Vec<String>;
         let mut raw_tail: Option<String> = None;
         if let Some(sub) = it.sublabel.as_deref() {
             if it.sub_verbatim {
@@ -367,12 +380,27 @@ fn render_frame(
             }
         }
 
-        // Per-entry row budget: keep the head, mark the cut with `…`.
-        if body.len() > MAX_ENTRY_LINES {
-            body.truncate(MAX_ENTRY_LINES - 1);
+        // Per-entry row budget: the identity text is the label, so cut the
+        // label tail last. Extras are garnish — dropped first.
+        if body.len() + 1 > MAX_ENTRY_LINES {
+            body.truncate(MAX_ENTRY_LINES);
             if let Some(last) = body.last_mut() {
                 let cut = visible_width(last).saturating_sub(1).max(1);
                 *last = format!("{}…", crate::util::truncate_utf8_display(last, cut));
+            }
+        }
+        extras_rows = Vec::new();
+        if !it.extra_lines.is_empty() {
+            let room = MAX_ENTRY_LINES.saturating_sub(body.len());
+            if room > 0 {
+                let mut extras: Vec<String> =
+                    it.extra_lines.iter().take(room).cloned().collect();
+                if extras.len() < it.extra_lines.len() {
+                    if let Some(last) = extras.last_mut() {
+                        last.push_str(" …");
+                    }
+                }
+                extras_rows = extras;
             }
         }
 
@@ -388,6 +416,10 @@ fn render_frame(
                 }
                 None => lines.push(skin.paint(row_style, &format!("{prefix}{bl}"))),
             }
+        }
+        // Pre-rendered snapshot lines (verbatim paint), two-space indented.
+        for extra in &extras_rows {
+            lines.push(format!("    {extra}"));
         }
     }
     if start + WINDOW < total {

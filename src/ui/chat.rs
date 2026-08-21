@@ -1107,12 +1107,48 @@ mod spinner_tests {
 /// `/skin` (interactive picker, same as `--select-skin`) or `/skin <name>`
 /// (direct switch) mid-chat. Session-only — use `--select-skin` to persist
 /// a default across runs.
+/// A compact color snapshot of `skin` for picker rows: prompt glyph, a
+/// tool-call line, and an answer with inline code — every role color at
+/// once, using real Grace shapes. Kept under ~70 columns so it never wraps.
+pub(crate) fn skin_preview_lines(s: &Skin) -> Vec<String> {
+    vec![
+        format!(
+            "{p}{glyph} you{r}",
+            p = s.style(Role::Prompt).render(),
+            glyph = s.prompt_glyph,
+            r = reset(),
+        ),
+        format!(
+            "{tb}● {tn}terminal{r} {td}⎿ file1.txt  file2.txt{r}",
+            tb = s.style(Role::ToolBullet).render(),
+            tn = s.style(Role::ToolName).render(),
+            td = s.style(Role::ToolDim).render(),
+            r = reset(),
+        ),
+        format!(
+            "{a}{ag}{r} Answer with {c}`ls`{r}.",
+            a = s.style(Role::Answer).render(),
+            ag = s.answer_glyph,
+            c = s.style(Role::Code).render(),
+            r = reset(),
+        ),
+    ]
+}
+
 fn handle_skin_command(arg: &str, skin: &mut Skin) {
     let names = crate::ui::skin::all_names();
     let picked = if arg.is_empty() {
         let items: Vec<crate::ui::picker::Pick> = names
             .iter()
-            .map(|n| crate::ui::picker::Pick::new(n.clone(), n.clone()))
+            .map(|n| {
+                let mut row =
+                    crate::ui::picker::Pick::new(n.clone(), n.clone())
+                        .extra_lines(skin_preview_lines(&crate::ui::skin::by_name(Some(n))));
+                if skin.name == n.as_str() {
+                    row = row.disabled().hint("already active");
+                }
+                row
+            })
             .collect();
         match crate::ui::picker::pick(&items, skin, "switch to a skin") {
             Some(n) => n,
@@ -1131,6 +1167,35 @@ fn handle_skin_command(arg: &str, skin: &mut Skin) {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
     } else {
         println!("skin switched to \"{picked}\" (saved to config).");
+    }
+}
+
+/// Human recency for a session's last activity, unix seconds in/out.
+/// Pure and timezone-free by design: "<1m ago", "45m ago", "3h 12m ago",
+/// "2d 3h ago" — the shape the session picker shows next to each title.
+pub(crate) fn recency_label(last_active: i64, now: i64) -> String {
+    let delta = (now - last_active).max(0);
+    if delta < 60 {
+        return "now".to_string();
+    }
+    let mins = delta / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    let rem = mins % 60;
+    if hours < 24 {
+        if rem == 0 {
+            return format!("{hours}h ago");
+        }
+        return format!("{hours}h {rem}m ago");
+    }
+    let days = hours / 24;
+    let rem_h = hours % 24;
+    if rem_h == 0 {
+        format!("{days}d ago")
+    } else {
+        format!("{days}d {rem_h}h ago")
     }
 }
 
@@ -1274,41 +1339,6 @@ fn handle_session_command(
             println!("switched to session \"{label}\" ({} messages loaded).", messages.len());
         }
         Err(e) => println!("error loading session: {e}"),
-    }
-}
-
-/// Skin list+preview+select flow for the startup wizard (`--select-skin`),
-/// where the multi-line color preview is worth its screen space. The mid-chat
-/// `/skin` uses the shared picker instead.
-pub fn pick_skin_interactive(names: &[String], reader: &mut LineReader) -> Option<String> {
-    println!("\navailable skins:\n");
-    for (i, name) in names.iter().enumerate() {
-        let s = crate::ui::skin::by_name(Some(name));
-        // A real mini-transcript, not a flat swatch: prompt glyph, a tool-call
-        // header, and an answer with inline code — exercises every role
-        // color at once using actual Grace tools (terminal, ls).
-        println!(
-            "  {a}{i}) {name}{r}\n     {p}{glyph} you{r}\n       {tb}●{r} {tn}terminal{r}(list files)  {td}⎿ file1.txt  file2.txt{r}\n     {a}{ag}{r}  Use {c}ls{r} for directory listings.",
-            i = i + 1,
-            name = name,
-            p = s.style(Role::Prompt).render(),
-            glyph = s.prompt_glyph,
-            r = reset(),
-            tb = s.style(Role::ToolBullet).render(),
-            tn = s.style(Role::ToolName).render(),
-            td = s.style(Role::ToolDim).render(),
-            a = s.style(Role::Answer).render(),
-            ag = s.answer_glyph,
-            c = s.style(Role::Code).render(),
-        );
-    }
-    let raw = reader.read_line("\nselect a skin [number]: ")?;
-    match raw.trim().parse::<usize>() {
-        Ok(n) if n >= 1 && n <= names.len() => Some(names[n - 1].clone()),
-        _ => {
-            println!("not a valid choice — leaving skin unchanged.");
-            None
-        }
     }
 }
 
