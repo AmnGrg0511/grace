@@ -213,9 +213,39 @@ pub fn run_chat(
             continue;
         }
         // A slash command is its first *word*: `/modelxyz` is model text, not
-        // a mistyped `/model`.
-        let cmd_word = text.split_whitespace().next().unwrap_or(text);
+        // a mistyped `/model`. An unambiguous abbreviation (`/e`, `/m`) is
+        // rewritten to the command it names; an ambiguous one (`/s`) opens a
+        // picker between the candidates; no match falls through to the model.
+        let mut cmd_word = text.split_whitespace().next().unwrap_or(text).to_string();
         let rest = text[cmd_word.len()..].trim();
+        if cmd_word.len() > 1 && cmd_word.starts_with('/') {
+            let word = cmd_word[1..].to_string();
+            if crate::ui::commands::resolve(&word).is_none() {
+                let candidates = crate::ui::commands::resolve_prefix(&word);
+                match candidates.as_slice() {
+                    [] => {}
+                    [only] => cmd_word = format!("/{}", only.name),
+                    many => {
+                        let items: Vec<crate::ui::picker::Pick> = many
+                            .iter()
+                            .map(|c| crate::ui::picker::Pick {
+                                id: c.name.to_string(),
+                                label: format!("/{}", c.name),
+                                sublabel: Some(c.summary.to_string()),
+                            })
+                            .collect();
+                        if let Some(name) = crate::ui::picker::pick(
+                            &items,
+                            &skin,
+                            &format!("\"{word}\" is ambiguous — pick a command"),
+                        ) {
+                            pending_input = Some(format!("/{name} {rest}"));
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
         match cmd_word.strip_prefix('/') {
             Some("exit") => {
                 println!("goodbye.");

@@ -72,6 +72,16 @@ pub fn resolve(cmd: &str) -> Option<&'static SlashCommand> {
     SLASH_COMMANDS.iter().find(|c| c.all_names().any(|n| n == cmd))
 }
 
+/// Every command whose name starts with `cmd` — the candidates for a typed
+/// abbreviation like `/m`. One match means unambiguous shorthand; several
+/// means the caller offers a picker between them; none means model text.
+pub fn resolve_prefix(cmd: &str) -> Vec<&'static SlashCommand> {
+    SLASH_COMMANDS
+        .iter()
+        .filter(|c| c.all_names().any(|n| n.starts_with(cmd)))
+        .collect()
+}
+
 /// Completion candidates for a line that already starts with `/`: every name
 /// and alias (slash-prefixed) that has the typed line as a prefix.
 pub fn completion_candidates(typed: &str) -> Vec<String> {
@@ -104,6 +114,29 @@ mod tests {
         for w in ["", "help2", "models", "retried", "bash"] {
             assert!(resolve(w).is_none(), "{w:?}");
         }
+    }
+
+    #[test]
+    fn a_unique_prefix_resolves_to_its_command() {
+        assert_eq!(resolve_prefix("e").len(), 1);
+        assert_eq!(resolve_prefix("e")[0].name, "exit");
+        assert_eq!(resolve_prefix("m")[0].name, "model");
+        // Longer prefixes stay shorthands too.
+        assert_eq!(resolve_prefix("ver")[0].name, "verbose");
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_lists_every_candidate_in_registry_order() {
+        let names: Vec<_> = resolve_prefix("s").iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["skin", "session"]);
+        // A full name matches exactly itself.
+        assert_eq!(resolve_prefix("skin").len(), 1);
+    }
+
+    #[test]
+    fn an_unknown_prefix_matches_nothing() {
+        assert!(resolve_prefix("zz").is_empty());
+        assert!(resolve_prefix("modelx").is_empty());
     }
 
     #[test]
