@@ -162,7 +162,9 @@ impl SessionStore {
     /// Full-text search across all sessions. Returns (session_id, snippet).
     /// A bare `*` (or empty query) means "everything" — FTS5 rejects `*` as
     /// invalid MATCH syntax, so that case is special-cased to a plain scan
-    /// instead of surfacing a raw SQL error to the caller.
+    /// instead of surfacing a raw SQL error to the caller. Any other query
+    /// is quoted token-by-token (see [`fts_quote`]) so identifiers like
+    /// `GRACE-123` work bare.
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<(String, String)>> {
         let trimmed = query.trim();
         if trimmed.is_empty() || trimmed == "*" {
@@ -191,7 +193,7 @@ impl SessionStore {
             )
             .map_err(|e| AgentError::Tool(format!("prepare search: {e}")))?;
         let rows = stmt
-            .query_map((trimmed, limit), |row| {
+            .query_map((fts_quote(trimmed), limit), |row| {
                 let sid: String = row.get(0)?;
                 let content: String = row.get(1)?;
                 Ok((sid, content))
@@ -203,8 +205,7 @@ impl SessionStore {
         }
         Ok(out)
     }
-    /// Distinct session ids that have at least one message, most recently
-    /// active first. Powers `grace --list-sessions`.
+    /// Distinct session ids that have at least one message, most recently    /// active first. Powers `grace --list-sessions`.
     pub fn list_sessions(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -328,6 +329,19 @@ impl SessionStore {
             None => Ok(None),
         }
     }
+}
+
+/// Make arbitrary user text safe for an FTS5 MATCH query: each
+/// whitespace-separated token becomes a quoted phrase (embedded quotes
+/// doubled), so identifiers and punctuation are searched literally instead
+/// of parsed as query syntax — `GRACE-123` matches its tokens adjacent,
+/// `50%` doesn't error, `AND`/`NOT`/`NEAR` lose their operator meaning.
+fn fts_quote(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -539,5 +553,45 @@ mod tests {
         assert_eq!(empty.len(), 2);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fts_quote_wraps_each_token_and_doubles_embedded_quotes() {
+        assert_eq!(fts_quote("GRACE-123"), "\"GRACE-123\"");
+        assert_eq!(fts_quote("fix  GRACE-123  now"), "\"fix\" \"GRACE-123\" \"now\"");
+        assert_eq!(fts_quote("say \"hi\""), "\"say\" \"\"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn a_bare_jira_id_is_findable_without_quoting() {
+        let path = scratch_db("jira");
+        let _ = std::fs::remove_file(&path);
+        let store = SessionStore::open(&path).unwrap();
+
+        store
+            .append("s1", &Message::user("please fix GRACE-123 before the release"))
+            .unwrap();
+        store.append("s2", &Message::user("unrelated chatter")).unwrap();
+
+        let hits = store.search("GRACE-123", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "s1");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn punctuation_and_reserved_words_no_longer_error_the_match_query() {
+        // Each of these used to be raw MATCH input: `c++`/`50%`/parens are
+        // syntax errors, a bare AND/OR/NOT is an operator misuse error.
+        for q in ["c++ (urgent)", "50% off", "fish AND chips", "NOT this", "a OR b"] {
+            let path = scratch_db("syntax");
+            let _ = std::fs::remove_file(&path);
+            let store = SessionStore::open(&path).unwrap();
+            store.append("s1", &Message::user("plain text body")).unwrap();
+            let hits = store.search(q, 10);
+            assert!(hits.is_ok(), "{q:?} errored: {:?}", hits.err());
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
