@@ -27,6 +27,31 @@ pub fn truncate_utf8(s: &str, max: usize) -> String {
     format!("{}... [truncated {} bytes]", &s[..end], s.len() - end)
 }
 
+/// Truncate `s` to at most `max` display columns (unicode width, not bytes),
+/// cutting only between characters so the result is valid UTF-8 that fits on
+/// a terminal row. Zero-width characters (combining marks, control chars)
+/// count nothing; wide characters count two columns.
+///
+/// Unlike [`truncate_utf8`], this never appends a marker — it is for fitting
+/// a status line to the terminal width, where an ellipsis of unknown length
+/// would defeat the purpose.
+pub fn truncate_utf8_display(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for c in s.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + w > max {
+            break;
+        }
+        out.push(c);
+        width += w;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +103,29 @@ mod tests {
         for max in 0..=cyrillic.len() {
             let _ = truncate_utf8(cyrillic, max);
         }
+    }
+
+    #[test]
+    fn truncate_utf8_display_passthrough_and_hard_cut() {
+        assert_eq!(truncate_utf8_display("abc", 500), "abc");
+        assert_eq!(truncate_utf8_display("abcdef", 3), "abc");
+        assert_eq!(truncate_utf8_display("abcdef", 0), "");
+    }
+
+    #[test]
+    fn truncate_utf8_display_counts_wide_chars_as_two_columns() {
+        // A CJK character occupies two columns: 2 chars fill a 4-col budget.
+        assert_eq!(truncate_utf8_display("中中中", 4), "中中");
+        // One wide char plus one narrow char = 3 columns; the second wide
+        // char would exceed 4 and must be dropped.
+        assert_eq!(truncate_utf8_display("中a中", 4), "中a");
+    }
+
+    #[test]
+    fn truncate_utf8_display_never_splits_a_codepoint() {
+        // A 4-byte emoji counts two columns and stays whole.
+        assert_eq!(truncate_utf8_display("a🦀bbb", 2), "a");
+        assert_eq!(truncate_utf8_display("🦀", 1), "");
+        assert_eq!(truncate_utf8_display("🦀", 2), "🦀");
     }
 }

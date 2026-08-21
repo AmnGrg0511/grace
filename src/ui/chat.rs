@@ -2145,6 +2145,12 @@ pub fn print_status_line(
         started_at,
         read_only,
     );
+    // Cap to the terminal width so the status line can never wrap onto the
+    // prompt row below it.
+    let line = match crate::ui::markdown::terminal_width() {
+        Some(w) => crate::util::truncate_utf8_display(&line, w.saturating_sub(1)),
+        None => line,
+    };
     if no_color() {
         println!("{line}");
     } else {
