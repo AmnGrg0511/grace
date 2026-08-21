@@ -261,7 +261,7 @@ pub fn run_chat(
                 continue;
             }
             Some("session") => {
-                handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills, &mut last_usage);
+                handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills, &mut last_usage, &skin);
                 continue;
             }
             Some("jump") => {
@@ -1140,7 +1140,10 @@ fn handle_session_command(
     system_override: Option<&str>,
     skills: &crate::skill::SkillStore,
     last_usage: &mut Option<crate::transport::TokenUsage>,
+    skin: &Skin,
 ) {
+    use crate::ui::picker::{pick, Pick};
+
     // The same assembly path as startup (`config::build_system_prompt`): the
     // `--system` override is honored, durable facts are appended, and a
     // memory error is printed rather than swallowed. `query` is the
@@ -1169,7 +1172,6 @@ fn handle_session_command(
         return;
     }
 
-    println!("\nsaved sessions (most recent first):\n");
     let titles = sessions.get_titles(&session_list).unwrap_or_default();
     let labels: Vec<String> = session_list
         .iter()
@@ -1194,6 +1196,12 @@ fn handle_session_command(
     for l in &labels {
         *counts.entry(l.as_str()).or_insert(0) += 1;
     }
+    let mut items: Vec<Pick> = Vec::with_capacity(session_list.len() + 1);
+    items.push(Pick {
+        id: "\u{1}new".to_string(),
+        label: "start a fresh session".to_string(),
+        sublabel: None,
+    });
     for (i, sid) in session_list.iter().enumerate() {
         let label = &labels[i];
         let disambiguated = if counts.get(label.as_str()).copied().unwrap_or(0) > 1 {
@@ -1202,70 +1210,70 @@ fn handle_session_command(
             label.clone()
         };
         let lock_marker = if crate::session::SessionLock::is_held(sid) {
-            " [open in another terminal]"
+            " · open in another terminal"
         } else {
             ""
         };
-        println!("  {}) {}{}", i + 1, disambiguated, lock_marker);
+        items.push(Pick {
+            id: sid.clone(),
+            label: disambiguated,
+            sublabel: Some(format!("{sid}{lock_marker}")),
+        });
     }
-    let Some(raw) = reader.read_line("\nselect a session [number, or 0 for new]: ") else {
-        println!("no input — staying on current session.");
+    let Some(choice) = pick(&items, skin, "switch to a session") else {
+        println!("staying on current session.");
         return;
     };
-    match raw.trim().parse::<usize>() {
-        Ok(0) => {
+    if choice == "\u{1}new" {
+        messages.clear();
+        messages.push(fresh_system(None));
+        let new_id = short_session_id();
+        if let Err(e) = sessions.append(&new_id, &Message::user("")) {
+            println!("warning: could not persist new session: {e}");
+        }
+        *current_session = Some(new_id.clone());
+        *session_lock = crate::session::SessionLock::acquire(&new_id).ok();
+        reader.set_history_scope(Some(&new_id));
+        // A brand-new session has no measured usage yet — the status bar
+        // falls back to the estimate until the first turn reports one.
+        *last_usage = None;
+        println!("started a fresh session.");
+        return;
+    }
+    let sid = &choice;
+    if crate::session::SessionLock::is_held(sid) {
+        println!(
+            "session is open in another terminal — switching here would co-own it (concurrent writes may interleave). switch anyway? [y/N]"
+        );
+        match reader.read_line("") {
+            Some(ans) if ans.trim().eq_ignore_ascii_case("y") => {}
+            _ => {
+                println!("staying on current session.");
+                return;
+            }
+        }
+    }
+    match sessions.load(sid) {
+        Ok(loaded) => {
+            let query = loaded
+                .iter()
+                .find(|m| m.role == crate::message::Role::User)
+                .map(|m| m.content.as_str());
             messages.clear();
-            messages.push(fresh_system(None));
-            let new_id = short_session_id();
-            if let Err(e) = sessions.append(&new_id, &Message::user("")) {
-                println!("warning: could not persist new session: {e}");
-            }
-            *current_session = Some(new_id.clone());
-            *session_lock = crate::session::SessionLock::acquire(&new_id).ok();
-            reader.set_history_scope(Some(&new_id));
-            // A brand-new session has no measured usage yet — the status bar
-            // falls back to the estimate until the first turn reports one.
-            *last_usage = None;
-            println!("started a fresh session.");
+            messages.push(fresh_system(query));
+            messages.extend(loaded);
+            *current_session = Some(sid.clone());
+            *session_lock = crate::session::SessionLock::acquire(sid).ok();
+            reader.set_history_scope(Some(sid));
+            // Pick up the switched-to session's own measured usage so
+            // the status bar doesn't keep showing the outgoing
+            // session's count (or an estimate) for a session that has
+            // real usage on record.
+            *last_usage = sessions.load_usage(sid).ok().flatten();
+            let label = titles.get(sid).cloned().unwrap_or_else(|| sid.clone());
+            println!("switched to session \"{label}\" ({} messages loaded).", messages.len());
         }
-        Ok(n) if n >= 1 && n <= session_list.len() => {
-            let sid = &session_list[n - 1];
-            if crate::session::SessionLock::is_held(sid) {
-                println!(
-                    "session is open in another terminal — switching here would co-own it (concurrent writes may interleave). switch anyway? [y/N]"
-                );
-                match reader.read_line("") {
-                    Some(ans) if ans.trim().eq_ignore_ascii_case("y") => {}
-                    _ => {
-                        println!("staying on current session.");
-                        return;
-                    }
-                }
-            }
-            match sessions.load(sid) {
-                Ok(loaded) => {
-                    let query = loaded
-                        .iter()
-                        .find(|m| m.role == crate::message::Role::User)
-                        .map(|m| m.content.as_str());
-                    messages.clear();
-                    messages.push(fresh_system(query));
-                    messages.extend(loaded);
-                    *current_session = Some(sid.clone());
-                    *session_lock = crate::session::SessionLock::acquire(sid).ok();
-                    reader.set_history_scope(Some(sid));
-                    // Pick up the switched-to session's own measured usage so
-                    // the status bar doesn't keep showing the outgoing
-                    // session's count (or an estimate) for a session that has
-                    // real usage on record.
-                    *last_usage = sessions.load_usage(sid).ok().flatten();
-                    let label = titles.get(sid).cloned().unwrap_or_else(|| sid.clone());
-                    println!("switched to session \"{label}\" ({} messages loaded).", messages.len());
-                }
-                Err(e) => println!("error loading session: {e}"),
-            }
-        }
-        _ => println!("not a valid choice — staying on current session."),
+        Err(e) => println!("error loading session: {e}"),
     }
 }
 
