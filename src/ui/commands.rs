@@ -1,11 +1,11 @@
 //! The single source of truth for chat slash commands.
 //!
 //! Three surfaces used to each keep their own copy of the command list — the
-//! tab-completer, the dispatch match in `chat.rs`, and the `/help` text —
+//! tab-completer, the dispatch match in `chat.rs`, and the command palette —
 //! and nothing checked they agreed (audit S14); that is how `/help` and
 //! `/commands` ended up dispatchable and documented but missing from
-//! completion (audit G14). The completer, the command palette, and the help
-//! screen all enumerate this table now, and `chat.rs` carries the
+//! completion (audit G14). The completer, the command palette, and the
+//! dispatcher all enumerate this table now, and `chat.rs` carries the
 //! dispatch↔registry agreement test.
 
 /// One slash command: its canonical name (no `/`), any aliases a typed input
@@ -24,19 +24,14 @@ impl SlashCommand {
     }
 }
 
-/// The canonical command list. Order here is the order in `/help` and the
-/// palette. A handler with no entry here is undiscoverable — that is the bug
+/// The canonical command list. Order here is the order in the palette. A
+/// handler with no entry here is undiscoverable — that is the bug
 /// this table exists to prevent (see the agreement test in `chat.rs`).
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "exit",
-        aliases: &["quit"],
+        aliases: &[],
         summary: "Exit the chat",
-    },
-    SlashCommand {
-        name: "help",
-        aliases: &["commands"],
-        summary: "Show this list",
     },
     SlashCommand {
         name: "model",

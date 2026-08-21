@@ -119,15 +119,25 @@ mod tests {
     }
 
     #[test]
-    fn help_and_commands_are_completable() {
-        // Regression (G14): both dispatch and document themselves, yet were
-        // missing from completion because the completer kept its own list.
+    fn completer_agrees_with_the_registry() {
+        // Regression (G14): commands that dispatch and document themselves
+        // were missing from completion because the completer kept its own
+        // list. The completer must offer exactly the registry's names: every
+        // registered name is completed, and nothing else leaks in.
         let helper = CommandHelper { skin: crate::ui::skin::SOLARIS };
         let hist = rustyline::history::DefaultHistory::new();
         let ctx = rustyline::Context::new(&hist);
-        let (_, h) = helper.complete("/h", 2, &ctx).unwrap();
-        assert!(h.contains(&"/help".to_string()));
-        let (_, c) = helper.complete("/c", 2, &ctx).unwrap();
-        assert!(c.contains(&"/commands".to_string()));
+        for c in crate::ui::commands::SLASH_COMMANDS {
+            let prefix = format!("/{}", &c.name[..1]);
+            let (_, got) = helper.complete(&prefix, prefix.len(), &ctx).unwrap();
+            assert!(
+                got.contains(&format!("/{}", c.name)),
+                "/{} missing from completions for {prefix}: {got:?}",
+                c.name
+            );
+        }
+        // A prefix that matches no command completes nothing.
+        let (_, none) = helper.complete("/zz", 3, &ctx).unwrap();
+        assert!(none.is_empty(), "unexpected completions: {none:?}");
     }
 }

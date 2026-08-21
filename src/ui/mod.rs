@@ -3,7 +3,7 @@
 //! ```text
 //! chat.rs         the interactive REPL and its slash commands
 //! cli.rs          --help text and shell completions
-//! commands.rs     the single slash-command registry (completer/help/palette)
+//! commands.rs     the single slash-command registry (completer/palette/dispatch)
 //! line_reader.rs  line editing / history
 //! completer.rs    tab completion + hinting for the REPL
 //! picker.rs       the shared dropdown (palette, /model, /forget, /jump)

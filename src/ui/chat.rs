@@ -217,13 +217,9 @@ pub fn run_chat(
         let cmd_word = text.split_whitespace().next().unwrap_or(text);
         let rest = text[cmd_word.len()..].trim();
         match cmd_word.strip_prefix('/') {
-            Some("exit" | "quit") => {
+            Some("exit") => {
                 println!("goodbye.");
                 break;
-            }
-            Some("help" | "commands") => {
-                print_slash_commands_help();
-                continue;
             }
             Some("model") => {
                 handle_model_command(transport, rest, &mut reader, &skin, &mut cached_context_window);
@@ -2271,33 +2267,6 @@ fn handle_jump_command(
     }
 }
 
-/// `/help` — rendered from the single command registry in two columns, so
-/// the help screen can never list (or omit) a command whose dispatching
-/// differs.
-fn print_slash_commands_help() {
-    use crate::ui::commands;
-
-    let cmds = commands::SLASH_COMMANDS;
-    let fmt = |c: &commands::SlashCommand| {
-        let names: Vec<String> = c.all_names().map(|n| format!("/{n}")).collect();
-        format!("{:>w$}  {}", names.join(", "), c.summary, w = 12)
-    };
-    let (left, right) = {
-        let half = cmds.len().div_ceil(2);
-        cmds.split_at(half)
-    };
-    let width = left.iter().map(|c| fmt(c).len()).max().unwrap_or(0);
-    println!("\nAvailable slash commands (type a bare \"/\" for the picker):");
-    for (i, c) in left.iter().enumerate() {
-        let l = fmt(c);
-        match right.get(i) {
-            Some(r) => println!("  {:<w$}    {}", l, fmt(r), w = width),
-            None => println!("  {l}"),
-        }
-    }
-    println!();
-}
-
 #[cfg(test)]
 mod verbose_gate_tests {
     use super::should_show_tool_output;
@@ -2347,10 +2316,7 @@ mod slash_command_agreement_tests {
     /// handler without a registry entry is an undiscoverable command (audit
     /// G14), and a registry entry without a handler is a phantom. Update
     /// this constant whenever an arm in the dispatch match changes.
-    const DISPATCHED: &[&str] = &[
-        "exit", "quit", "help", "commands", "model", "skin", "session", "jump", "verbose",
-        "readonly",
-    ];
+    const DISPATCHED: &[&str] = &["exit", "model", "skin", "session", "jump", "verbose", "readonly"];
 
     #[test]
     fn every_dispatched_word_is_registered() {
