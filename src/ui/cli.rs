@@ -614,13 +614,31 @@ fn run_one_shot(
         });
     }
     let mut stream_state = crate::ui::chat::StreamState::default();
+    // Same thinking spinner as chat mode (TTY only, no-op when piped).
+    let mut spinner = crate::ui::chat::Spinner::start(skin);
 
     // `--stream` is no longer a separate code path that skips the tool loop.
     // It is a flag on the same loop, so a streamed run can still call tools —
     // the old one-shot-only streaming silently dropped that ability.
     let turn = {
         let mut sink = |event: crate::core::AgentEvent<'_>| {
+            let tool_end = matches!(
+                &event,
+                crate::core::lifecycle::AgentEvent::ToolCallEnd { .. }
+            );
+            if !tool_end {
+                spinner.pause();
+            }
+            let at_start = crate::ui::chat::event_ends_at_line_start(
+                &event,
+                crate::ui::skin::no_color(),
+            );
+            let guard = spinner.begin_write();
             crate::ui::chat::print_agent_event(event, skin, args.verbose, &mut stream_state);
+            spinner.end_write(guard, at_start);
+            if tool_end {
+                spinner.resume();
+            }
         };
         let options = crate::core::TurnOptions::new()
             .with_events(&mut sink)
@@ -635,6 +653,7 @@ fn run_one_shot(
             options,
         )
     };
+    spinner.finish();
     let outcome = match turn {
         Ok(outcome) => outcome,
         // Ctrl-C: not an error report — the same "stop, I'm going" as a
