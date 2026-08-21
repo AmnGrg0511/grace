@@ -205,7 +205,8 @@ impl SessionStore {
         }
         Ok(out)
     }
-    /// Distinct session ids that have at least one message, most recently    /// active first. Powers `grace --list-sessions`.
+    /// Distinct session ids that have at least one message, most recently
+    /// active first. Powers `grace --list-sessions`.
     pub fn list_sessions(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -216,6 +217,29 @@ impl SessionStore {
             .map_err(|e| AgentError::Tool(format!("prepare: {e}")))?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| AgentError::Tool(format!("query: {e}")))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| AgentError::Tool(format!("row: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    /// Last activity time (unix seconds) per session id — the newest message
+    /// each session has. Missing ids have no messages. Powers the `/session`
+    /// picker's recency labels ("current", "14:32", "2d 3h ago").
+    pub fn last_active(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session_id, MAX(created_at) AS last_at FROM messages \
+                 GROUP BY session_id",
+            )
+            .map_err(|e| AgentError::Tool(format!("prepare: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
             .map_err(|e| AgentError::Tool(format!("query: {e}")))?;
         let mut out = Vec::new();
         for r in rows {

@@ -1246,6 +1246,15 @@ fn handle_session_command(
     }
 
     let titles = sessions.get_titles(&session_list).unwrap_or_default();
+    let recency: std::collections::HashMap<String, i64> = sessions
+        .last_active()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let labels: Vec<String> = session_list
         .iter()
         .map(|sid| {
@@ -1278,12 +1287,30 @@ fn handle_session_command(
         } else {
             label.clone()
         };
-        let lock_marker = if crate::session::SessionLock::is_held(sid) {
-            " · open in another terminal"
+        let is_current = current_session.as_deref() == Some(sid.as_str());
+        // Recency in a skin accent, visually distinct from the dim title —
+        // "current" for the live session, else how long ago it was active.
+        // No brackets; the color alone separates title from timestamp.
+        let accent = skin.paint(Role::Code, &if is_current {
+            "current".to_string()
         } else {
-            ""
+            match recency.get(sid) {
+                Some(&ts) => recency_label(ts, now),
+                None => "—".to_string(),
+            }
+        });
+        let lock_marker = if crate::session::SessionLock::is_held(sid) {
+            format!("  {}", skin.paint(Role::ToolDim, "· open in another terminal"))
+        } else {
+            String::new()
         };
-        items.push(Pick::new(sid.clone(), disambiguated).hint(format!("{sid}{lock_marker}")));
+        let mut row = Pick::new(sid.clone(), disambiguated)
+            .hint(format!("{accent}{lock_marker}"))
+            .verbatim_sub();
+        if is_current {
+            row = row.disabled();
+        }
+        items.push(row);
     }
     let Some(choice) = pick(&items, skin, "switch to a session") else {
         println!("staying on current session.");
@@ -2121,6 +2148,20 @@ mod model_command_tests {
     fn short_url_keeps_only_the_host() {
         assert_eq!(short_url("https://api.openai.com/v1"), "api.openai.com");
         assert_eq!(short_url("http://localhost:11434/v1"), "localhost:11434");
+    }
+
+    #[test]
+    fn recency_labels_read_like_a_humans_clock() {
+        let now = 1_000_000_000;
+        assert_eq!(recency_label(now, now), "now");
+        assert_eq!(recency_label(now - 30, now), "now");
+        assert_eq!(recency_label(now - 45 * 60, now), "45m ago");
+        assert_eq!(recency_label(now - 3 * 3600, now), "3h ago");
+        assert_eq!(recency_label(now - 3 * 3600 - 12 * 60, now), "3h 12m ago");
+        assert_eq!(recency_label(now - 2 * 86400 - 3 * 3600, now), "2d 3h ago");
+        assert_eq!(recency_label(now - 5 * 86400, now), "5d ago");
+        // A future timestamp (clock skew) is clamped to "now", never negative.
+        assert_eq!(recency_label(now + 500, now), "now");
     }
 
     #[test]
