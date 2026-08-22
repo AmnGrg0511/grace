@@ -61,6 +61,16 @@ pub struct Skin {
     /// Inline code / fenced code blocks — "golden monospace" by default,
     /// but fully skin-controlled.
     pub code: RgbColor,
+    /// The general highlight: picker cursors, status-line segments, anything
+    /// that should pop without stealing a semantic role.
+    pub accent: RgbColor,
+    /// Secondary/explanatory text: command summaries in the palette, usage
+    /// lines, footnotes. Deliberately quieter than [`Self::tool_dim`].
+    pub hint: RgbColor,
+    /// Positive confirmations (saved, applied, ok).
+    pub success: RgbColor,
+    /// Failures and warnings that must be impossible to miss.
+    pub error: RgbColor,
 }
 
 impl Skin {
@@ -81,6 +91,10 @@ impl Skin {
             Role::ToolName => Style::new().fg_color(Some(Color::from(self.tool_name))),
             Role::ToolDim => Style::new().fg_color(Some(Color::from(self.tool_dim))),
             Role::Code => Style::new().fg_color(Some(Color::from(self.code))),
+            Role::Accent => Style::new().fg_color(Some(Color::from(self.accent))),
+            Role::Hint => Style::new().fg_color(Some(Color::from(self.hint))),
+            Role::Success => Style::new().fg_color(Some(Color::from(self.success))),
+            Role::Error => Style::new().fg_color(Some(Color::from(self.error))),
         }
     }
 
@@ -112,6 +126,10 @@ pub enum Role {
     ToolName,
     ToolDim,
     Code,
+    Accent,
+    Hint,
+    Success,
+    Error,
 }
 
 /// "solaris" — amber/orange, high energy (DEFAULT).
@@ -126,6 +144,10 @@ pub const SOLARIS: Skin = Skin {
     tool_name: RgbColor(250, 230, 200),
     tool_dim: RgbColor(140, 110, 80),
     code: RgbColor(255, 180, 60),
+    accent: RgbColor(255, 105, 45),
+    hint: RgbColor(155, 130, 100),
+    success: RgbColor(150, 205, 90),
+    error: RgbColor(240, 85, 65),
 };
 
 /// "royal" — deep violet/indigo with a brighter gold, more formal.
@@ -140,6 +162,10 @@ pub const ROYAL: Skin = Skin {
     tool_name: RgbColor(230, 230, 250),
     tool_dim: RgbColor(110, 100, 130),
     code: RgbColor(255, 215, 0),
+    accent: RgbColor(200, 125, 250),
+    hint: RgbColor(150, 140, 170),
+    success: RgbColor(120, 200, 145),
+    error: RgbColor(245, 100, 115),
 };
 
 /// "ocean" — cool teal/blue, calm and low-contrast.
@@ -154,6 +180,10 @@ pub const OCEAN: Skin = Skin {
     tool_name: RgbColor(220, 235, 240),
     tool_dim: RgbColor(90, 120, 130),
     code: RgbColor(0, 200, 190),
+    accent: RgbColor(95, 165, 255),
+    hint: RgbColor(120, 138, 152),
+    success: RgbColor(80, 200, 145),
+    error: RgbColor(248, 112, 98),
 };
 
 /// "sakura" — warm pinks, soft and bright.
@@ -168,6 +198,10 @@ pub const SAKURA: Skin = Skin {
     tool_name: RgbColor(255, 235, 240),
     tool_dim: RgbColor(150, 110, 125),
     code: RgbColor(255, 160, 190),
+    accent: RgbColor(255, 95, 135),
+    hint: RgbColor(168, 142, 152),
+    success: RgbColor(135, 195, 125),
+    error: RgbColor(232, 72, 96),
 };
 
 pub const ALL: &[Skin] = &[SOLARIS, ROYAL, OCEAN, SAKURA];
@@ -189,6 +223,14 @@ pub struct CustomSkin {
     pub tool_name: [u8; 3],
     pub tool_dim: [u8; 3],
     pub code: [u8; 3],
+    #[serde(default = "default_accent")]
+    pub accent: [u8; 3],
+    #[serde(default = "default_hint")]
+    pub hint: [u8; 3],
+    #[serde(default = "default_success")]
+    pub success: [u8; 3],
+    #[serde(default = "default_error")]
+    pub error: [u8; 3],
 }
 
 fn default_prompt_glyph() -> String {
@@ -197,6 +239,12 @@ fn default_prompt_glyph() -> String {
 fn default_answer_glyph() -> String {
     "◆".to_string()
 }
+// Serde fallbacks for custom skins written before these roles existed — an
+// old ~/.grace/skins/*.toml must keep parsing (defaults mirror solaris).
+fn default_accent() -> [u8; 3] { [255, 105, 45] }
+fn default_hint() -> [u8; 3] { [155, 130, 100] }
+fn default_success() -> [u8; 3] { [150, 205, 90] }
+fn default_error() -> [u8; 3] { [240, 85, 65] }
 
 /// Directory custom skins live in: `~/.grace/skins/*.toml`.
 pub fn custom_skins_dir() -> std::path::PathBuf {
@@ -259,6 +307,10 @@ fn leak_custom(c: CustomSkin) -> Skin {
         tool_name: RgbColor(c.tool_name[0], c.tool_name[1], c.tool_name[2]),
         tool_dim: RgbColor(c.tool_dim[0], c.tool_dim[1], c.tool_dim[2]),
         code: RgbColor(c.code[0], c.code[1], c.code[2]),
+        accent: RgbColor(c.accent[0], c.accent[1], c.accent[2]),
+        hint: RgbColor(c.hint[0], c.hint[1], c.hint[2]),
+        success: RgbColor(c.success[0], c.success[1], c.success[2]),
+        error: RgbColor(c.error[0], c.error[1], c.error[2]),
     }
 }
 
@@ -273,6 +325,37 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), 4, "skin names must be unique");
+    }
+
+    #[test]
+    fn every_skin_gives_the_new_roles_distinct_colors() {
+        for s in ALL {
+            let colors = [s.accent, s.hint, s.success, s.error];
+            let mut sorted = colors.to_vec();
+            sorted.sort_by_key(|c| (c.0, c.1, c.2));
+            sorted.dedup();
+            assert_eq!(sorted.len(), colors.len(), "{} reuses a color across the new roles", s.name);
+        }
+    }
+
+    #[test]
+    fn a_custom_skin_toml_without_the_new_fields_still_parses() {
+        // Pre-accent-era skin file: serde defaults must fill the gaps.
+        let toml = r#"
+name = "legacy"
+prompt = [1, 2, 3]
+answer = [4, 5, 6]
+thinking = [7, 8, 9]
+tool_bullet = [10, 11, 12]
+tool_name = [13, 14, 15]
+tool_dim = [16, 17, 18]
+code = [19, 20, 21]
+"#;
+        let c: CustomSkin = toml::from_str(toml).expect("legacy toml must parse");
+        assert_eq!(c.accent, default_accent());
+        assert_eq!(c.hint, default_hint());
+        assert_eq!(c.success, default_success());
+        assert_eq!(c.error, default_error());
     }
 
     #[test]
