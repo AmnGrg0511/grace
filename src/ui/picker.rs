@@ -109,6 +109,10 @@ pub struct Pick {
     /// Pre-rendered lines under the row (skin color snapshots). Written
     /// verbatim and excluded from type-to-filter.
     pub extra_lines: Vec<String>,
+    /// The color role a plain sublabel paints with, instead of the row's
+    /// uniform style — command summaries in the palette read better in their
+    /// own quieter voice than the label's. `None` keeps the old behavior.
+    pub sub_role: Option<crate::ui::skin::Role>,
 }
 
 impl Pick {
@@ -121,7 +125,14 @@ impl Pick {
             disabled: false,
             sub_verbatim: false,
             extra_lines: Vec::new(),
+            sub_role: None,
         }
+    }
+
+    /// Paint the plain sublabel in `role` (no-op for verbatim sublabels).
+    pub fn hint_role(mut self, role: crate::ui::skin::Role) -> Self {
+        self.sub_role = Some(role);
+        self
     }
 
     /// Attach a hint shown after the label.
@@ -349,9 +360,15 @@ fn render_frame(
             ("  ".to_string(), Role::ToolDim)
         };
 
-        let mut body = wrap_words(&it.label, label_budget);
-        let mut extras_rows: Vec<String>;
+        // One entry assembles from plain-text parts — label lines, an
+        // optional verbatim accent tail, optional sublabel lines (the first
+        // of which may be glued onto the final label line when both fit) —
+        // so widths and the budget never measure ANSI bytes; painting
+        // happens at emit time and can give the sublabel its own role.
+        let mut label_rows: Vec<(String, Option<String>)> =
+            wrap_words(&it.label, label_budget).into_iter().map(|l| (l, None)).collect();
         let mut raw_tail: Option<String> = None;
+        let mut sub_rows: Vec<String> = Vec::new();
         if let Some(sub) = it.sublabel.as_deref() {
             if it.sub_verbatim {
                 if visible_width(sub) <= sub_budget {
@@ -359,39 +376,46 @@ fn render_frame(
                 } else {
                     // Pathologically wide accent text degrades to plain
                     // wrapped text rather than risking an overflowing row.
-                    body.extend(wrap_words(&crate::ui::markdown::strip_ansi(sub), sub_budget));
+                    sub_rows = wrap_words(&crate::ui::markdown::strip_ansi(sub), sub_budget);
                     raw_tail = None;
                 }
             } else {
                 let mut sub_lines = wrap_words(sub, sub_budget);
-                let fits_inline = body.last().is_some_and(|last| {
-                    visible_width(last) + 2 + visible_width(&sub_lines[0]) <= label_budget
+                let fits_inline = label_rows.last().is_some_and(|(l, _)| {
+                    visible_width(l) + 2 + visible_width(&sub_lines[0]) <= label_budget
                 });
                 if fits_inline {
-                    if let Some(last) = body.last_mut() {
-                        last.push_str("  ");
-                        last.push_str(&sub_lines.remove(0));
-                    }
-                } else {
-                    for sl in sub_lines {
-                        body.push(format!("  {sl}"));
+                    // Glue the first subline onto the label row but remember
+                    // it separately so the two paints stay independent.
+                    if let Some((_, glued)) = label_rows.last_mut() {
+                        *glued = sub_lines.remove(0).into();
                     }
                 }
+                sub_rows = sub_lines;
             }
         }
 
-        // Per-entry row budget: the identity text is the label, so cut the
-        // label tail last. Extras are garnish — dropped first.
-        if body.len() + 1 > MAX_ENTRY_LINES {
-            body.truncate(MAX_ENTRY_LINES);
-            if let Some(last) = body.last_mut() {
+        // Per-entry row budget: the identity text is the label, so sublabel
+        // rows are dropped first and only then does the label tail get cut.
+        if label_rows.len() + sub_rows.len() > MAX_ENTRY_LINES {
+            sub_rows.clear();
+        }
+        if label_rows.len() > MAX_ENTRY_LINES {
+            label_rows.truncate(MAX_ENTRY_LINES);
+            if let Some((last, _)) = label_rows.last_mut() {
                 let cut = visible_width(last).saturating_sub(1).max(1);
                 *last = format!("{}…", crate::util::truncate_utf8_display(last, cut));
             }
         }
-        extras_rows = Vec::new();
+
+        // Emit order: label rows (with any glue), then remaining sub rows.
+        let rows: Vec<(String, Option<String>)> = label_rows
+            .into_iter()
+            .chain(sub_rows.into_iter().map(|s| (s, None)))
+            .collect();
+        let mut extras_rows: Vec<String> = Vec::new();
         if !it.extra_lines.is_empty() {
-            let room = MAX_ENTRY_LINES.saturating_sub(body.len());
+            let room = MAX_ENTRY_LINES.saturating_sub(rows.len());
             if room > 0 {
                 let mut extras: Vec<String> =
                     it.extra_lines.iter().take(room).cloned().collect();
@@ -404,17 +428,28 @@ fn render_frame(
             }
         }
 
-        for (n, bl) in body.iter().enumerate() {
+        let sub_paint = it.sub_role.unwrap_or(row_style);
+        for (n, (text, inline_sub)) in rows.iter().enumerate() {
             let prefix = if n == 0 {
                 format!("{bullet} ")
             } else {
                 "    ".to_string()
             };
-            match raw_tail.as_ref().filter(|_| n + 1 == body.len()) {
-                Some(tail) => {
-                    lines.push(format!("{prefix}{}  {tail}", skin.paint(row_style, bl)));
-                }
-                None => lines.push(skin.paint(row_style, &format!("{prefix}{bl}"))),
+            match inline_sub.as_ref() {
+                // Inline-glued subline: label keeps the row style, the tail
+                // repaints in the sublabel role.
+                Some(sub) => lines.push(format!(
+                    "{prefix}{}  {}",
+                    skin.paint(row_style, text),
+                    skin.paint(sub_paint, sub)
+                )),
+                None => match raw_tail.as_ref().filter(|_| n + 1 == rows.len()) {
+                    Some(tail) => lines.push(format!(
+                        "{prefix}{}  {tail}",
+                        skin.paint(row_style, text)
+                    )),
+                    None => lines.push(skin.paint(row_style, &format!("{prefix}{text}"))),
+                },
             }
         }
         // Pre-rendered snapshot lines (verbatim paint), two-space indented.
@@ -735,6 +770,30 @@ mod tests {
             !strip_frames_ansi(row).contains('\x1b'),
             "row must carry no torn escapes after stripping: {row:?}"
         );
+    }
+
+    #[test]
+    fn a_hint_role_paints_the_sublabel_without_breaking_the_row() {
+        // CLICOLOR_FORCE makes paint() emit escapes even though tests run
+        // without a TTY; the env guard restores the process env after.
+        let _lock = crate::util::test_support::env_guard();
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        let items = vec![Pick::new("exit", "/exit")
+            .hint("Exit the chat")
+            .hint_role(crate::ui::skin::Role::Hint)];
+        let visible = filter_items(&items, "");
+        let state = PickState::default();
+        let mut out: Vec<u8> = Vec::new();
+        render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
+        let raw = String::from_utf8(out).unwrap();
+        // Solaris hint is rgb(155,130,100); the summary must wear it while
+        // the label keeps its row style — a lone row is selected, i.e.
+        // solaris answer (220,100,40), not tool_dim.
+        assert!(raw.contains("\x1b[38;2;155;130;100mExit the chat"), "{raw:?}");
+        assert!(raw.contains("\x1b[38;2;220;100;40m/exit"), "{raw:?}");
+        // Filtering still matches the plain sublabel text.
+        assert_eq!(filter_items(&items, "chat"), vec![0]);
+        std::env::remove_var("CLICOLOR_FORCE");
     }
 
     /// Escape stripper for frame assertions (rows are skin-painted).

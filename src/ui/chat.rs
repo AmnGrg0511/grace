@@ -203,6 +203,7 @@ pub fn run_chat(
                 .map(|c| {
                     crate::ui::picker::Pick::new(c.name, format!("/{}", c.name))
                         .hint(c.summary)
+                        .hint_role(crate::ui::skin::Role::Hint)
                 })
                 .collect();
             if let Some(name) = crate::ui::picker::pick(&items, &skin, "pick a command (type to filter)")
@@ -230,6 +231,7 @@ pub fn run_chat(
                             .map(|c| {
                                 crate::ui::picker::Pick::new(c.name, format!("/{}", c.name))
                                     .hint(c.summary)
+                                    .hint_role(crate::ui::skin::Role::Hint)
                             })
                             .collect();
                         if let Some(name) = crate::ui::picker::pick(
