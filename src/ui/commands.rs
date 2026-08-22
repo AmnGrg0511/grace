@@ -74,6 +74,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "Clear the view; context is untouched",
     },
     SlashCommand {
+        name: "effort",
+        aliases: &[],
+        summary: "Reasoning effort low/medium/high/none (picker)",
+    },
+    SlashCommand {
         name: "info",
         aliases: &[],
         summary: "Session report: turns, tokens, model, effort",
@@ -143,11 +148,17 @@ mod tests {
 
     #[test]
     fn a_unique_prefix_resolves_to_its_command() {
-        assert_eq!(resolve_prefix("e").len(), 1);
-        assert_eq!(resolve_prefix("e")[0].name, "exit");
+        assert_eq!(resolve_prefix("ex").len(), 1);
+        assert_eq!(resolve_prefix("ex")[0].name, "exit");
         assert_eq!(resolve_prefix("m")[0].name, "model");
         // Longer prefixes stay shorthands too.
         assert_eq!(resolve_prefix("ver")[0].name, "verbose");
+        // `/e` grew ambiguous when /effort arrived — it must list both, not
+        // silently pick one.
+        let mut e = resolve_prefix("e");
+        e.sort_by_key(|c| c.name);
+        let names: Vec<_> = e.iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["effort", "exit"]);
     }
 
     #[test]

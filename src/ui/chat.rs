@@ -284,6 +284,10 @@ pub fn run_chat(
                 handle_rename_command(sessions, current_session.as_deref(), rest, &mut reader, &skin);
                 continue;
             }
+            Some("effort") => {
+                handle_effort_command(transport, rest, &skin);
+                continue;
+            }
             Some("info") => {
                 handle_info_command(
                     InfoView {
@@ -401,9 +405,6 @@ struct ModelCandidate {
     base_url: String,
     key_env: String,
     context_window: Option<u32>,
-    /// `None` = leave the reasoning level alone (direct `/model <arg>`);
-    /// `Some("")` = clear it; `Some(level)` = set it.
-    reasoning: Option<String>,
 }
 
 /// Everything `/model` can target right now: the endpoints the user has
@@ -418,7 +419,6 @@ fn model_candidates(settings: &crate::config::settings::Settings) -> Vec<ModelCa
     // its URL as a custom endpoint.
     if let (Some(url), Some(model)) = (&settings.default_base_url, &settings.default_model) {
         out.push(ModelCandidate {
-            reasoning: None,
             name: friendly_endpoint_name(url),
             model: model.clone(),
             base_url: url.clone(),
@@ -434,7 +434,6 @@ fn model_candidates(settings: &crate::config::settings::Settings) -> Vec<ModelCa
             continue;
         }
         out.push(ModelCandidate {
-            reasoning: None,
             name: e.name.clone(),
             model: e.model.clone(),
             base_url: e.base_url.clone(),
@@ -449,7 +448,6 @@ fn model_candidates(settings: &crate::config::settings::Settings) -> Vec<ModelCa
                 continue;
             }
             out.push(ModelCandidate {
-            reasoning: None,
                 name: preset.label.to_string(),
                 model: m.id.to_string(),
                 base_url: preset.base_url.to_string(),
@@ -612,26 +610,6 @@ fn apply_model_switch(
     reader: &mut LineReader,
     cached_context_window: &mut Option<u32>,
 ) {
-    // Stage-3 decision applies regardless of which endpoint won: the hint is
-    // per-request state on the transport plus a persisted default.
-    if let Some(reasoning) = &target.reasoning {
-        let level = if reasoning.is_empty() {
-            None
-        } else {
-            Some(reasoning.as_str())
-        };
-        transport.set_reasoning(level);
-        let mut settings = crate::config::settings::Settings::load();
-        settings.default_reasoning = level.map(str::to_string);
-        if let Err(e) = settings.save() {
-            eprintln!("[grace] warning: could not save reasoning level: {e}");
-        } else if let Some(l) = level {
-            println!("reasoning effort set to {l}.");
-        } else {
-            println!("reasoning effort cleared.");
-        }
-    }
-
     let is_copilot_target = target.base_url == crate::transport::copilot::BASE_URL;
     let same_endpoint = transport
         .current_base_url()
@@ -859,19 +837,16 @@ fn pick_model_interactive(
         skin,
         current_model.as_deref().filter(|_| same_endpoint),
     )?;
-    // Stage 3: how hard should the model think?
-    let reasoning = pick_reasoning_level(transport.current_reasoning(), skin)?;
     Some(ModelCandidate {
         name,
         model,
         base_url,
         key_env,
         context_window: ctx,
-        reasoning: Some(reasoning),
     })
 }
 
-/// Stage 3 of the `/model` picker: the reasoning-effort hint sent as
+/// The `/effort` picker: the reasoning-effort hint sent as
 /// `reasoning_effort` on every chat request. Returns "" for "none" (send no
 /// parameter), or "low"/"medium"/"high". The already-active level is shown
 /// but not selectable.
@@ -897,6 +872,48 @@ fn pick_reasoning_level(current: Option<String>, skin: &Skin) -> Option<String> 
     match pick(&items, skin, "pick a reasoning level")? {
         id if id == "none" => Some(String::new()),
         id => Some(id.to_string()),
+    }
+}
+
+/// `/effort [low|medium|high|none]` — set the reasoning-effort hint on its
+/// own, no model switch attached. No argument opens the picker. The choice
+/// is per-request transport state plus a persisted default.
+fn handle_effort_command(
+    transport: &(dyn crate::transport::ProviderTransport + '_),
+    arg: &str,
+    skin: &Skin,
+) {
+    use crate::ui::skin::Role;
+    let apply = |level: Option<&str>| {
+        transport.set_reasoning(level);
+        let mut settings = crate::config::settings::Settings::load();
+        settings.default_reasoning = level.map(str::to_string);
+        if let Err(e) = settings.save() {
+            eprintln!("[grace] warning: could not save reasoning level: {e}");
+            return;
+        }
+        match level {
+            Some(l) => println!(
+                "{}",
+                skin.paint(Role::Success, &format!("reasoning effort set to {l}."))
+            ),
+            None => println!(
+                "{}",
+                skin.paint(Role::Success, "reasoning effort cleared.")
+            ),
+        }
+    };
+    if arg.is_empty() {
+        let Some(level) = pick_reasoning_level(transport.current_reasoning(), skin) else {
+            return;
+        };
+        apply(if level.is_empty() { None } else { Some(level.as_str()) });
+        return;
+    }
+    match arg.trim().to_ascii_lowercase().as_str() {
+        "none" => apply(None),
+        l @ ("low" | "medium" | "high") => apply(Some(l)),
+        other => println!("usage: /effort [low|medium|high|none] — got '{other}'"),
     }
 }
 
@@ -1144,9 +1161,12 @@ const SPINNER_FRAMES: [&str; 10] = [
     "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
 ];
 
-/// The idle status line text: `· model · [context bar] · elapsed`.
+/// The idle status line text:
+/// `· model[RO] · high effort · [context bar] · elapsed`.
+#[allow(clippy::too_many_arguments)]
 fn status_line_content(
     model: &str,
+    effort: Option<&str>,
     count: usize,
     measured: bool,
     window: Option<u32>,
@@ -1162,9 +1182,14 @@ fn status_line_content(
     };
     let bar = context_bar(count, measured, window, trigger_fraction);
     // `[RO]` sits right after the model: the posture is a property of what
-    // the model may do, and the line already leads with the model.
+    // the model may do, and the line already leads with the model. The
+    // effort level follows the same rule — it changes how the model answers,
+    // so it belongs next to the model's name. Hidden when off (the default).
     let ro = if read_only { " [RO]" } else { "" };
-    format!("· {model}{ro} · {bar} · {time}")
+    match effort {
+        Some(level) => format!("· {model}{ro} · {level} effort · {bar} · {time}"),
+        None => format!("· {model}{ro} · {bar} · {time}"),
+    }
 }
 
 /// The thinking spinner: one transient line — `{frame} thinking {m:ss}` —
@@ -1392,7 +1417,8 @@ mod spinner_tests {
     #[test]
     fn the_idle_line_keeps_one_format() {
         let started = std::time::Instant::now();
-        let line = status_line_content("gpt-4o", 4_000, false, Some(10_000), 0.75, started, false);
+        let line =
+            status_line_content("gpt-4o", None, 4_000, false, Some(10_000), 0.75, started, false);
         // `· model · [context bar] · elapsed`. Heuristic count (measured=
         // false) marks the percent with `~`; a fresh start reads 0:00.
         assert!(
@@ -1403,12 +1429,36 @@ mod spinner_tests {
     }
 
     #[test]
+    fn an_effort_level_sits_between_the_model_and_the_bar() {
+        let started = std::time::Instant::now();
+        let line = status_line_content(
+            "gpt-4o",
+            Some("high"),
+            4_000,
+            false,
+            Some(10_000),
+            0.75,
+            started,
+            false,
+        );
+        assert!(
+            line.starts_with("· gpt-4o · high effort · [███░░░░░] 40% · "),
+            "unexpected line: {line}"
+        );
+        // Off stays hidden — the default line must not grow noise.
+        let plain =
+            status_line_content("gpt-4o", None, 4_000, false, Some(10_000), 0.75, started, false);
+        assert!(!plain.contains("effort"), "{plain:?}");
+    }
+
+    #[test]
     fn read_only_mode_marks_the_line_with_an_ro_badge() {
         let started = std::time::Instant::now();
-        let line = status_line_content("gpt-4o", 4_000, true, Some(10_000), 0.75, started, true);
+        let line =
+            status_line_content("gpt-4o", None, 4_000, true, Some(10_000), 0.75, started, true);
         assert!(line.starts_with("· gpt-4o [RO] · "), "unexpected line: {line}");
         // The badge must not disturb the rest of the format.
-        let off = status_line_content("gpt-4o", 4_000, true, Some(10_000), 0.75, started, false);
+        let off = status_line_content("gpt-4o", None, 4_000, true, Some(10_000), 0.75, started, false);
         assert!(line.replacen(" [RO]", "", 1) == off, "only the badge differs: {line:?} vs {off:?}");
     }
 }
@@ -2380,7 +2430,6 @@ mod model_command_tests {
 
     fn cand(name: &str, model: &str, base_url: &str, ctx: Option<u32>) -> ModelCandidate {
         ModelCandidate {
-            reasoning: None,
             name: name.into(),
             model: model.into(),
             base_url: base_url.into(),
@@ -2572,6 +2621,7 @@ pub fn print_status_line(
 
     let line = status_line_content(
         &model,
+        transport.current_reasoning().as_deref(),
         count,
         measured,
         ctx,
@@ -2849,7 +2899,7 @@ mod slash_command_agreement_tests {
     /// this constant whenever an arm in the dispatch match changes.
     const DISPATCHED: &[&str] = &[
         "exit", "model", "skin", "session", "jump", "compact", "dump", "rename", "clear",
-        "info", "verbose", "readonly",
+        "info", "effort", "verbose", "readonly",
     ];
 
     #[test]
