@@ -618,6 +618,8 @@ fn run_one_shot(
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
     }
+    // One-shot turns run tools too — same kill-the-command contract.
+    crate::tools::builtins::terminal::set_turn_interrupt(interrupted.clone());
     let mut stream_state = crate::ui::chat::StreamState::default();
     // Same thinking spinner as chat mode (TTY only, no-op when piped).
     let mut spinner = crate::ui::chat::Spinner::start(skin);

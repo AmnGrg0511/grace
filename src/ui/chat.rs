@@ -113,6 +113,10 @@ pub fn run_chat(
         });
     }
 
+    // Long-running tools (bash) watch the same latch so a ctrl-c kills the
+    // running command instead of waiting for it to finish on its own.
+    crate::tools::builtins::terminal::set_turn_interrupt(interrupted.clone());
+
     // Start on a clean screen so the wordmark sits at the top of the view.
     // One-shot, pre-conversation: not part of the append-only stream path.
     // TTY only — piped/one-shot stdout never receives screen-control escapes.

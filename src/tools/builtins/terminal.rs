@@ -66,6 +66,33 @@ fn read_bounded<R: std::io::Read + Send + 'static>(r: R, deadline: Option<std::t
     }
 }
 
+// ---- turn-interrupt flag ----------------------------------------------------
+//
+// Ctrl-C mid-turn latches an AtomicBool in chat/cli; a foreground command must
+// die the moment it latches, not only between tool calls. A process-global slot
+// (same shape as the bg-job registry) avoids threading the flag through the
+// `Tool` trait and every construction site.
+
+static TURN_INTERRUPT: OnceLock<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>> = OnceLock::new();
+
+/// Publish the flag Ctrl-C latches, so long-running tool work can watch it.
+/// Called once at startup; later callers replace the previous flag.
+pub fn set_turn_interrupt(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    *TURN_INTERRUPT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(flag);
+}
+
+fn turn_interrupted() -> bool {
+    TURN_INTERRUPT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+}
+
 // ---- background job registry -----------------------------------------------
 //
 // `bash(background=true)` hands a command off to its own thread and returns immediately
@@ -266,6 +293,14 @@ impl BashTool {
                     break None;
                 }
             }
+            // Ctrl-C outranks even a configured timeout: the user asked for
+            // this command to stop now.
+            if turn_interrupted() {
+                killpg(pgid);
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
             std::thread::sleep(poll);
         };
         let timed_out = status.is_none();
@@ -393,6 +428,11 @@ impl BashTool {
                 if job.result.lock().unwrap().is_some() {
                     break;
                 }
+                // Same contract as the foreground loop: a waiting user beats
+                // a job that may run for hours.
+                if turn_interrupted() {
+                    return Ok("[status: wait abandoned — interrupted by ctrl-c]".to_string());
+                }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
@@ -491,7 +531,9 @@ impl Tool for BashTool {
         if !stderr.is_empty() {
             result.push_str(&format!("\n[stderr] {}", Self::cap_output(stderr.trim_end())));
         }
-        if timed_out {
+        if timed_out && turn_interrupted() {
+            result.push_str("\n[INTERRUPTED — killed by ctrl-c]");
+        } else if timed_out {
             result.push_str(&format!(
                 "\n[TIMED OUT after {:?} — process killed. Long-running commands \
                  (servers, watchers) should be backgrounded with `&` and polled, \
@@ -707,6 +749,35 @@ mod tools_hardening_tests {
         let out = tool.run(&json!({"command": "echo \"a;b\""})).unwrap();
         assert!(out.contains("a;b"), "out was: {out}");
         std::env::remove_var("GRACE_TERMINAL_ALLOW");
+    }
+
+    #[test]
+    fn ctrl_c_during_a_running_command_kills_it_promptly() {
+        // Regression: ctrl-c latched while a foreground command ran was only
+        // observed between tool calls, so a long command kept running to its
+        // own end (or the timeout) after the user asked it to stop.
+        let _g = ENV_GUARD_FN();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        super::set_turn_interrupt(std::sync::Arc::clone(&flag));
+        // Latch the flag shortly after the spawn, from another thread.
+        let setter = std::sync::Arc::clone(&flag);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            setter.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let tool = BashTool;
+        let start = std::time::Instant::now();
+        let out = tool.run(&json!({"command": "sleep 30"})).unwrap();
+        let elapsed = start.elapsed();
+        // Restore an unlatched flag so parallel tests see a clean state.
+        super::set_turn_interrupt(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ));
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "ctrl-c must kill the running command promptly, took {elapsed:?}"
+        );
+        assert!(out.contains("INTERRUPTED"), "output was: {out}");
     }
 
     #[test]
