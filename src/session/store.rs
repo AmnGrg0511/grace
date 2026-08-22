@@ -11,6 +11,15 @@ use crate::transport::TokenUsage;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
+/// One recorded turn's usage — what `/info` prints per turn.
+#[derive(Debug, Clone)]
+pub struct TurnUsage {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub created_at: i64,
+}
+
 pub struct SessionStore {
     conn: Connection,
 }
@@ -47,6 +56,15 @@ impl SessionStore {
                 completion_tokens INTEGER NOT NULL,
                 total_tokens INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS turn_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id);
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                 content, session_id UNINDEXED, content='messages', content_rowid='id'
             );
@@ -328,6 +346,56 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Record one completed turn's token usage for `/info`'s per-turn
+    /// report. Unlike [`Self::save_usage`] (which upserts the latest
+    /// context-size measurement), rows append — one per turn.
+    pub fn record_turn_usage(
+        &self,
+        session_id: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        created_at: i64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO turn_usage (session_id, model, input_tokens, output_tokens, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    session_id,
+                    model,
+                    input_tokens as i64,
+                    output_tokens as i64,
+                    created_at
+                ],
+            )
+            .map_err(|e| AgentError::Tool(format!("record turn usage: {e}")))?;
+        Ok(())
+    }
+
+    /// Every recorded turn's usage for a session, oldest first.
+    pub fn turn_usage(&self, session_id: &str) -> Result<Vec<TurnUsage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT model, input_tokens, output_tokens, created_at
+                 FROM turn_usage WHERE session_id = ?1 ORDER BY id",
+            )
+            .map_err(|e| AgentError::Tool(format!("prepare turn usage: {e}")))?;
+        let rows = stmt
+            .query_map([session_id], |r| {
+                Ok(TurnUsage {
+                    model: r.get::<_, String>(0)?,
+                    input_tokens: r.get::<_, i64>(1)?.max(0) as u64,
+                    output_tokens: r.get::<_, i64>(2)?.max(0) as u64,
+                    created_at: r.get(3)?,
+                })
+            })
+            .map_err(|e| AgentError::Tool(format!("query turn usage: {e}")))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| AgentError::Tool(format!("row: {e}")))
+    }
+
     /// The last measured usage saved for a session, if any. `None` when the
     /// session never produced a provider-reported count (brand-new session,
     /// or a provider that doesn't report usage).
@@ -397,6 +465,23 @@ mod tests {
         assert!(store.load("s2").unwrap().is_empty());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn turn_usage_appends_per_turn_and_reads_back_in_order() {
+        let path = scratch_db("turn_usage");
+        let store = SessionStore::open(&path).unwrap();
+        assert!(store.turn_usage("s1").unwrap().is_empty());
+        for (model, i, o) in [("m1", 100, 10), ("m1", 200, 20), ("m2", 300, 30)] {
+            store.record_turn_usage("s1", model, i, o, 1_700_000_000).unwrap();
+        }
+        let rows = store.turn_usage("s1").unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].model, "m1");
+        assert_eq!(rows[0].input_tokens, 100);
+        assert_eq!(rows[2].model, "m2");
+        // Sessions are independent.
+        assert!(store.turn_usage("s2").unwrap().is_empty());
     }
 
     #[test]

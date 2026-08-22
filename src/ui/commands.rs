@@ -74,6 +74,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "Clear the view; context is untouched",
     },
     SlashCommand {
+        name: "info",
+        aliases: &[],
+        summary: "Session report: turns, tokens, model, effort",
+    },
+    SlashCommand {
         name: "verbose",
         aliases: &[],
         summary: "Toggle tool-output visibility",

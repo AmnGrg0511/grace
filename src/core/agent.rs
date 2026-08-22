@@ -88,6 +88,10 @@ pub struct TurnOutcome {
     /// the whole context it received — the real "how full is the window"
     /// number, ahead of any client-side estimate.
     pub last_usage: Option<crate::transport::TokenUsage>,
+    /// Every iteration's usage summed — a tool-using turn makes several
+    /// provider calls, and `/info` wants the whole turn's cost, not just
+    /// the final call's.
+    pub total_usage: Option<crate::transport::TokenUsage>,
 }
 
 /// Run one conversation turn to completion and return the final answer.
@@ -123,6 +127,7 @@ pub fn run_turn_with_options(
 
     let is_interrupted =
         || options.interrupted.is_some_and(|f| f.load(Ordering::SeqCst));
+    let mut total_usage: Option<crate::transport::TokenUsage> = None;
     // Only true streaming produces fragments; a transport falling back to the
     // one-shot default emits nothing incrementally, so the caller must still
     // render the returned answer itself.
@@ -161,6 +166,16 @@ pub fn run_turn_with_options(
         if is_interrupted() {
             return Err(AgentError::Interrupted);
         }
+        if let Some(u) = resp.usage.as_ref() {
+            match &mut total_usage {
+                Some(acc) => {
+                    acc.prompt_tokens += u.prompt_tokens;
+                    acc.completion_tokens += u.completion_tokens;
+                    acc.total_tokens += u.total_tokens;
+                }
+                None => total_usage = Some(*u),
+            }
+        }
 
         messages.push(Message {
             role: Role::Assistant,
@@ -179,6 +194,7 @@ pub fn run_turn_with_options(
                     iterations: budget.used(),
                     streamed,
                     last_usage: resp.usage,
+                    total_usage,
                 });
             }
             FinishReason::Length => {
@@ -193,6 +209,7 @@ pub fn run_turn_with_options(
                         iterations: budget.used(),
                         streamed,
                         last_usage: resp.usage,
+                        total_usage,
                     });
                 }
                 emit_content(&mut options.on_event, &resp, options.stream);

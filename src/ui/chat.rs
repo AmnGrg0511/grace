@@ -284,6 +284,22 @@ pub fn run_chat(
                 handle_rename_command(sessions, current_session.as_deref(), rest, &mut reader, &skin);
                 continue;
             }
+            Some("info") => {
+                handle_info_command(
+                    InfoView {
+                        sessions,
+                        current_session: current_session.as_deref(),
+                        transport,
+                        context_entries: messages.len(),
+                        window: cached_context_window,
+                        last_usage,
+                        started_at,
+                        read_only: tools.is_read_only(),
+                    },
+                    &skin,
+                );
+                continue;
+            }
             Some("verbose") => {
                 verbose = !verbose;
                 println!(
@@ -988,6 +1004,142 @@ fn handle_rename_command(
     }
 }
 
+/// `/info` — the session report: what model/provider posture this session
+/// runs under, how full the context window is, and per-turn token usage as
+/// recorded by the provider. Spend in currency is deliberately absent: grace
+/// ships no pricing tables, so any $ figure would be fabricated.
+struct InfoView<'a> {
+    sessions: &'a crate::session::store::SessionStore,
+    current_session: Option<&'a str>,
+    transport: &'a (dyn crate::transport::ProviderTransport + 'a),
+    context_entries: usize,
+    window: Option<u32>,
+    last_usage: Option<crate::transport::TokenUsage>,
+    started_at: std::time::Instant,
+    read_only: bool,
+}
+
+fn handle_info_command(view: InfoView<'_>, skin: &Skin) {
+    let InfoView {
+        sessions,
+        current_session,
+        transport,
+        context_entries,
+        window,
+        last_usage,
+        started_at,
+        read_only,
+    } = view;
+    use crate::ui::skin::Role;
+    let accent = |t: &str| skin.paint(Role::Accent, t);
+    let dim = |t: &str| skin.paint(Role::Hint, t);
+    let group = |n: u64| -> String {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i).is_multiple_of(3) {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        out
+    };
+    let secs = started_at.elapsed().as_secs();
+    let elapsed = if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    };
+
+    println!("{}", accent("session"));
+    match current_session {
+        Some(sid) => {
+            let title = sessions.get_title(sid).ok().flatten();
+            println!(
+                "  {}{}",
+                dim("id      "),
+                match &title {
+                    Some(t) => format!("{t} ({sid})"),
+                    None => sid.to_string(),
+                }
+            );
+        }
+        None => println!(
+            "  {}{}",
+            dim("id      "),
+            dim("(unsaved — send a message to start one)")
+        ),
+    }
+    println!("  {}{}", dim("elapsed "), elapsed);
+    println!(
+        "  {}{}",
+        dim("posture "),
+        if read_only { "read-only" } else { "full tools" }
+    );
+
+    println!("{}", accent("model"));
+    let model = transport.current_model().unwrap_or_else(|| "(unset)".into());
+    let effort = transport
+        .current_reasoning()
+        .unwrap_or_else(|| "off".into());
+    println!("  {}{}", dim("name    "), model);
+    println!("  {}{}", dim("effort  "), effort);
+    println!(
+        "  {}{}",
+        dim("window  "),
+        match window {
+            Some(w) => format!("{w}k tokens"),
+            None => "unknown".to_string(),
+        }
+    );
+    println!(
+        "  {}{}",
+        dim("context "),
+        match last_usage {
+            Some(u) => format!(
+                "{} tokens measured (provider)",
+                group(u.prompt_tokens)
+            ),
+            None => format!("{context_entries} entries, not yet measured"),
+        }
+    );
+
+    if let Some(sid) = current_session {
+        if let Ok(rows) = sessions.turn_usage(sid) {
+            println!("{}", accent("turns"));
+            if rows.is_empty() {
+                println!("  {}", dim("no usage recorded yet (or provider omits it)"));
+                return;
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let mut tin = 0u64;
+            let mut tout = 0u64;
+            for (i, r) in rows.iter().enumerate() {
+                tin += r.input_tokens;
+                tout += r.output_tokens;
+                println!(
+                    "  {:>4}  {}  {}  {} in · {} out",
+                    i + 1,
+                    dim(&recency_label(r.created_at, now)),
+                    r.model,
+                    group(r.input_tokens),
+                    group(r.output_tokens)
+                );
+            }
+            println!(
+                "  {}  {} in · {} out across {} turns",
+                dim("total"),
+                accent(&group(tin)),
+                accent(&group(tout)),
+                rows.len()
+            );
+        }
+    }
+}
+
 const SPINNER_FRAMES: [&str; 10] = [
     "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
 ];
@@ -1614,6 +1766,7 @@ pub fn run_one_chat_turn(
             answer,
             streamed,
             last_usage,
+            total_usage,
             ..
         }) => {
             if streamed {
@@ -1631,6 +1784,24 @@ pub fn run_one_chat_turn(
             }
             if let Some(sid) = session_id {
                 let _ = sessions.append(sid, &Message::assistant(answer.clone()));
+                // Per-turn token record for /info. Uses the whole turn's
+                // summed usage (a tool-using turn makes several provider
+                // calls); providers that omit usage record a zero row so the
+                // turn still counts.
+                let (inp, out) = match total_usage {
+                    Some(u) => (u.prompt_tokens, u.completion_tokens),
+                    None => (0, 0),
+                };
+                let _ = sessions.record_turn_usage(
+                    sid,
+                    &transport.current_model().unwrap_or_else(|| "unknown".into()),
+                    inp,
+                    out,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                );
                 // Auto-(re)title: retitle at turn 1 (first real content),
                 // then again at 5 and 15 as the topic usually solidifies,
                 // then every 20 turns after that for long sessions that
@@ -2678,7 +2849,7 @@ mod slash_command_agreement_tests {
     /// this constant whenever an arm in the dispatch match changes.
     const DISPATCHED: &[&str] = &[
         "exit", "model", "skin", "session", "jump", "compact", "dump", "rename", "clear",
-        "verbose", "readonly",
+        "info", "verbose", "readonly",
     ];
 
     #[test]
