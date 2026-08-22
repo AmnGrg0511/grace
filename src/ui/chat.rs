@@ -284,6 +284,10 @@ pub fn run_chat(
                 handle_rename_command(sessions, current_session.as_deref(), rest, &mut reader, &skin);
                 continue;
             }
+            Some("provider") => {
+                handle_provider_command(transport, &mut reader, &skin, &mut cached_context_window);
+                continue;
+            }
             Some("effort") => {
                 handle_effort_command(transport, rest, &skin);
                 continue;
@@ -756,6 +760,48 @@ fn pick_model_interactive(
     skin: &Skin,
     transport: &(dyn crate::transport::ProviderTransport + '_),
 ) -> Option<ModelCandidate> {
+    let picked = pick_provider_endpoint(candidates, reader, skin, "pick a provider to switch to")?;
+    let fetched = fetched_models(&picked.base_url, &picked.key_env);
+    let current_model = transport.current_model();
+    let same_endpoint = transport
+        .current_base_url()
+        .as_deref()
+        .map(|b| short_url(b) == short_url(&picked.base_url))
+        .unwrap_or(false);
+    let (model, ctx) = pick_model_for_endpoint(
+        fetched,
+        &picked.known_models,
+        reader,
+        skin,
+        current_model.as_deref().filter(|_| same_endpoint),
+    )?;
+    Some(ModelCandidate {
+        name: picked.name,
+        model,
+        base_url: picked.base_url,
+        key_env: picked.key_env,
+        context_window: ctx,
+    })
+}
+
+/// One resolved provider choice: where requests go and what we know about it.
+struct EndpointPick {
+    name: String,
+    base_url: String,
+    key_env: String,
+    known_models: Vec<(String, Option<u32>)>,
+}
+
+/// The provider stage of both `/model` and `/provider`: one row per distinct
+/// (name, base_url) — persisted endpoints plus presets — plus an escape hatch
+/// for a custom OpenAI-compatible URL. Resolves the endpoint's key env var
+/// and known-model list from the candidates.
+fn pick_provider_endpoint(
+    candidates: &[ModelCandidate],
+    reader: &mut LineReader,
+    skin: &Skin,
+    title: &str,
+) -> Option<EndpointPick> {
     use crate::ui::skin::{reset, Role};
     use crate::ui::picker::{pick, Pick};
 
@@ -763,21 +809,18 @@ fn pick_model_interactive(
     // distinct from the dim row text, so the eye splits name from fact.
     let accent = |t: &str| skin.paint(Role::Code, t);
 
-    // Stage 1: which endpoint — one row per distinct (name, base_url).
-    let mut endpoints: Vec<(String, String, String)> = Vec::new(); // name, base_url, model
+    // One row per distinct (name, base_url).
+    let mut endpoints: Vec<(String, String)> = Vec::new();
     for c in candidates {
-        if !endpoints
-            .iter()
-            .any(|(n, u, _)| *n == c.name && *u == c.base_url)
-        {
-            endpoints.push((c.name.clone(), c.base_url.clone(), c.model.clone()));
+        if !endpoints.iter().any(|(n, u)| *n == c.name && *u == c.base_url) {
+            endpoints.push((c.name.clone(), c.base_url.clone()));
         }
     }
-    // Stage 1 shows only the provider and its endpoint (accent-painted);
-    // models come in stage 2 so the two decisions stay clean.
+    // Rows show only the provider and its endpoint (accent-painted); models
+    // are a separate decision so the two choices stay clean.
     let items: Vec<Pick> = endpoints
         .iter()
-        .map(|(name, base_url, _)| {
+        .map(|(name, base_url)| {
             Pick::new(format!("{name}\u{1}{base_url}"), name.clone())
                 .hint(format!("{}{}", accent(&short_url(base_url)), reset()))
                 .verbatim_sub()
@@ -786,7 +829,7 @@ fn pick_model_interactive(
             Pick::new("\u{1}custom", "Custom OpenAI-compatible endpoint").hint("type a base URL"),
         ))
         .collect();
-    let choice = pick(&items, skin, "pick a provider to switch to")?;
+    let choice = pick(&items, skin, title)?;
 
     let (name, base_url) = if choice == "\u{1}custom" {
         let raw = reader.read_line("base URL (e.g. https://host/v1): ")?;
@@ -822,27 +865,11 @@ fn pick_model_interactive(
     } else {
         key_env
     };
-
-    let fetched = fetched_models(&base_url, &key_env);
-    let current_model = transport.current_model();
-    let same_endpoint = transport
-        .current_base_url()
-        .as_deref()
-        .map(|b| short_url(b) == short_url(&base_url))
-        .unwrap_or(false);
-    let (model, ctx) = pick_model_for_endpoint(
-        fetched,
-        &known,
-        reader,
-        skin,
-        current_model.as_deref().filter(|_| same_endpoint),
-    )?;
-    Some(ModelCandidate {
+    Some(EndpointPick {
         name,
-        model,
         base_url,
         key_env,
-        context_window: ctx,
+        known_models: known,
     })
 }
 
@@ -872,6 +899,87 @@ fn pick_reasoning_level(current: Option<String>, skin: &Skin) -> Option<String> 
     match pick(&items, skin, "pick a reasoning level")? {
         id if id == "none" => Some(String::new()),
         id => Some(id.to_string()),
+    }
+}
+
+/// `/provider` — switch endpoint without touching the model decision. The
+/// current model id carries over; if the new endpoint reports its models and
+/// doesn't have it, the shared stage-2 picker opens so the session lands on
+/// something that actually exists there.
+fn handle_provider_command(
+    transport: &(dyn crate::transport::ProviderTransport + '_),
+    reader: &mut LineReader,
+    skin: &Skin,
+    cached_context_window: &mut Option<u32>,
+) {
+    use crate::ui::skin::Role;
+    if transport.current_model().is_none() {
+        println!(
+            "this transport ({}) has no switchable model — /model sets one first.",
+            transport.name()
+        );
+        return;
+    }
+    let settings = crate::config::settings::Settings::load();
+    let candidates = model_candidates(&settings);
+    let Some(picked) = pick_provider_endpoint(&candidates, reader, skin, "switch provider")
+    else {
+        return;
+    };
+    let same = transport
+        .current_base_url()
+        .as_deref()
+        .map(|b| short_url(b) == short_url(&picked.base_url))
+        .unwrap_or(false);
+    if same {
+        println!("already on {name} ({url}).", name = picked.name, url = short_url(&picked.base_url));
+        return;
+    }
+
+    // Carry the model over untouched — that is the whole point of
+    // decoupling provider from model. If it turns out not to exist on the
+    // new endpoint, the check below catches it against the live list.
+    let model = transport.current_model().unwrap_or_default();
+    let target = ModelCandidate {
+        name: picked.name.clone(),
+        model: model.clone(),
+        base_url: picked.base_url.clone(),
+        key_env: picked.key_env.clone(),
+        context_window: None,
+    };
+    apply_model_switch(transport, target, reader, cached_context_window);
+
+    // Best-effort validation against the endpoint's own list (env-var key
+    // only — no prompting here): an unknown model id would otherwise surface
+    // as a confusing provider 404 mid-conversation.
+    let key = std::env::var(&picked.key_env).ok().filter(|k| !k.is_empty());
+    let ids: Vec<String> = fetched_models(&picked.base_url, key.as_deref().unwrap_or(""))
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    if !ids.is_empty() && !ids.contains(&model) {
+        println!(
+            "{}",
+            skin.paint(
+                Role::Error,
+                &format!("note: \"{model}\" is not in {name}'s model list — pick one:", name = picked.name)
+            )
+        );
+        let known: Vec<(String, Option<u32>)> = candidates
+            .iter()
+            .filter(|c| c.name == picked.name)
+            .map(|c| (c.model.clone(), c.context_window))
+            .collect();
+        let fetched = fetched_models(&picked.base_url, std::env::var(&picked.key_env).ok().as_deref().unwrap_or(""));
+        if let Some((m, ctx)) =
+            pick_model_for_endpoint(fetched, &known, reader, skin, None)
+        {
+            transport.set_model(&m);
+            if ctx.is_some() {
+                *cached_context_window = ctx.or(*cached_context_window);
+            }
+            println!("model switched to \"{m}\".");
+        }
     }
 }
 
@@ -1099,6 +1207,15 @@ fn handle_info_command(view: InfoView<'_>, skin: &Skin) {
     let effort = transport
         .current_reasoning()
         .unwrap_or_else(|| "off".into());
+    println!(
+        "  {}{}",
+        dim("provider"),
+        transport
+            .current_base_url()
+            .as_deref()
+            .map(short_url)
+            .unwrap_or_else(|| "(unknown)".to_string())
+    );
     println!("  {}{}", dim("name    "), model);
     println!("  {}{}", dim("effort  "), effort);
     println!(
@@ -1162,9 +1279,10 @@ const SPINNER_FRAMES: [&str; 10] = [
 ];
 
 /// The idle status line text:
-/// `· model[RO] · high effort · [context bar] · elapsed`.
+/// `· host · model[RO] · high effort · [context bar] · elapsed`.
 #[allow(clippy::too_many_arguments)]
 fn status_line_content(
+    provider: Option<&str>,
     model: &str,
     effort: Option<&str>,
     count: usize,
@@ -1186,9 +1304,15 @@ fn status_line_content(
     // effort level follows the same rule — it changes how the model answers,
     // so it belongs next to the model's name. Hidden when off (the default).
     let ro = if read_only { " [RO]" } else { "" };
+    // Provider leads when known — it is the widest fact (which endpoint is
+    // being billed) and the thing /provider changes.
+    let lead = match provider {
+        Some(host) => format!("· {host} · {model}{ro}"),
+        None => format!("· {model}{ro}"),
+    };
     match effort {
-        Some(level) => format!("· {model}{ro} · {level} effort · {bar} · {time}"),
-        None => format!("· {model}{ro} · {bar} · {time}"),
+        Some(level) => format!("{lead} · {level} effort · {bar} · {time}"),
+        None => format!("{lead} · {bar} · {time}"),
     }
 }
 
@@ -1418,7 +1542,7 @@ mod spinner_tests {
     fn the_idle_line_keeps_one_format() {
         let started = std::time::Instant::now();
         let line =
-            status_line_content("gpt-4o", None, 4_000, false, Some(10_000), 0.75, started, false);
+            status_line_content(None, "gpt-4o", None, 4_000, false, Some(10_000), 0.75, started, false);
         // `· model · [context bar] · elapsed`. Heuristic count (measured=
         // false) marks the percent with `~`; a fresh start reads 0:00.
         assert!(
@@ -1432,6 +1556,7 @@ mod spinner_tests {
     fn an_effort_level_sits_between_the_model_and_the_bar() {
         let started = std::time::Instant::now();
         let line = status_line_content(
+            Some("api.example.com"),
             "gpt-4o",
             Some("high"),
             4_000,
@@ -1442,12 +1567,18 @@ mod spinner_tests {
             false,
         );
         assert!(
-            line.starts_with("· gpt-4o · high effort · [███░░░░░] 40% · "),
+            line.starts_with(
+                "· api.example.com · gpt-4o · high effort · [███░░░░░] 40% · "
+            ),
             "unexpected line: {line}"
         );
+        // No base URL (e.g. a fixed-endpoint transport) drops the segment.
+        let bare =
+            status_line_content(None, "gpt-4o", None, 4_000, false, Some(10_000), 0.75, started, false);
+        assert!(bare.starts_with("· gpt-4o · "), "{bare:?}");
         // Off stays hidden — the default line must not grow noise.
         let plain =
-            status_line_content("gpt-4o", None, 4_000, false, Some(10_000), 0.75, started, false);
+            status_line_content(None, "gpt-4o", None, 4_000, false, Some(10_000), 0.75, started, false);
         assert!(!plain.contains("effort"), "{plain:?}");
     }
 
@@ -1455,10 +1586,10 @@ mod spinner_tests {
     fn read_only_mode_marks_the_line_with_an_ro_badge() {
         let started = std::time::Instant::now();
         let line =
-            status_line_content("gpt-4o", None, 4_000, true, Some(10_000), 0.75, started, true);
+            status_line_content(None, "gpt-4o", None, 4_000, true, Some(10_000), 0.75, started, true);
         assert!(line.starts_with("· gpt-4o [RO] · "), "unexpected line: {line}");
         // The badge must not disturb the rest of the format.
-        let off = status_line_content("gpt-4o", None, 4_000, true, Some(10_000), 0.75, started, false);
+        let off = status_line_content(None, "gpt-4o", None, 4_000, true, Some(10_000), 0.75, started, false);
         assert!(line.replacen(" [RO]", "", 1) == off, "only the badge differs: {line:?} vs {off:?}");
     }
 }
@@ -2620,6 +2751,7 @@ pub fn print_status_line(
     let ctx = cached_context_window.or_else(|| crate::config::settings::context_window_for(&model));
 
     let line = status_line_content(
+        transport.current_base_url().as_deref().map(short_url).as_deref(),
         &model,
         transport.current_reasoning().as_deref(),
         count,
@@ -2899,7 +3031,7 @@ mod slash_command_agreement_tests {
     /// this constant whenever an arm in the dispatch match changes.
     const DISPATCHED: &[&str] = &[
         "exit", "model", "skin", "session", "jump", "compact", "dump", "rename", "clear",
-        "info", "effort", "verbose", "readonly",
+        "info", "effort", "provider", "verbose", "readonly",
     ];
 
     #[test]

@@ -74,6 +74,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "Clear the view; context is untouched",
     },
     SlashCommand {
+        name: "provider",
+        aliases: &[],
+        summary: "Switch provider/endpoint (picker), keeps the model",
+    },
+    SlashCommand {
         name: "effort",
         aliases: &[],
         summary: "Reasoning effort low/medium/high/none (picker)",
