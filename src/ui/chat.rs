@@ -280,6 +280,10 @@ pub fn run_chat(
                 handle_dump_command(messages, rest);
                 continue;
             }
+            Some("rename") => {
+                handle_rename_command(sessions, current_session.as_deref(), rest, &mut reader, &skin);
+                continue;
+            }
             Some("verbose") => {
                 verbose = !verbose;
                 println!(
@@ -312,6 +316,20 @@ pub fn run_chat(
                     } else {
                         "off — all tools restored"
                     }
+                );
+                continue;
+            }
+            Some("clear") => {
+                // Purely visual: same clear+home as startup, then the banner
+                // again. Context, history file, and usage stay untouched.
+                if std::io::stdout().is_terminal() {
+                    let _ = write!(std::io::stdout(), "\x1b[2J\x1b[H");
+                    let _ = std::io::stdout().flush();
+                }
+                println!("{}\n", chat_banner(&skin));
+                println!(
+                    "{}",
+                    skin.paint(Role::Hint, "(view cleared — conversation context unchanged)")
                 );
                 continue;
             }
@@ -928,6 +946,46 @@ pub(crate) fn pick_model_for_endpoint(
     }
     let idx = choice.strip_prefix('m')?.parse::<usize>().ok()?;
     Some(models[idx].clone())
+}
+
+/// `/rename [name]` — set the open session's title. With no argument it asks
+/// interactively. The title is what `/session` shows, so renaming is how a
+/// cryptic auto-title becomes a findable one.
+fn handle_rename_command(
+    sessions: &crate::session::store::SessionStore,
+    current_session: Option<&str>,
+    rest: &str,
+    reader: &mut LineReader,
+    skin: &Skin,
+) {
+    use crate::ui::skin::Role;
+    let Some(sid) = current_session else {
+        println!(
+            "{}",
+            skin.paint(Role::Error, "no open session to rename — start one with a message or /session")
+        );
+        return;
+    };
+    let mut title = rest.trim().to_string();
+    if title.is_empty() {
+        let Some(asked) = reader.read_line("new name: ") else {
+            return;
+        };
+        title = asked.trim().to_string();
+    }
+    if title.is_empty() {
+        println!("{}", skin.paint(Role::Error, "a name needs at least one character"));
+        return;
+    }
+    // Same cap as auto-titles so picker rows never blow their layout budget.
+    let title: String = title.chars().take(80).collect();
+    match sessions.set_title(sid, &title) {
+        Ok(()) => println!(
+            "{}",
+            skin.paint(Role::Success, &format!("renamed to \"{title}\""))
+        ),
+        Err(e) => println!("{}", skin.paint(Role::Error, &format!("rename failed: {e}"))),
+    }
 }
 
 const SPINNER_FRAMES: [&str; 10] = [
@@ -2619,7 +2677,8 @@ mod slash_command_agreement_tests {
     /// G14), and a registry entry without a handler is a phantom. Update
     /// this constant whenever an arm in the dispatch match changes.
     const DISPATCHED: &[&str] = &[
-        "exit", "model", "skin", "session", "jump", "compact", "dump", "verbose", "readonly",
+        "exit", "model", "skin", "session", "jump", "compact", "dump", "rename", "clear",
+        "verbose", "readonly",
     ];
 
     #[test]

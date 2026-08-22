@@ -64,6 +64,16 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "Copy the whole context to the clipboard; /dump FILE writes a file",
     },
     SlashCommand {
+        name: "rename",
+        aliases: &[],
+        summary: "Rename this session (shows in /session)",
+    },
+    SlashCommand {
+        name: "clear",
+        aliases: &[],
+        summary: "Clear the view; context is untouched",
+    },
+    SlashCommand {
         name: "verbose",
         aliases: &[],
         summary: "Toggle tool-output visibility",
