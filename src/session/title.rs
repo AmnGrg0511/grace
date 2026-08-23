@@ -10,8 +10,9 @@
 use crate::message::Message;
 use crate::transport::ProviderTransport;
 
-/// Ask the model for a short (3-6 word) title summarizing a conversation
-/// transcript so far. Deliberately tiny: no tools, no system prompt, one
+/// Ask the model for a short (2-4 word) noun-phrase title naming the
+/// conversation's central topic — usually "The …" ("The recursion") — for
+/// the transcript so far. Deliberately tiny: no tools, no system prompt, one
 /// cheap round-trip — this is what replaces "the id is just whatever the
 /// user's first message was" (almost always "hi") with an actual
 /// description of what the chat is about. Called repeatedly as a session
@@ -26,13 +27,13 @@ pub fn generate_title(
     transcript: &str,
 ) -> Option<String> {
     let prompt = format!(
-        "Write a specific 3-6 word title for this conversation, distinct \
-         enough that it wouldn't be confused with a different conversation. \
-         Base it on the concrete topic, question, or task the user raised — \
-         if the exchange so far is just a greeting with no real topic yet \
-         (e.g. \"hi\" / \"hello\"), title it using the user's exact opening \
-         words instead of a generic summary like \"assistant greets user\". \
-         No punctuation, no quotes, plain text only — just the title:\n\n{transcript}"
+        "Name this conversation with a specific 2-4 word noun phrase that \
+         captures its central topic, usually starting with \"The\" \
+         (e.g. \"The recursion\", \"The quote paradox\"). Base it on the \
+         concrete topic, question, or task the user raised — if the exchange \
+         so far is just a greeting with no real topic yet (e.g. \"hi\" / \
+         \"hello\"), use the user's exact opening words instead. No \
+         punctuation, no quotes, plain text only — just the title:\n\n{transcript}"
     );
     let messages = [Message::user(prompt)];
     let resp = transport.complete(&messages, &[], model).ok()?;
