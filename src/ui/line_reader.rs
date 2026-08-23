@@ -133,6 +133,48 @@ impl LineReader {
             }
         }
     }
+
+    /// Read one line prefilled with `default`: the editor opens with the
+    /// default already on the line (rustyline preloads it into the buffer),
+    /// so a user who only wants to tweak it can edit in place instead of
+    /// retyping from scratch. Submitting an empty line keeps the default.
+    #[allow(clippy::doc_markdown)]
+    pub fn read_line_default(&mut self, prompt: &str, default: &str) -> Option<String> {
+        match self {
+            LineReader::Rustyline { editor, history_path } => loop {
+                // Prefill the whole line as the "left" of the caret (caret
+                // lands at the end) so the current name is ready to edit.
+                match editor.readline_with_initial(prompt, (default, "")) {
+                    Ok(line) => {
+                        // An empty submission means "keep what was prefilled."
+                        let line = if line.is_empty() {
+                            default.to_string()
+                        } else {
+                            line
+                        };
+                        if !line.trim().is_empty() {
+                            let _ = editor.add_history_entry(line.as_str());
+                        }
+                        let _ = editor.save_history(history_path);
+                        return Some(line);
+                    }
+                    Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                    Err(_) => return None,
+                }
+            }
+            LineReader::Plain { lines } => {
+                use std::io::Write;
+                print!("{prompt}");
+                let _ = std::io::stdout().flush();
+                let got = lines.next()?.ok()?;
+                Some(if got.trim().is_empty() {
+                    default.to_string()
+                } else {
+                    got
+                })
+            }
+        }
+    }
 }
 
 /// The history file a given session should use, resolved against the
