@@ -117,8 +117,8 @@ pub fn run_chat(
     if prior_turns > 0 {
         let label = current_session
             .as_deref()
-            .and_then(|sid| sessions.get_title(sid).ok().flatten())
-            .unwrap_or_else(|| current_session.as_deref().unwrap_or("?").to_string());
+            .map(|sid| session_label(sessions, sid))
+            .unwrap_or_else(|| "?".to_string());
         println!("[grace] resumed \"{label}\" ({prior_turns} prior turns)");
     }
     // The persona greeting is skin-controlled (see `Skin::welcome`), so a
@@ -703,6 +703,24 @@ pub(crate) fn recency_label(last_active: i64, now: i64) -> String {
     }
 }
 
+/// The human face of a session: its generated title, else (never titled)
+/// its first message truncated to a line, else the raw id. The switch
+/// message, the startup resume line, and the one-shot resume line all
+/// name sessions through this one chain so a session is always called by
+/// the same name everywhere.
+pub(crate) fn session_label(sessions: &SessionStore, sid: &str) -> String {
+    if let Some(t) = sessions.get_title(sid).ok().flatten() {
+        return t;
+    }
+    sessions
+        .load(sid)
+        .ok()
+        .and_then(|m| m.first().map(|m| m.content.clone()))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(50).collect())
+        .unwrap_or_else(|| sid.to_string())
+}
+
 /// `/session` — interactive session picker.
 /// The picker lists saved sessions, lets you switch to one, or start a fresh session.
 /// No explicit subcommands: the interactive picker covers everything.
@@ -866,7 +884,7 @@ fn handle_session_command(
             // session's count (or an estimate) for a session that has
             // real usage on record.
             *last_usage = sessions.load_usage(sid).ok().flatten();
-            let label = titles.get(sid).cloned().unwrap_or_else(|| sid.clone());
+            let label = session_label(sessions, sid);
             println!("switched to session \"{label}\" ({} messages loaded).", messages.len());
         }
         Err(e) => println!("error loading session: {e}"),

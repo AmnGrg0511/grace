@@ -481,11 +481,7 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
     if let Some(sid) = &session_id {
         let prior = sessions.load(sid)?;
         if !prior.is_empty() && !chat {
-            let label = sessions
-                .get_title(sid)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| sid.clone());
+            let label = crate::ui::chat::session_label(&sessions, sid);
             println!("[grace] resumed \"{label}\" ({} prior turns)", prior.len());
         }
         messages.extend(prior);
