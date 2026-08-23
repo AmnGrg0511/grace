@@ -200,7 +200,7 @@ loop usable from a REPL, a one-shot run, and a delegated sub-agent.
 |----------|----------|-----|
 | **Skill** | No | `~/.grace/skills/<name>/SKILL.md` with a `description:` frontmatter line |
 | **Skin** | No | `~/.grace/skins/<name>.toml` with 7 RGB fields |
-| **Tool** | No | `./tools/<name>/manifest.json` + an executable — see `grace-agent` skill |
+| **Tool** | No | `~/.grace/tools/<name>/manifest.json` + an executable — see `grace-agent` skill |
 | **Built-in tool** | Yes | Implement `Tool` in `src/tools/builtins/`, register in `builtins/mod.rs` |
 | **Provider** | Yes | Implement `ProviderTransport` in `src/transport/` |
 

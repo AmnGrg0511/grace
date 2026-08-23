@@ -219,6 +219,7 @@ editing a skill is a `write`/`edit` of a markdown file — no rebuild.
 - `~/.grace/memory.db` — durable facts (SQLite)
 - `~/.grace/sessions.db` — chat history (SQLite, FTS5-indexed)
 - `~/.grace/skills/` — skills, including the three shipped ones
+- `~/.grace/tools/` — plugin tools (`<name>/manifest.json` + executable)
 - `~/.grace/skins/<name>.toml` — custom skins (no rebuild)
 - `~/.grace/soul.md` — the editable persona
 - `~/.grace/.env` — API keys written by the onboarding wizard
@@ -230,7 +231,7 @@ editing a skill is a `write`/`edit` of a markdown file — no rebuild.
 |--------|-----|
 | **Skill** | `~/.grace/skills/<name>/SKILL.md` with a `description:` line |
 | **Skin** | `~/.grace/skins/<name>.toml` (RGB arrays per role; see below) |
-| **Tool** | `./tools/<name>/manifest.json` + an executable |
+| **Tool** | `~/.grace/tools/<name>/manifest.json` + an executable |
 
 **Custom skin** — every color the UI emits comes from a skin, so a custom one
 only needs RGB triplets (0–255) in `~/.grace/skins/<name>.toml`:
@@ -271,7 +272,7 @@ A *built-in* skin (shipped in every install) is a code change: add a
 `pub const NAME: Skin = Skin { … };` to `src/ui/skin.rs` and push it onto the
 `ALL` slice, then rebuild.
 
-**Plugin tool** — `./tools/<name>/manifest.json` (or `tools_dir` in
+**Plugin tool** — `~/.grace/tools/<name>/manifest.json` (or `tools_dir` in
 `config.toml`) is discovered at startup; no code, no rebuild:
 
 ```json

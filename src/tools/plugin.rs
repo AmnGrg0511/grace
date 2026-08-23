@@ -212,9 +212,14 @@ impl PluginToolStore {
         Self { root: root.into() }
     }
 
-    /// Default location: `./tools` relative to the current working directory.
+    /// Default location: `~/.grace/tools`, alongside the other grace
+    /// state (skills, memory, sessions) — not the working directory, so a
+    /// tool installed once is found from every directory.
     pub fn default_root() -> PathBuf {
-        PathBuf::from("tools")
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".grace")
+            .join("tools")
     }
 
     /// Discover all tools under `root`, returning them boxed for direct
@@ -299,6 +304,14 @@ mod tests {
     fn missing_dir_yields_no_tools() {
         let store = PluginToolStore::new("/nonexistent/path/grace_test_xyz");
         assert!(store.load().is_empty());
+    }
+
+    #[test]
+    fn the_default_root_lives_under_dot_grace() {
+        // Plugin tools must be found the same way skills and memory are —
+        // from $HOME, not the CWD, so a tool installed once works from any
+        // directory.
+        assert!(PluginToolStore::default_root().ends_with(".grace/tools"));
     }
 
     #[test]

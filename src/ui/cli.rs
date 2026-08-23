@@ -387,8 +387,10 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
         .clone()
         .unwrap_or_else(|| crate::skill::default_root().to_string_lossy().to_string());
     let _ = crate::skill::ensure_default_skills();
-    let tools_root =
-        settings.tools_dir.clone().unwrap_or_else(|| "tools".to_string());
+    let tools_root = settings
+        .tools_dir
+        .clone()
+        .unwrap_or_else(|| crate::tools::PluginToolStore::default_root().to_string_lossy().to_string());
     let skills = crate::skill::SkillStore::new(&skills_root);
 
     // One assembly point for the whole tool set — including `delegate`, whose
