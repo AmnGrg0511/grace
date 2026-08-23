@@ -71,6 +71,12 @@ pub struct Skin {
     pub success: RgbColor,
     /// Failures and warnings that must be impossible to miss.
     pub error: RgbColor,
+    /// The one-line persona greeting printed under the banner at startup —
+    /// fully skin-controlled so a custom skin can set the tone (formal,
+    /// casual, a particular name of address) without touching code.
+    pub welcome: &'static str,
+    /// The farewell printed on `/exit` / EOF. Same control as [`Self::welcome`].
+    pub goodbye: &'static str,
 }
 
 impl Skin {
@@ -132,22 +138,29 @@ pub enum Role {
     Error,
 }
 
-/// "solaris" — amber/orange, high energy (DEFAULT).
+/// "solaris" — layered amber/orange, high energy (DEFAULT). The palette is
+/// deliberately a *spread* of warm tones rather than one flat orange: a
+/// bright golden for code, a vivid ember for the accent/cursor, a deep burnt
+/// orange for grace's own voice, a soft warm grey for thinking, and a warm
+/// mid for the dim tier — so the eye can tell roles apart by temperature and
+/// brightness, the way a multi-accent terminal theme does.
 pub const SOLARIS: Skin = Skin {
     name: "solaris",
     prompt_glyph: "»",
-    prompt: RgbColor(230, 140, 40),
-    answer_glyph: "»",
-    answer: RgbColor(220, 100, 40),
-    thinking: RgbColor(130, 110, 90),
-    tool_bullet: RgbColor(255, 170, 0),
-    tool_name: RgbColor(250, 230, 200),
-    tool_dim: RgbColor(140, 110, 80),
-    code: RgbColor(255, 180, 60),
+    prompt: RgbColor(255, 168, 72),
+    answer_glyph: "✦",
+    answer: RgbColor(255, 132, 40),
+    thinking: RgbColor(158, 132, 108),
+    tool_bullet: RgbColor(255, 176, 0),
+    tool_name: RgbColor(255, 238, 216),
+    tool_dim: RgbColor(154, 124, 96),
+    code: RgbColor(255, 201, 92),
     accent: RgbColor(255, 105, 45),
-    hint: RgbColor(155, 130, 100),
+    hint: RgbColor(176, 148, 116),
     success: RgbColor(150, 205, 90),
     error: RgbColor(240, 85, 65),
+    welcome: "Grace is ready. How may I help you, Sir?",
+    goodbye: "Until next time, Sir.",
 };
 
 /// "royal" — deep violet/indigo with a brighter gold, more formal.
@@ -158,14 +171,16 @@ pub const ROYAL: Skin = Skin {
     answer_glyph: "◆",
     answer: RgbColor(186, 85, 211),
     thinking: RgbColor(125, 115, 105),
-    tool_bullet: RgbColor(255, 215, 0),
-    tool_name: RgbColor(230, 230, 250),
-    tool_dim: RgbColor(110, 100, 130),
-    code: RgbColor(255, 215, 0),
-    accent: RgbColor(200, 125, 250),
-    hint: RgbColor(150, 140, 170),
+    tool_bullet: RgbColor(255, 196, 64),
+    tool_name: RgbColor(236, 232, 255),
+    tool_dim: RgbColor(118, 106, 140),
+    code: RgbColor(255, 224, 120),
+    accent: RgbColor(206, 128, 255),
+    hint: RgbColor(156, 146, 178),
     success: RgbColor(120, 200, 145),
     error: RgbColor(245, 100, 115),
+    welcome: "At your service, Sir.",
+    goodbye: "Until next time, Sir.",
 };
 
 /// "ocean" — cool teal/blue, calm and low-contrast.
@@ -176,14 +191,16 @@ pub const OCEAN: Skin = Skin {
     answer_glyph: "«",
     answer: RgbColor(70, 130, 220),
     thinking: RgbColor(110, 105, 100),
-    tool_bullet: RgbColor(0, 180, 170),
-    tool_name: RgbColor(220, 235, 240),
-    tool_dim: RgbColor(90, 120, 130),
-    code: RgbColor(0, 200, 190),
+    tool_bullet: RgbColor(0, 190, 178),
+    tool_name: RgbColor(224, 240, 246),
+    tool_dim: RgbColor(96, 128, 138),
+    code: RgbColor(46, 219, 203),
     accent: RgbColor(95, 165, 255),
-    hint: RgbColor(120, 138, 152),
+    hint: RgbColor(126, 146, 160),
     success: RgbColor(80, 200, 145),
     error: RgbColor(248, 112, 98),
+    welcome: "Grace is ready. How can I help you?",
+    goodbye: "Goodbye.",
 };
 
 /// "sakura" — warm pinks, soft and bright.
@@ -194,14 +211,16 @@ pub const SAKURA: Skin = Skin {
     answer_glyph: "✦",
     answer: RgbColor(230, 100, 150),
     thinking: RgbColor(130, 115, 110),
-    tool_bullet: RgbColor(255, 180, 200),
-    tool_name: RgbColor(255, 235, 240),
-    tool_dim: RgbColor(150, 110, 125),
-    code: RgbColor(255, 160, 190),
+    tool_bullet: RgbColor(255, 168, 194),
+    tool_name: RgbColor(255, 238, 244),
+    tool_dim: RgbColor(158, 118, 132),
+    code: RgbColor(255, 176, 200),
     accent: RgbColor(255, 95, 135),
-    hint: RgbColor(168, 142, 152),
+    hint: RgbColor(176, 148, 158),
     success: RgbColor(135, 195, 125),
     error: RgbColor(232, 72, 96),
+    welcome: "I'm here. What shall we do?",
+    goodbye: "Goodbye.",
 };
 
 pub const ALL: &[Skin] = &[SOLARIS, ROYAL, OCEAN, SAKURA];
@@ -231,6 +250,10 @@ pub struct CustomSkin {
     pub success: [u8; 3],
     #[serde(default = "default_error")]
     pub error: [u8; 3],
+    #[serde(default = "default_welcome")]
+    pub welcome: String,
+    #[serde(default = "default_goodbye")]
+    pub goodbye: String,
 }
 
 fn default_prompt_glyph() -> String {
@@ -245,6 +268,10 @@ fn default_accent() -> [u8; 3] { [255, 105, 45] }
 fn default_hint() -> [u8; 3] { [155, 130, 100] }
 fn default_success() -> [u8; 3] { [150, 205, 90] }
 fn default_error() -> [u8; 3] { [240, 85, 65] }
+// Serde fallbacks for persona lines — an old ~/.grace/skins/*.toml that
+// predates them keeps parsing (defaults mirror solaris).
+fn default_welcome() -> String { "Grace is ready. How may I help you, Sir?".to_string() }
+fn default_goodbye() -> String { "Until next time, Sir.".to_string() }
 
 /// Directory custom skins live in: `~/.grace/skins/*.toml`.
 pub fn custom_skins_dir() -> std::path::PathBuf {
@@ -311,6 +338,8 @@ fn leak_custom(c: CustomSkin) -> Skin {
         hint: RgbColor(c.hint[0], c.hint[1], c.hint[2]),
         success: RgbColor(c.success[0], c.success[1], c.success[2]),
         error: RgbColor(c.error[0], c.error[1], c.error[2]),
+        welcome: leak_str(c.welcome),
+        goodbye: leak_str(c.goodbye),
     }
 }
 
@@ -328,13 +357,24 @@ mod tests {
     }
 
     #[test]
-    fn every_skin_gives_the_new_roles_distinct_colors() {
+    fn every_skin_gives_every_role_a_distinct_color() {
+        // A skin must re-theme the whole UI, which only works if no two roles
+        // share a color — otherwise, say, code blocks and tool bullets would
+        // be indistinguishable under that skin.
         for s in ALL {
-            let colors = [s.accent, s.hint, s.success, s.error];
+            let colors = [
+                s.prompt, s.answer, s.thinking, s.tool_bullet, s.tool_name, s.tool_dim, s.code,
+                s.accent, s.hint, s.success, s.error,
+            ];
             let mut sorted = colors.to_vec();
             sorted.sort_by_key(|c| (c.0, c.1, c.2));
             sorted.dedup();
-            assert_eq!(sorted.len(), colors.len(), "{} reuses a color across the new roles", s.name);
+            assert_eq!(
+                sorted.len(),
+                colors.len(),
+                "{} reuses a color across roles",
+                s.name
+            );
         }
     }
 
