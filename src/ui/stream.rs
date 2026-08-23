@@ -1,0 +1,1140 @@
+//! The streaming markdown commit/render engine — the append-only delta emitter
+//! the REPL uses for model output, plus the small display-width helpers it
+//! needs.
+//!
+//! Invariants (guarded by the tests at the bottom of this file and by
+//! [`crate::ui::markdown`]):
+//! - **Append-only** — a completed markdown block renders once and its bytes
+//!   are emitted once. Nothing is ever cursor-up or erased.
+//! - **Prefix-stable** — rendering a line-complete prefix is a byte prefix of
+//!   rendering that prefix plus more. The render width is pinned per stream
+//!   ([`StreamState::width`]) so a mid-stream resize cannot re-wrap an
+//!   already-committed table.
+//!
+//! Extracted from `chat.rs` so the REPL loop stays the one focus of that file.
+
+use crate::ui::markdown::strip_ansi;
+use crate::ui::skin::{no_color, Role, Skin};
+
+/// Whether a tool's result body should be printed: `edit` (diffs) always
+/// shows since seeing the diff is the point; every other tool
+/// (read/bash/etc.) is noise by default, gated behind
+/// `--verbose`/`/verbose`. Pulled out as its own function (not inlined in
+/// `print_agent_event`) so it's directly unit-testable without touching
+/// stdout at all.
+fn should_show_tool_output(tool_name: &str, verbose: bool) -> bool {
+    verbose || tool_name == "edit"
+}
+
+/// State for streaming markdown rendering.
+///
+/// Fragments are accumulated in [`StreamState::buf`].  On each fragment we
+/// find the *stable commit boundary* — the largest prefix of the buffer that
+/// is a set of fully-finalized markdown blocks which no future fragment can
+/// change (complete lines, whole fenced blocks) — render that prefix through
+/// [`crate::ui::markdown::render_terminal_colored`], and **append only the
+/// newly-rendered bytes** to the terminal.
+///
+/// This is append-only: nothing is ever cursor-up or erased, so a streamed
+/// response renders markdown on *every* terminal, keeps rendering well past
+/// the viewport height, and cannot duplicate — each rendered byte is written
+/// exactly once.  The in-progress tail (a line with no newline yet, an open
+/// code fence, a half-seen table) is held back and flushed when the block
+/// completes or the stream finalizes.
+#[derive(Default)]
+pub struct StreamState {
+    /// All raw fragments accumulated so far for the current stream.
+    buf: String,
+    /// How many bytes of the rendered committed prefix have already been
+    /// written to the terminal.  Only the suffix beyond this is emitted.
+    emitted: usize,
+    /// The rendered form of the committed prefix as of the last emit.  Kept so
+    /// we can verify the new render is a byte-prefix extension of it (the
+    /// invariant that makes delta-emission duplication-free).
+    last_rendered: String,
+    /// The render width for this stream, captured once, on first use —
+    /// `Some` after the first render, the inner value `None` when there is no
+    /// width (no terminal size and no `COLUMNS`).  Pinning it is load-bearing: a
+    /// table's wrapped form depends on the width, so a fresh per-render width
+    /// would let a mid-stream resize re-wrap an already-committed table and
+    /// break the byte-prefix invariant the delta emitter checks.  One-shot
+    /// renders (answers, tool results) resolve a fresh width instead.
+    width: Option<Option<usize>>,
+    /// Set once a commit fault has been made visible (invariant broken or a
+    /// write error) so the one-line stderr note is not repeated for every
+    /// subsequent delta of the same stream.
+    commit_failed: bool,
+}
+
+/// The byte offset into `buf` up to which the buffer consists of fully
+/// finalized markdown blocks — the safe point to commit and render.
+///
+/// A block is finalized once it can no longer be altered by later text.  For
+/// prose that is a complete line (a line whose newline has arrived); for a
+/// fenced code block it is only when the *closing* fence is seen (the box is
+/// rendered whole, sized to its widest line, so we cannot commit a partial
+/// fence).  Everything from the returned offset to the end is an in-progress
+/// tail and must be held back.
+///
+/// The scan is fence-aware: a blank line or line boundary *inside* an open
+/// fence is code content, not a block separator, so it never advances the
+/// commit point.
+fn stable_commit_endpoint(buf: &str) -> usize {
+    let mut commit = 0usize;
+    let mut in_fence = false;
+    let mut fence_char = '\0';
+    let mut fence_len = 0usize;
+    let mut line_start = 0usize;
+
+    for (i, b) in buf.as_bytes().iter().enumerate() {
+        if *b != b'\n' {
+            continue;
+        }
+        let line = &buf[line_start..i];
+        let line_end = i + 1; // include the terminating newline
+
+        if in_fence {
+            if is_closing_fence(line, fence_char, fence_len) {
+                in_fence = false;
+                commit = line_end; // the whole block is finalized now
+            }
+            // interior line: commit stays put
+        } else if let Some((ch, len)) = open_fence(line) {
+            in_fence = true;
+            fence_char = ch;
+            fence_len = len;
+            // do NOT advance commit past the opening fence: the block's
+            // content is not finalized until the closing fence arrives.
+        } else if is_table_row(line) {
+            // A table's rendered box depends on every row of it (columns are
+            // sized to the whole table, then fitted to the terminal width),
+            // so every already-rendered row — borders included — could
+            // change if another row arrives: the same prefix-instability as
+            // an open fence.  Hold the table's rows until a non-row line
+            // ends it.
+        } else {
+            commit = line_end; // finalizes any held table rows, too
+        }
+        line_start = i + 1;
+    }
+    // A trailing line without a newline is in progress — not committed.
+    commit
+}
+
+/// Whether a complete source line looks like a GFM table row (a line whose
+/// trimmed form opens with a pipe).  Erring toward "yes" merely delays that
+/// line's commit until the next non-row line — it can never expose a
+/// half-sized table.
+fn is_table_row(line: &str) -> bool {
+    line.trim_start().starts_with('|')
+}
+
+/// If `line` (a complete source line, no newline) opens a fenced code block,
+/// return the fence character and its run length.  Matches CommonMark: up to
+/// three leading spaces, then three or more backticks/tildes.
+fn open_fence(line: &str) -> Option<(char, usize)> {
+    let t = line.trim_start();
+    let mut chars = t.chars();
+    let fence = chars.next()?;
+    if fence != '`' && fence != '~' {
+        return None;
+    }
+    let run = 1 + chars.take_while(|&c| c == fence).count();
+    if run < 3 {
+        return None;
+    }
+    Some((fence, run))
+}
+
+/// Whether `line` closes a fence opened with `fence_char` repeated `min_len`
+/// times: the line (ignoring trailing whitespace) must be the same character
+/// repeated at least `min_len` times and nothing else.
+fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
+    let t = line.trim_end();
+    let mut chars = t.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first != fence_char {
+        return false;
+    }
+    let run = 1 + chars.take_while(|&c| c == fence_char).count();
+    run >= min_len && run == t.chars().count()
+}
+
+/// Emit any portion of `rendered` not yet written, then remember it.
+///
+/// The committed prefix only ever grows by appending *complete* blocks, so a
+/// fresh render is always a byte-prefix extension of the previous one; we
+/// therefore emit just the suffix.  That is what makes streaming duplication-
+/// free: each rendered byte reaches the terminal exactly once, and because we
+/// never move the cursor, nothing can be duplicated past the viewport either.
+fn emit_committed(stream: &mut StreamState, rendered: &str, out: &mut dyn std::io::Write) {
+    // Fail-safe: if the prefix invariant were ever broken, skip this delta
+    // rather than emit a corrupted/duplicated slice — but say so, once. A
+    // silent skip here would be an invisible loss of output; the note goes
+    // to stderr, never into `out`, so the stream's bytes stay untouched.
+    if !stream.last_rendered.is_empty() && !rendered.starts_with(&stream.last_rendered) {
+        if !stream.commit_failed {
+            stream.commit_failed = true;
+            eprintln!(
+                "[grace] stream error: the append-only prefix invariant broke; \
+                 the rest of this block was dropped (output may be incomplete)"
+            );
+        }
+        return;
+    }
+    let end = rendered.len();
+    if end > stream.emitted {
+        if let Err(e) = out.write_all(&rendered.as_bytes()[stream.emitted..]) {
+            if !stream.commit_failed {
+                stream.commit_failed = true;
+                eprintln!("[grace] stream error: writing stream output failed: {e}; remaining output may be missing");
+            }
+        }
+        // Keep the same bookkeeping as before (advance past the attempted
+        // slice) so a broken destination isn't retried delta after delta.
+        stream.emitted = end;
+    }
+    stream.last_rendered = rendered.to_string();
+}
+
+/// Flush the in-progress tail of the current stream to `out`, then reset the
+/// streaming state for the next block.
+///
+/// Called when a non-fragment event (tool call, compression, …) interrupts the
+/// stream, and again at end of turn — since no terminal event fires after the
+/// last fragment, that final flush is what guarantees a trailing line that
+/// arrives without a newline is still emitted.  With color disabled (piped
+/// output) the fragments were already written raw as they arrived, so there is
+/// nothing buffered to flush.
+pub fn finalize_stream(
+    stream: &mut StreamState,
+    skin: &Skin,
+    disable_color: bool,
+    out: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    if !disable_color && !stream.buf.is_empty() {
+        let width = *stream
+            .width
+            .get_or_insert_with(crate::ui::markdown::terminal_width);
+        let rendered = crate::ui::markdown::render_terminal_width(&stream.buf, skin, true, width);
+        emit_committed(stream, &rendered, out);
+        out.flush()?;
+    }
+    stream.buf.clear();
+    stream.emitted = 0;
+    stream.last_rendered.clear();
+    Ok(())
+}
+
+/// Flush the in-progress tail of a stream to **stdout** — the end-of-turn
+/// counterpart of [`print_agent_event`], needed because the agent emits no
+/// terminal event after its last [`crate::core::lifecycle::AgentEvent::ContentFragment`].
+pub fn flush_stream_to_stdout(stream: &mut StreamState, skin: &Skin) {
+    let mut stdout = std::io::stdout();
+    let _ = finalize_stream(stream, skin, no_color(), &mut stdout);
+}
+
+/// How many visual terminal rows `text` occupies when printed at `cols`
+/// columns wide.  ANSI escapes are zero-width; wide (CJK) characters count
+/// as two columns; a line exactly `cols` wide still fits on one row.  When
+/// the terminal width is unknown (piped/tests) falls back to the logical
+/// line count, which is the best available approximation.
+fn visual_rows(text: &str, cols: Option<usize>) -> usize {
+    let cols = match cols {
+        Some(c) if c > 0 => c,
+        _ => return text.lines().count().max(1),
+    };
+    text.lines()
+        .map(|line| {
+            use unicode_width::UnicodeWidthStr;
+            let width = strip_ansi(line).width();
+            width.div_ceil(cols).max(1)
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
+/// Render an [`crate::core::lifecycle::AgentEvent`] to stdout — the shared formatting
+/// used by both one-shot and chat mode so tool calls and intermediate model
+/// content are visible as they happen, not just the final answer.
+///
+/// Layout mirrors the tree-hierarchy style used by Claude Code / Codex CLI:
+/// thinking as an indented sub-level under a "thinking" header, tool calls
+/// as a `⏺`-prefixed line with an
+/// indented `⎿` result underneath (so a run of many tool calls reads as a
+/// visual tree, not a wall of flat log lines). All colors come from `skin`
+/// (see [`grace::skin`]) — nothing here is hardcoded, so switching skins
+/// restyles every surface at once. Colors auto-disable when stdout isn't a
+/// real terminal (checked once via [`no_color`]).
+pub fn print_agent_event(
+    event: crate::core::lifecycle::AgentEvent,
+    skin: &Skin,
+    verbose: bool,
+    stream: &mut StreamState,
+) {
+    let mut stdout = std::io::stdout();
+    print_agent_event_to(event, skin, verbose, stream, &mut stdout);
+}
+
+/// Test-support shim so integration tests can compute the exact visual-row
+/// count the streaming renderer uses, for replaying captures faithfully.
+#[doc(hidden)]
+pub fn test_support_visual_rows(text: &str, cols: Option<usize>) -> usize {
+    visual_rows(text, cols)
+}
+
+/// Write an event to `out` — same as [`print_agent_event`] but testable
+/// (capturable) because it writes through a `Write` trait object instead of
+/// hard‑wiring `stdout`.  All the cursor‑movement and markdown logic lives
+/// here; `print_agent_event` is just a thin wrapper.
+pub fn print_agent_event_to(
+    event: crate::core::lifecycle::AgentEvent,
+    skin: &Skin,
+    verbose: bool,
+    stream: &mut StreamState,
+    out: &mut dyn std::io::Write,
+) {
+    let disable_color = no_color();
+    let dim = |s: &str| {
+        if disable_color {
+            s.to_string()
+        } else {
+            format!("\x1b[2m{s}\x1b[0m")
+        }
+    };
+
+    match event {
+        crate::core::lifecycle::AgentEvent::AssistantContent(text) => {
+            let _ = finalize_stream(stream, skin, disable_color, out);
+            let bullet = skin.paint(Role::ToolBullet, "▾");
+            let thinking = skin.paint(Role::Thinking, "Thinking");
+            writeln!(out, "{} {}", bullet, thinking).ok();
+            for line in text.lines() {
+                writeln!(out, "  {}", skin.paint(Role::Thinking, line)).ok();
+            }
+        }
+        crate::core::lifecycle::AgentEvent::ToolCallStart { name, arguments } => {
+            let _ = finalize_stream(stream, skin, disable_color, out);
+            let compact = compact_args(arguments);
+            let bullet = skin.paint(Role::ToolBullet, "●");
+            // Name in the ToolName role (same as the `/skin` preview's
+            // mini-transcript), args in the skin's ToolDim color so the
+            // call recedes behind the undimmed answer text above/below it.
+            let call = format!(
+                "{}{}",
+                skin.paint(Role::ToolName, name),
+                skin.paint(Role::ToolDim, &format!("({compact})"))
+            );
+            writeln!(out, "{} {call}", bullet).ok();
+        }
+        crate::core::lifecycle::AgentEvent::ToolCallEnd { name, result, elapsed } => {
+            let _ = finalize_stream(stream, skin, disable_color, out);
+            // Tool output is noisy by default — `edit` is the one tool
+            // whose result (a diff) is the point of looking at it, so it
+            // always shows; everything else (read/bash/etc.)
+            // is hidden unless `--verbose`/`/verbose` is on. The one-line
+            // "call + timing" summary below still always prints, so you
+            // always see *that* something ran, just not its full body.
+            if should_show_tool_output(name, verbose) {
+                let rendered = crate::ui::markdown::render_terminal(result, skin);
+                for (i, line) in rendered.lines().enumerate() {
+                    let prefix = if i == 0 { "  ⎿ " } else { "    " };
+                    writeln!(out, "{}{}", skin.paint(Role::ToolDim, prefix), line).ok();
+                }
+            }
+            let tokens = estimate_tokens(result);
+            let secs = elapsed.as_secs_f64();
+            let timing = if secs >= 1.0 {
+                format!("{secs:.1}s")
+            } else {
+                format!("{}ms", (secs * 1000.0) as u64)
+            };
+            let prefix = format!(
+                "    {} {}",
+                skin.paint(Role::ToolDim, "·"),
+                skin.paint(Role::ToolBullet, "Σ")
+            );
+            let rest = dim(&format!(" ~{tokens} tok · {timing}"));
+            writeln!(out, "{prefix}{rest}").ok();
+        }
+        crate::core::lifecycle::AgentEvent::ContentFragment(fragment) => {
+            stream.buf.push_str(fragment);
+            if disable_color {
+                // Piped output: print fragments raw, no markdown pass.  This is
+                // append-only (each fragment written exactly once), so it is
+                // already duplication-free and viewport-independent.
+                let _ = write!(out, "{fragment}");
+            } else {
+                // Commit the largest finalized prefix and append only the
+                // newly-rendered bytes.  Append-only — no cursor movement — so
+                // it renders markdown on any terminal, keeps rendering past the
+                // viewport, and cannot duplicate.
+                // Pin the width for this stream on first use (see
+                // StreamState::width): a mid-stream resize must not re-wrap an
+                // already-committed table.
+                let width = *stream
+                    .width
+                    .get_or_insert_with(crate::ui::markdown::terminal_width);
+                let commit = stable_commit_endpoint(&stream.buf);
+                if commit > 0 {
+                    let committed = &stream.buf[..commit];
+                    let rendered =
+                        crate::ui::markdown::render_terminal_width(committed, skin, true, width);
+                    emit_committed(stream, &rendered, out);
+                }
+            }
+            let _ = out.flush();
+        }
+         crate::core::lifecycle::AgentEvent::ContextCompressed {
+            before_tokens,
+            after_tokens,
+            dropped_messages,
+            summary,
+        } => {
+            let _ = finalize_stream(stream, skin, disable_color, out);
+            // Always surfaced, not gated behind --verbose: history silently
+            // disappearing is exactly the kind of thing a user needs told.
+            let summary_suffix = match summary {
+                Some(s) if !s.is_empty() => format!("\n  · summary: {s}"),
+                _ => String::new(),
+            };
+            writeln!(
+                out,
+                "{}",
+                skin.paint(
+                    Role::ToolDim,
+                    &format!(
+                        "  · context compressed: {before_tokens} → {after_tokens} tok \
+                         ({dropped_messages} older messages elided){summary_suffix}"
+                    )
+                )
+            )
+            .ok();
+        }
+        crate::core::lifecycle::AgentEvent::DelegationStart { task, budget } => {
+            let _ = finalize_stream(stream, skin, disable_color, out);
+            let bullet = skin.paint(Role::ToolBullet, "⇢");
+            writeln!(out, "{bullet} delegating (budget {budget}): {}", compact_args(task)).ok();
+        }
+        crate::core::lifecycle::AgentEvent::DelegationEnd {
+            task: _,
+            iterations,
+            ok,
+        } => {
+            let _ = finalize_stream(stream, skin, disable_color, out);
+            let status = if ok { "done" } else { "budget exhausted" };
+            writeln!(
+                out,
+                "{}",
+                skin.paint(
+                    Role::ToolDim,
+                    &format!("    · sub-agent {status} after {iterations} iterations")
+                )
+            )
+            .ok();
+        }
+    }
+}
+
+/// Token-count estimate for display.
+///
+/// Delegates to [`crate::util::tokens`] rather than re-deriving a chars/4
+/// rule of thumb here — the status bar and the compressor must agree, or the
+/// bar shows 40% while compression is firing.
+pub fn estimate_tokens(text: &str) -> usize {
+    use crate::util::tokens::TokenCounter;
+    crate::util::tokens::default_counter().count_text(text).max(1)
+}
+
+/// Shrink a JSON tool-arguments string to a single readable line for the
+/// `⏺ name(args)` header — whitespace-collapsed only, never truncated (the
+/// user wants the full call visible; length isn't cause to hide content).
+pub fn compact_args(arguments: &str) -> String {
+    arguments.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod verbose_gate_tests {
+    use super::should_show_tool_output;
+    use super::{print_agent_event_to, StreamState};
+
+    #[test]
+    fn non_edit_tools_hidden_unless_verbose() {
+        assert!(!should_show_tool_output("read", false));
+        assert!(!should_show_tool_output("bash", false));
+        assert!(should_show_tool_output("read", true));
+        assert!(should_show_tool_output("bash", true));
+    }
+
+    #[test]
+    fn edit_always_shown_regardless_of_verbose() {
+        assert!(should_show_tool_output("edit", false));
+        assert!(should_show_tool_output("edit", true));
+    }
+
+    #[test]
+    fn tool_end_line_has_a_single_sigma_and_the_timing() {
+        use crate::core::lifecycle::AgentEvent;
+        let skin = crate::ui::skin::by_name(None);
+        let mut out = Vec::new();
+        let mut stream = StreamState::default();
+        print_agent_event_to(
+            AgentEvent::ToolCallEnd {
+                name: "read",
+                result: "x",
+                elapsed: std::time::Duration::from_millis(10),
+            },
+            &skin,
+            true, // disable_color
+            &mut stream,
+            &mut out,
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(s.matches('Σ').count(), 1, "exactly one Σ glyph: {s:?}");
+        assert!(s.contains("10ms"), "timing present: {s:?}");
+    }
+}
+
+#[cfg(test)]
+mod streaming_markdown_tests {
+    use super::*;
+    use crate::core::lifecycle::AgentEvent;
+    fn render_events(events: &[AgentEvent], color: bool) -> String {
+        let skin = crate::ui::skin::SOLARIS;
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        // Force the color decision via env vars (tests have no PTY, so
+        // `no_color()` would otherwise always be true).  The env lock
+        // serializes against other tests that mutate the same vars.
+        let _lock = crate::util::test_support::env_guard();
+        std::env::remove_var("CLICOLOR_FORCE");
+        std::env::remove_var("NO_COLOR");
+        if color {
+            std::env::set_var("CLICOLOR_FORCE", "1");
+        } else {
+            std::env::set_var("NO_COLOR", "1");
+        }
+        // `print_agent_event_to` takes the event by value; `ContentFragment`
+        // holds only a `&'static str` in these tests, so we can reborrow.
+        for event in events {
+            let event = match *event {
+                AgentEvent::ContentFragment(s) => AgentEvent::ContentFragment(s),
+                AgentEvent::AssistantContent(s) => AgentEvent::AssistantContent(s),
+                _ => unreachable!(),
+            };
+            print_agent_event_to(event, &skin, false, &mut stream, &mut out);
+        }
+        // Flush the in-progress tail so the captured bytes represent a fully
+        // completed stream (as a real turn is finalized at its end).
+        let _ = finalize_stream(&mut stream, &skin, !color, &mut out);
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn piped_output_prints_fragments_raw() {
+        // NO_COLOR → fragments are concatenated with no markdown rendering.
+        let out = render_events(
+            &[
+                AgentEvent::ContentFragment("Hello "),
+                AgentEvent::ContentFragment("**bold**"),
+                AgentEvent::ContentFragment(" world"),
+            ],
+            false,
+        );
+        assert_eq!(out, "Hello **bold** world");
+    }
+
+    #[test]
+    fn color_output_renders_markdown_once_at_end() {
+        // The emitted output must contain styled bold and heading — and since
+        // only the *rendered* committed text is ever appended (never the raw
+        // fragments), the RAW markdown ("**bold**") must NOT appear in the
+        // captured output, and no byte is ever written twice.
+        let out = render_events(
+            &[
+                AgentEvent::ContentFragment("Hello "),
+                AgentEvent::ContentFragment("**bold**"),
+                AgentEvent::ContentFragment("\n\n## Heading\n"),
+            ],
+            true,
+        );
+        // The rendered output contains ANSI-styled text, not raw markdown.
+        assert!(
+            out.contains("\x1b[1m"),
+            "expected bold ANSI escape in output, got: {out:?}"
+        );
+        assert!(
+            !out.contains("**bold**"),
+            "raw markdown should not leak into final output: {out:?}"
+        );
+        assert!(
+            out.contains("Heading"),
+            "heading text should be present: {out:?}"
+        );
+    }
+
+    #[test]
+    fn finalize_stream_resets_between_tool_calls() {
+        // Simulate: fragment stream → tool call → fragment stream again.
+        // A tool call finalizes (flushes + resets) the current stream, so the
+        // second stream starts from a completely blank slate — and because no
+        // content is ever re-emitted, the first stream's text stays exactly once.
+        let _lock = crate::util::test_support::env_guard();
+        let skin = crate::ui::skin::SOLARIS;
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        // Force color on (tests have no PTY) so the color/commit path runs.
+        std::env::set_var("CLICOLOR_FORCE", "1");
+
+        // First stream — a complete line commits the moment its newline lands.
+        print_agent_event_to(
+            AgentEvent::ContentFragment("first "),
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+        print_agent_event_to(
+            AgentEvent::ContentFragment("stream\n"),
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+        let after_first = String::from_utf8(out.clone()).unwrap();
+        let first_render_count = after_first.matches("first stream").count();
+        assert_eq!(
+            first_render_count, 1,
+            "first stream should render once, got {first_render_count} in: {after_first:?}"
+        );
+
+        // Tool call interrupts (finalizes) the stream
+        print_agent_event_to(
+            AgentEvent::ToolCallEnd {
+                name: "read",
+                result: "file contents",
+                elapsed: std::time::Duration::from_millis(10),
+            },
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+
+        // Second stream
+        print_agent_event_to(
+            AgentEvent::ContentFragment("second stream\n"),
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+        let final_out = String::from_utf8(out.clone()).unwrap();
+        // "second stream" appears exactly once (no duplication from leftover state)
+        let second_count = final_out.matches("second stream").count();
+        assert_eq!(
+            second_count, 1,
+            "second stream should render once, got {second_count} in: {final_out:?}"
+        );
+        // …and the first stream is still exactly once (nothing re-emitted).
+        let first_count = final_out.matches("first stream").count();
+        assert_eq!(
+            first_count, 1,
+            "first stream must not be re-emitted, got {first_count} in: {final_out:?}"
+        );
+
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+    }
+
+    #[test]
+    fn raw_fragments_not_duplicated_in_color_output() {
+        // Append-only regression test: fragments are only ever rendered and
+        // committed as they form complete lines; the trailing partial line is
+        // flushed once when the stream finalizes.  So the intermediate partial
+        // "**bold" (before " text**" completed the line) is never emitted as a
+        // line on its own, and no byte is written more than once.
+        let out = render_events(
+            &[
+                AgentEvent::ContentFragment("**bold"),
+                AgentEvent::ContentFragment(" text**"),
+            ],
+            true,
+        );
+        // The completed buffer renders as styled "bold text".  We should NOT
+        // see the incomplete intermediate "**bold" as a line on its own — that
+        // would indicate the open line was emitted before it completed.
+        let lines: Vec<&str> = out.lines().collect();
+        let standalone_partial = lines.contains(&"**bold");
+        assert!(
+            !standalone_partial,
+            "incomplete open line leaked as standalone line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn visual_rows_counts_wrapped_lines() {
+        // A single logical line spanning multiple terminal rows must count
+        // as multiple visual rows — this is the number the cursor-up uses,
+        // so under-counting is exactly what leaves stale content on screen.
+        assert_eq!(visual_rows("abc", Some(3)), 1);
+        assert_eq!(visual_rows("abcd", Some(3)), 2);
+        assert_eq!(visual_rows("abcdef", Some(3)), 2);
+        assert_eq!(visual_rows("abcdefg", Some(3)), 3);
+        assert_eq!(visual_rows("a\nb", Some(3)), 2);
+        assert_eq!(visual_rows("", Some(3)), 1);
+    }
+
+    #[test]
+    fn visual_rows_falls_back_to_logical_lines_without_a_terminal() {
+        assert_eq!(visual_rows("abc\ndef", None), 2);
+    }
+
+    #[test]
+    fn visual_rows_ignores_ansi_escapes_for_width() {
+        // The render adds styling escapes that occupy zero visual columns;
+        // they must not inflate the wrap count.
+        let styled = "\x1b[1mabcdef\x1b[0m";
+        assert_eq!(visual_rows(styled, Some(3)), 2);
+    }
+
+    #[test]
+    fn wrapped_content_emitted_once_via_append() {
+        // A single logical line that wraps to several visual rows at a narrow
+        // width must still be emitted exactly once, with NO cursor movement.
+        // Append-only rendering has no cursor-up to get wrong: the line is
+        // written once (as its newline arrives) and the terminal soft-wraps it.
+        let _lock = crate::util::test_support::env_guard();
+        let skin = crate::ui::skin::SOLARIS;
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        std::env::set_var("COLUMNS", "10");
+        std::env::set_var("LINES", "24");
+
+        let long = "abcdefghijklmnopqrstuvwxyz";
+        // Arrives in two fragments; the line commits only once its newline lands.
+        print_agent_event_to(
+            AgentEvent::ContentFragment(long),
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+        // Nothing is emitted yet — the line is still open (no newline).
+        assert!(out.is_empty(), "an open line must not be emitted yet: {out:?}");
+        print_agent_event_to(
+            AgentEvent::ContentFragment("!\n"),
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+        let s = String::from_utf8(out.clone()).unwrap();
+
+        // The full line is present exactly once …
+        assert_eq!(
+            s.matches("abcdefghijklmnopqrstuvwxyz!").count(),
+            1,
+            "wrapped line must be emitted once: {s:?}"
+        );
+        // … and no cursor movement of any kind was used.
+        assert!(!s.contains("\x1b[J"), "append mode must not clear the screen: {s:?}");
+        for n in 1..=24 {
+            assert!(
+                !s.contains(&format!("\x1b[{n}A")),
+                "append mode must not cursor-up: {s:?}"
+            );
+        }
+
+        std::env::remove_var("COLUMNS");
+        std::env::remove_var("LINES");
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+    }
+
+    #[test]
+    fn oversized_block_keeps_rendering_past_viewport() {
+        // Content as tall as (or taller than) the viewport keeps rendering in
+        // markdown and is appended — no freeze, no cursor movement, no
+        // duplication.  Nothing is re-rendered in place: each line is written
+        // exactly once as it commits, and the terminal's own scrollback handles
+        // the overflow.
+        let _lock = crate::util::test_support::env_guard();
+        let skin = crate::ui::skin::SOLARIS;
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        std::env::set_var("COLUMNS", "20");
+        std::env::set_var("LINES", "6");
+
+        for chunk in ["aaa\nbbb\n", "ccc\nddd\n", "eee\nfff\n"] {
+            print_agent_event_to(
+                AgentEvent::ContentFragment(chunk),
+                &skin,
+                false,
+                &mut stream,
+                &mut out,
+            );
+        }
+        let s = String::from_utf8(out.clone()).unwrap();
+
+        // Every line is present …
+        for word in ["aaa", "bbb", "ccc", "ddd", "eee", "fff"] {
+            assert!(s.contains(word), "missing {word} in: {s:?}");
+        }
+        // … exactly once (no duplication from re-rendering).
+        for word in ["aaa", "bbb", "ccc", "ddd", "eee", "fff"] {
+            assert_eq!(s.matches(word).count(), 1, "{word} duplicated in: {s:?}");
+        }
+        // And no cursor movement of any kind was used.
+        assert!(!s.contains("\x1b[J"), "append mode must not clear: {s:?}");
+        for n in 1..=24 {
+            assert!(!s.contains(&format!("\x1b[{n}A")), "no cursor-up: {s:?}");
+        }
+
+        std::env::remove_var("COLUMNS");
+        std::env::remove_var("LINES");
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+    }
+
+    #[test]
+    fn stable_commit_endpoint_tracks_complete_lines_and_fences() {
+        // A complete line commits at its terminating newline …
+        assert_eq!(stable_commit_endpoint("hello\n"), 6);
+        // … but a trailing line with no newline is in progress and held back.
+        assert_eq!(stable_commit_endpoint("hello\nworld"), 6);
+
+        // A fenced block is NOT committed until its closing fence arrives: the
+        // commit point stays just before the opening fence.
+        assert_eq!(stable_commit_endpoint("text\n\n```rust\nlet x = 1;\n"), 6);
+        // … and once the closing fence lands, the whole block is committed.
+        assert_eq!(
+            stable_commit_endpoint("text\n\n```rust\nlet x = 1;\n```\n"),
+            "text\n\n```rust\nlet x = 1;\n```\n".len()
+        );
+
+        // A blank line INSIDE an open fence is code content, not a boundary —
+        // and the never-closed fence commits nothing at all.
+        assert_eq!(stable_commit_endpoint("```python\n\ndef f(): pass\n"), 0);
+
+        // A table is held like a fence: the rendered box is sized to the
+        // widest line, so a row is not final until a non-row line ends it.
+        let intro = "text\n";
+        let rows = "| a | bb |\n| --- | --- |\n| ccc | dd |\n";
+        assert_eq!(stable_commit_endpoint(&format!("{intro}{rows}")), intro.len());
+        // A following non-row line finalizes the table and commits it whole.
+        assert_eq!(
+            stable_commit_endpoint(&format!("{intro}{rows}after\n")),
+            intro.len() + rows.len() + "after\n".len()
+        );
+    }
+
+    #[test]
+    fn emit_committed_reports_a_commit_fault_instead_of_dropping_silently() {
+        // Regression (G9): the fail-safe used to `return` without saying a
+        // word — a broken prefix invariant, or a dead write destination,
+        // meant silently missing output. The delta is still skipped
+        // (emitting a corrupted slice would be worse), but the fault must be
+        // flagged exactly once per stream and stay flagged.
+        let mut stream = StreamState::default();
+        let mut out: Vec<u8> = Vec::new();
+        emit_committed(&mut stream, "first line\n", &mut out);
+        assert_eq!(out, b"first line\n");
+        assert!(!stream.commit_failed);
+
+        // A render that does not extend the previous one breaks the prefix
+        // invariant: nothing may be emitted, and no later delta either.
+        let mut broken: Vec<u8> = Vec::new();
+        emit_committed(&mut stream, "something else entirely\n", &mut broken);
+        assert!(broken.is_empty(), "a corrupted slice must never be emitted: {broken:?}");
+        assert!(stream.commit_failed, "the fault must be flagged");
+
+        let mut after: Vec<u8> = Vec::new();
+        emit_committed(&mut stream, "something else entirely\nmore\n", &mut after);
+        assert!(after.is_empty(), "after a fault the delta stays skipped: {after:?}");
+        assert!(stream.commit_failed, "the flag stays set for the rest of the stream");
+    }
+
+    #[test]
+    fn emit_committed_flags_a_failed_write_without_retrying_forever() {
+        struct FailWrite;
+        impl std::io::Write for FailWrite {
+            fn write(&mut self, _b: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe is gone"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // A dead destination is reported once; the bookkeeping still
+        // advances past the attempted slice so the same bytes are not
+        // retried on every subsequent delta.
+        let mut stream = StreamState::default();
+        emit_committed(&mut stream, "some output\n", &mut FailWrite);
+        assert!(stream.commit_failed, "a write error must be flagged");
+        assert_eq!(stream.emitted, "some output\n".len(), "bookkeeping advances past the failed slice");
+    }
+
+    #[test]
+    fn fenced_code_block_emitted_once_when_closed() {
+        // A fenced code block must not be emitted until it is complete (its
+        // closing fence has arrived) — the box is rendered whole, sized to its
+        // widest line — and it must then be emitted exactly once (no dupes).
+        let _lock = crate::util::test_support::env_guard();
+        let skin = crate::ui::skin::SOLARIS;
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        std::env::set_var("CLICOLOR_FORCE", "1");
+
+        // Opening fence + a content line: the fence is still open, so its
+        // interior is held back, but the prose line before it has committed.
+        print_agent_event_to(
+            AgentEvent::ContentFragment("Intro line.\n\n```rust\n"),
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+        print_agent_event_to(
+            AgentEvent::ContentFragment("let x = 41 + 1;\n"),
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+        let mid = String::from_utf8(out.clone()).unwrap();
+        assert!(
+            mid.contains("Intro line."),
+            "complete prose before the fence should commit: {mid:?}"
+        );
+        assert!(
+            !mid.contains("let x = 41 + 1;"),
+            "code must not be emitted before its fence closes: {mid:?}"
+        );
+
+        // Closing fence: the whole block commits and renders exactly once.
+        print_agent_event_to(
+            AgentEvent::ContentFragment("```\n"),
+            &skin,
+            false,
+            &mut stream,
+            &mut out,
+        );
+        let s = String::from_utf8(out.clone()).unwrap();
+        // The code is syntax-highlighted (ANSI breaks the text into runs), so
+        // inspect the plain, escape-stripped text for content.
+        let plain = strip_ansi(&s);
+        assert!(
+            plain.contains("let x = 41 + 1;"),
+            "code should render once the fence closes: {plain:?}"
+        );
+        assert!(
+            plain.contains('┌') && plain.contains('└'),
+            "code box borders expected: {plain:?}"
+        );
+        assert_eq!(
+            plain.matches("let x = 41 + 1;").count(),
+            1,
+            "code line must be emitted exactly once: {plain:?}"
+        );
+        assert_eq!(
+            plain.matches('┌').count(),
+            1,
+            "box top border must appear exactly once: {plain:?}"
+        );
+
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+    }
+
+    #[test]
+    fn render_is_prefix_stable_under_line_extension() {
+        // The streaming invariant: rendering a line-complete prefix must be a
+        // byte prefix of rendering that prefix plus more complete lines.
+        // Violating it makes the duplication guard drop output entirely.
+        let skin = crate::ui::skin::SOLARIS;
+        let r = |s: &str| crate::ui::markdown::render_terminal_colored(s, &skin, true);
+
+        // The thinking-model case that broke streaming: content leading with
+        // blank lines (emitted after the reasoning tokens).
+        assert_eq!(r("\n\n"), "");
+        assert!(r("\n\nPONG\n").starts_with(&r("\n\n")));
+        assert!(r("PONG\n").starts_with(&r("\n\n")));
+
+        // Prose, then a table whose later row is wider (box width changes
+        // mid-table — stable only because the table commits atomically).
+        let base = "intro\n\n";
+        let table = "| a | bb |\n| --- | --- |\n";
+        let wider = "| ccc | dd |\n";
+        assert!(r(base).starts_with(""));
+        assert!(r(&format!("{base}{table}")).starts_with(&r(base)));
+        assert!(r(&format!("{base}{table}{wider}")).starts_with(&r(base)));
+
+        // Code fences stay atomic; the paragraph before renders stably.
+        let pre = "before the code:\n";
+        let fence = "```rust\nlet x = 1;\n```\n";
+        assert!(r(&format!("{pre}{fence}")).starts_with(&r(pre)));
+    }
+
+    #[test]
+    fn short_answer_with_leading_blank_lines_still_flushes() {
+        // A thinking model can answer "\n\nPONG": two blank lines then a
+        // short final line with no trailing newline.  No line ever commits
+        // anything that renders non-empty until the turn ends, so the
+        // end-of-turn flush is the ONLY thing that can print the answer.
+        let _lock = crate::util::test_support::env_guard();
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        let skin = crate::ui::skin::SOLARIS;
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        for frag in ["\n\n", "PONG"] {
+            print_agent_event_to(
+                AgentEvent::ContentFragment(frag),
+                &skin,
+                false,
+                &mut stream,
+                &mut out,
+            );
+        }
+        let _ = finalize_stream(&mut stream, &skin, false, &mut out);
+        let s = String::from_utf8(out).unwrap();
+        let plain = strip_ansi(&s);
+        assert!(plain.contains("PONG"), "answer text must reach the terminal: {s:?}");
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+    }
+
+    #[test]
+    fn long_mixed_document_streams_without_raw_or_dupes() {
+        // Regression: a markdown document past the old viewport-height limit
+        // must stream as fully rendered output — the append-only deltas must
+        // reassemble into exactly what a plain full render would produce
+        // (byte for byte, so no raw fences, missing lines, or duplicates).
+        let _lock = crate::util::test_support::env_guard();
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        let skin = crate::ui::skin::SOLARIS;
+        // Note the LEADING "\n\n": thinking-model gateways emit reasoning
+        // tokens first, and the assistant content then starts with blank
+        // lines.  That exact shape used to freeze the whole stream.
+        let doc = "\n\n\
+                    Opening paragraph with **bold** and `inline code`.\n\n\
+                    A table, then code:\n\n\
+                    | name | score |\n\
+                    | --- | --- |\n\
+                    | alice | 10 |\n\
+                    | bob | 7 |\n\n\
+                    First section has a code block:\n\
+                    ```rust\n\
+                    let mut v = vec![1, 2, 3];\n\
+                    v.push(4);\n\
+                    ```\n\
+                    \n\
+                    ### Heading after the block\n\
+                    \n\
+                     - bullet one\n\
+                     - bullet two with `code` inside\n\
+                     \n\
+                     A nested list with styling in the children:\n\
+                     \n\
+                     * Parent item text here:\n\
+                     \x20\x20* **Abacus** and bead counting frames\n\
+                     \x20\x20* A nested item that is deliberately much longer than the parent line above it so the box and lines must stay stable while it arrives\n\
+                     \x20\x20* Mixed **bold** and *italic* in one item\n\
+                     \n\
+                     A second fence, longer lines:   \n\
+                    ```cpp\n\
+                    std::vector<int> v = {1, 2, 3};\n\
+                    v.push_back(4);\n\
+                    ```\n\
+                    \n\
+                    Trailing line without newline";
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        // Character chunks of 7: splits mid-word, mid-fence, mid-escape —
+        // the nastiest realistic fragment boundaries, and many re-renders.
+        let chunks: Vec<String> = doc
+            .chars()
+            .collect::<Vec<char>>()
+            .chunks(7)
+            .map(|c| c.iter().collect())
+            .collect();
+        for ch in &chunks {
+            print_agent_event_to(
+                AgentEvent::ContentFragment(ch.as_str()),
+                &skin,
+                false,
+                &mut stream,
+                &mut out,
+            );
+        }
+        let _ = finalize_stream(&mut stream, &skin, false, &mut out);
+        let s = String::from_utf8(out).unwrap();
+
+        assert!(!s.contains("```"), "raw fences must never reach the terminal: {s:?}");
+        let expected = crate::ui::markdown::render_terminal_colored(doc, &skin, true);
+        assert_eq!(s, expected, "streamed deltas must reassemble into the full render");
+
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+    }
+
+    #[test]
+    fn streamed_wide_table_fits_the_terminal_width() {
+        // A table whose natural width exceeds the terminal must stream as
+        // wrapped rows that fit the width (no soft-wrap at the edge), keep
+        // every byte of content, and reassemble into the full render.
+        let _lock = crate::util::test_support::env_guard();
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        std::env::set_var("COLUMNS", "60");
+        let skin = crate::ui::skin::SOLARIS;
+        let doc = format!(
+            "| name | score |\n| --- | --- |\n| {} | 10 |\n",
+            "a".repeat(120)
+        );
+        let mut stream = StreamState::default();
+        let mut out = Vec::new();
+        for frag in doc.as_bytes().chunks(13) {
+            let frag = std::str::from_utf8(frag).unwrap();
+            print_agent_event_to(
+                AgentEvent::ContentFragment(frag),
+                &skin,
+                false,
+                &mut stream,
+                &mut out,
+            );
+        }
+        let _ = finalize_stream(&mut stream, &skin, false, &mut out);
+        let s = String::from_utf8(out).unwrap();
+
+        // No table row may exceed the terminal width the stream pinned.
+        let width = crate::ui::markdown::terminal_width().unwrap();
+        use unicode_width::UnicodeWidthStr;
+        let wide_rows: Vec<String> = s.lines().map(strip_ansi).filter(|l| l.contains('│')).collect();
+        assert!(!wide_rows.is_empty(), "expected a rendered table: {s:?}");
+        assert!(
+            wide_rows.iter().all(|l| l.width() <= width),
+            "every table row must fit the terminal: {s:?} width={width}"
+        );
+        // No content is lost to the wrap.
+        let plain: String = s.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
+        assert!(
+            plain.matches('a').count() >= 120,
+            "table content lost in the wrap: {plain:?}"
+        );
+        assert_eq!(
+            s,
+            crate::ui::markdown::render_terminal_colored(&doc, &skin, true),
+            "streamed deltas must reassemble into the full render"
+        );
+
+        std::env::remove_var("NO_COLOR");
+        std::env::remove_var("CLICOLOR");
+    }
+}

@@ -81,7 +81,7 @@ pub fn render_terminal_colored(md: &str, skin: &Skin, color: bool) -> String {
 /// The renderer proper, with the render width resolved by the caller.
 /// One-shot callers pass [`terminal_width()`] (fresh on each call); the
 /// streaming renderer passes the width pinned at stream start (see
-/// [`crate::ui::chat::StreamState::width`]) so a mid-stream terminal resize
+/// [`crate::ui::stream::StreamState::width`]) so a mid-stream terminal resize
 /// cannot change an already-committed table's bytes and break the
 /// prefix-stable invariant the delta emitter relies on.
 pub fn render_terminal_width(md: &str, skin: &Skin, color: bool, width: Option<usize>) -> String {

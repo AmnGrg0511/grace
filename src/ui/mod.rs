@@ -2,6 +2,9 @@
 //!
 //! ```text
 //! chat.rs         the interactive REPL and its slash commands
+//! spinner.rs      the `{frame} thinking` background ticker
+//! stream.rs       the append-only streaming markdown commit/render engine
+//! status.rs       the startup banner wordmark + per-turn status line
 //! cli.rs          --help text and shell completions
 //! commands.rs     the single slash-command registry (completer/palette/dispatch)
 //! line_reader.rs  line editing / history
@@ -21,8 +24,12 @@ pub mod commands;
 pub mod completer;
 pub mod line_reader;
 pub mod markdown;
+pub mod model;
 pub mod picker;
 pub mod skin;
+pub mod status;
+pub mod spinner;
+pub mod stream;
 pub mod wizard;
 
 pub use markdown::render_terminal;

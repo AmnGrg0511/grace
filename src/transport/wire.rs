@@ -5,6 +5,7 @@
 //! once instead of being duplicated per provider.
 
 use super::r#trait::{FinishReason, ModelResponse, TokenUsage, ToolSpec};
+use crate::message::Message;
 use crate::util::Result;
 use serde::Serialize;
 use serde_json::Value;
@@ -64,6 +65,36 @@ pub fn tools_to_json(tools: &[ToolSpec]) -> Value {
         })
         .collect();
     serde_json::to_value(items).unwrap_or(Value::Array(vec![]))
+}
+
+/// Build the shared OpenAI `/chat/completions` request body for a non-streaming
+/// call. `temperature` is pinned to 0 for determinism; `tools` (with
+/// `tool_choice: "auto"`) are included only when non-empty, and the reasoning
+/// effort only when `Some` — matching what both providers send, so a future
+/// fix to one cannot silently drift from the other.
+pub fn chat_request_body(
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolSpec],
+    reasoning: Option<&str>,
+) -> Value {
+    let msg_json: Vec<Value> = messages
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+        .collect();
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": msg_json,
+        "temperature": 0.0,
+    });
+    if !tools.is_empty() {
+        body["tools"] = tools_to_json(tools);
+        body["tool_choice"] = Value::String("auto".to_string());
+    }
+    if let Some(effort) = reasoning {
+        body["reasoning_effort"] = serde_json::json!(effort);
+    }
+    body
 }
 
 /// Parse an OpenAI-style `choices[0].message` JSON into a [`ModelResponse`].

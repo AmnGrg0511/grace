@@ -332,22 +332,12 @@ impl ProviderTransport for CopilotTransport {
         } else {
             model_owned.as_str()
         };
-        let msg_json: Vec<Value> = messages
-            .iter()
-            .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
-            .collect();
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": msg_json,
-            "temperature": 0.0,
-        });
-        if let Some(effort) = self.reasoning_effort.borrow().as_deref() {
-            body["reasoning_effort"] = serde_json::json!(effort);
-        }
-        if !tools.is_empty() {
-            body["tools"] = crate::transport::tools_to_json(tools);
-            body["tool_choice"] = Value::String("auto".to_string());
-        }
+        let body = crate::transport::wire::chat_request_body(
+            model,
+            messages,
+            tools,
+            self.reasoning_effort.borrow().as_deref(),
+        );
 
         // One retry after a fresh token exchange if the first attempt gets
         // 401/404 — covers the case where the cached token expired early

@@ -76,7 +76,7 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
                 Pick::new(p.label, p.label).hint("type the base URL next")
             } else {
                 Pick::new(p.label, p.label)
-                    .hint(format!("{}{}", accent(&short_url_of(p.base_url)), reset()))
+                    .hint(format!("{}{}", accent(&crate::ui::model::short_url(p.base_url)), reset()))
                     .verbatim_sub()
             }
         })
@@ -155,7 +155,7 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
         .join("history.txt");
     let mut reader = crate::ui::line_reader::LineReader::new(history_path, skin);
     let Some((model, ctx_window)) =
-        crate::ui::chat::pick_model_for_endpoint(live_models, &known, &mut reader, &skin, None)
+        crate::ui::model::pick_model_for_endpoint(live_models, &known, &mut reader, &skin, None)
     else {
         return Err("no model selected".into());
     };
@@ -181,17 +181,6 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");
 
     Ok((model, base_url, api_key))
-}
-
-/// Host of a URL for picker display — the wizard's rows show where requests
-/// will actually go, without the scheme/path noise.
-fn short_url_of(url: &str) -> String {
-    url.trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or(url)
-        .to_string()
 }
 
 /// Interactive skin picker with color previews, shared with `/skin`
@@ -236,13 +225,6 @@ pub fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn short_url_keeps_only_the_host() {
-        assert_eq!(short_url_of("https://api.openai.com/v1"), "api.openai.com");
-        assert_eq!(short_url_of("http://localhost:11434/v1"), "localhost:11434");
-        assert_eq!(short_url_of("weird"), "weird");
-    }
 
     #[test]
     fn every_provider_preset_is_selectable_and_labelled() {

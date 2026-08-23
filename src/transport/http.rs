@@ -9,9 +9,9 @@ use crate::message::Message;
 use crate::transport::r#trait::{
     FinishReason, ModelInfo, ModelResponse, ProviderTransport, ToolSpec,
 };
-use crate::transport::wire::{parse_openai_message, parse_usage, tools_to_json};
+use crate::transport::wire::{chat_request_body, parse_openai_message, parse_usage};
 use crate::util::{truncate_utf8, AgentError, Result};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::atomic::AtomicBool;
 
 /// Best-effort API fetch to discover a model's context window. Covers
@@ -229,23 +229,8 @@ impl ProviderTransport for HttpTransport {
             model_owned.as_str()
         };
 
-        let msg_json: Vec<Value> = messages
-            .iter()
-            .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
-            .collect();
-
-        let mut body = json!({
-            "model": model,
-            "messages": msg_json,
-            "temperature": 0.0,
-        });
-        if !tools.is_empty() {
-            body["tools"] = tools_to_json(tools);
-            body["tool_choice"] = Value::String("auto".to_string());
-        }
-        if let Some(effort) = self.reasoning_effort.borrow().as_deref() {
-            body["reasoning_effort"] = json!(effort);
-        }
+        let body =
+            chat_request_body(model, messages, tools, self.reasoning_effort.borrow().as_deref());
 
         let parsed = self.send_with_retry(&body)?;
 

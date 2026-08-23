@@ -76,7 +76,7 @@ fn run_sequence(cols: &str, lines: &str, out_name: &str) {
     for f in &frags {
         buf.push_str(f);
         let rendered = grace::ui::markdown::render_terminal_colored(&buf, &skin, true);
-        let rows = grace::ui::chat::test_support_visual_rows(&rendered, cols.parse().ok());
+        let rows = grace::ui::stream::test_support_visual_rows(&rendered, cols.parse().ok());
         writeln!(out, "__RENDER__{rows}").unwrap();
         write!(out, "{}", rendered.replace('\x1b', "<ESC>")).unwrap();
     }
@@ -100,11 +100,11 @@ fn emit_stream(lines: &str, cols: &str, out_name: &str) {
     std::env::set_var("LINES", lines);
 
     let skin = grace::ui::skin::SOLARIS;
-    let mut stream = grace::ui::chat::StreamState::default();
+    let mut stream = grace::ui::stream::StreamState::default();
     let mut out = Vec::new();
     for f in &frags {
         let mut one = Vec::new();
-        grace::ui::chat::print_agent_event_to(
+        grace::ui::stream::print_agent_event_to(
             grace::core::lifecycle::AgentEvent::ContentFragment(f),
             &skin,
             false,
@@ -115,7 +115,7 @@ fn emit_stream(lines: &str, cols: &str, out_name: &str) {
     }
     // End-of-turn flush of the in-progress tail.
     let mut fin = Vec::new();
-    grace::ui::chat::finalize_stream(&mut stream, &skin, false, &mut fin).unwrap();
+    grace::ui::stream::finalize_stream(&mut stream, &skin, false, &mut fin).unwrap();
     out.extend_from_slice(&fin);
     std::fs::write(temp_out(out_name), &out).unwrap();
 

@@ -624,9 +624,9 @@ fn run_one_shot(
     }
     // One-shot turns run tools too — same kill-the-command contract.
     crate::tools::builtins::terminal::set_turn_interrupt(interrupted.clone());
-    let mut stream_state = crate::ui::chat::StreamState::default();
+    let mut stream_state = crate::ui::stream::StreamState::default();
     // Same thinking spinner as chat mode (TTY only, no-op when piped).
-    let mut spinner = crate::ui::chat::Spinner::start(skin);
+    let mut spinner = crate::ui::spinner::Spinner::start(skin);
 
     // `--stream` is no longer a separate code path that skips the tool loop.
     // It is a flag on the same loop, so a streamed run can still call tools —
@@ -640,12 +640,12 @@ fn run_one_shot(
             if !tool_end {
                 spinner.pause();
             }
-            let at_start = crate::ui::chat::event_ends_at_line_start(
+            let at_start = crate::ui::spinner::event_ends_at_line_start(
                 &event,
                 crate::ui::skin::no_color(),
             );
             let guard = spinner.begin_write();
-            crate::ui::chat::print_agent_event(event, skin, args.verbose, &mut stream_state);
+            crate::ui::stream::print_agent_event(event, skin, args.verbose, &mut stream_state);
             spinner.end_write(guard, at_start);
             if tool_end {
                 spinner.resume();
@@ -692,7 +692,7 @@ fn run_one_shot(
     // trailing line that arrived without a newline would stay buffered. Flush
     // it here, before printing anything else for the turn.  (The closure that
     // held the mutable borrow on stream_state has gone out of scope.)
-    crate::ui::chat::flush_stream_to_stdout(&mut stream_state, skin);
+    crate::ui::stream::flush_stream_to_stdout(&mut stream_state, skin);
 
     if let Some(sid) = session_id {
         let _ = sessions.append(sid, &Message::assistant(outcome.answer.clone()));
