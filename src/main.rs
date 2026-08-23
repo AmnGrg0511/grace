@@ -7,15 +7,17 @@
 //! Usage:
 //! ```text
 //! # Interactive chat (persists across turns and restarts):
-//! grace --chat --session work
+//! grace
+//! grace --session work
 //!
 //! # One-shot against any OpenAI-compatible endpoint:
 //! grace --base-url https://api.openai.com/v1 --api-key "$KEY" \
 //!       --model gpt-4o-mini --prompt "list files"
 //!
-//! # OpenRouter:
+//! # OpenRouter (same flags, different base URL):
 //! export OPENROUTER_API_KEY=sk-or-...
-//! grace --openrouter --model tencent/hy3:free --prompt "list files"
+//! grace --base-url https://openrouter.ai/api/v1 \
+//!       --model tencent/hy3:free --prompt "list files"
 //!
 //! # Durable memory (injected into every later prompt):
 //! grace --remember "user prefers concise answers"

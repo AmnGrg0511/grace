@@ -390,7 +390,7 @@ pub fn load_custom_skins() -> Vec<CustomSkin> {
 }
 
 /// Names of every skin available right now: the 4 built-ins plus any custom
-/// skins found on disk. Used by the `--select-skin` picker and `--list-skins`.
+/// skins found on disk. Used by the `/skin` picker in chat.
 pub fn all_names() -> Vec<String> {
     let mut names: Vec<String> = ALL.iter().map(|s| s.name.to_string()).collect();
     names.extend(load_custom_skins().into_iter().map(|s| s.name));

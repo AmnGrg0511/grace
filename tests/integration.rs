@@ -148,7 +148,6 @@ fn a_terminal_flag_short_circuits_before_any_provider_is_needed() {
     // `--help` and friends must never require a configured model.
     for (argv, expected) in [
         (vec!["--help"], Action::Help),
-        (vec!["--list-skins"], Action::ListSkins),
         (vec!["--list-sessions"], Action::ListSessions),
     ] {
         let args = CliArgs::parse(argv);

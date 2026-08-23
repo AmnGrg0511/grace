@@ -2,7 +2,7 @@
 //!
 //! One file per live session under `~/.grace/locks/<id>.lock`, holding the
 //! owning PID plus the lock's creation time (Unix seconds). This is what
-//! lets a bare `grace --chat` resume the most recently active session that
+//! lets a bare `grace` resume the most recently active session that
 //! is *not* already open in another terminal, instead of two terminals
 //! silently interleaving turns into the same history.
 //!
@@ -247,7 +247,7 @@ fn process_holds_lock(pid: u32, lock_secs: Option<u64>) -> bool {
     true
 }
 
-/// Pick the default session for a bare `grace --chat` (no `--session` given):
+/// Pick the default session for a bare `grace` (no `--session` given):
 /// the most recently active session that isn't already locked by a live
 /// process in another terminal. Returns `None` if every existing session is
 /// currently in use (or there are no sessions yet) — the caller should mint

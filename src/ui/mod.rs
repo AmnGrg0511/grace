@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn the_cli_entry_points_are_reachable() {
         assert!(!cli::HELP_TEXT.is_empty());
-        let parsed = cli::CliArgs::parse(["--chat"]);
+        let parsed = cli::CliArgs::parse([] as [&str; 0]);
         assert!(parsed.wants_chat());
     }
 }

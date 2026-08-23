@@ -336,10 +336,8 @@ impl ProviderTransport for HttpTransport {
         true
     }
 
-    /// Real incremental streaming over SSE. Chat mode uses this so tokens
-    /// appear as the model produces them; the one-shot `--stream` path uses
-    /// the same code, so streaming behaviour can no longer differ between the
-    /// two modes (it previously only existed for one-shot).
+    /// Real incremental streaming over SSE — chat mode uses this so tokens
+    /// appear as the model produces them.
     fn complete_streaming(
         &self,
         messages: &[Message],

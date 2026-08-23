@@ -245,7 +245,8 @@ pub fn run_turn_with_options(
                         Err(e) => {
                             // `AgentError::Tool`'s Display already carries the
                             // "tool error:" prefix — unwrap it, or the model
-                            // and `--verbose` would read "tool error: tool
+                            // and the user (`/verbose`) would read
+                            // "tool error: tool
                             // error: …".
                             match e {
                                 AgentError::Tool(msg) => format!("tool error: {msg}"),

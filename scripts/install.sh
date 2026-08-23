@@ -151,7 +151,7 @@ main() {
     setup_shell
 
     success "Grace ${version} installed!"
-    info "Run 'grace --chat' to start, or 'grace --help' for options."
+    info "Run 'grace' to start, or 'grace --help' for options."
     info "You may need to restart your shell or run: source ~/.bashrc"
 }
 

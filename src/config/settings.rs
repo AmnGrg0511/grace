@@ -231,15 +231,12 @@ impl Settings {
 
     /// Fill `None` values in the given CLI-provided `Option`s with settings
     /// values. Each field is only used if the CLI slot is currently `None`,
-    /// so CLI flags always win.
-    #[allow(clippy::too_many_arguments)]
+    /// so CLI flags always win. The path knobs (`memory_path`, `skills_dir`,
+    /// `tools_dir`) have no CLI flags — this file is their only override.
     pub fn merge_into_args(
         &self,
         base_url: &mut Option<String>,
         model: &mut Option<String>,
-        memory_path: &mut Option<String>,
-        skills_dir: &mut Option<String>,
-        tools_dir: &mut Option<String>,
         max_iterations: &mut Option<u32>,
     ) {
         if base_url.is_none() {
@@ -247,15 +244,6 @@ impl Settings {
         }
         if model.is_none() {
             *model = self.default_model.clone();
-        }
-        if memory_path.is_none() {
-            *memory_path = self.memory_path.clone();
-        }
-        if skills_dir.is_none() {
-            *skills_dir = self.skills_dir.clone();
-        }
-        if tools_dir.is_none() {
-            *tools_dir = self.tools_dir.clone();
         }
         if max_iterations.is_none() {
             *max_iterations = self.max_iterations;
@@ -330,19 +318,9 @@ request_timeout_secs = 30
         };
         let mut base_url = None;
         let mut model = Some("from-cli".to_string());
-        let mut memory_path = None;
-        let mut skills_dir = None;
-        let mut tools_dir = None;
         let mut max_iterations = None;
 
-        settings.merge_into_args(
-            &mut base_url,
-            &mut model,
-            &mut memory_path,
-            &mut skills_dir,
-            &mut tools_dir,
-            &mut max_iterations,
-        );
+        settings.merge_into_args(&mut base_url, &mut model, &mut max_iterations);
 
         // CLI value wins.
         assert_eq!(model.as_deref(), Some("from-cli"));

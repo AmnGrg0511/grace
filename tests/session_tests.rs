@@ -35,7 +35,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
 
 #[test]
 fn history_survives_reopening_the_store() {
-    // The concrete fix for "--chat forgets everything on exit": a new
+    // The concrete fix for "chat forgets everything on exit": a new
     // SessionStore over the same file must see the prior turns.
     let path = scratch_db("persist");
     {

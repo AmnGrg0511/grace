@@ -208,16 +208,16 @@ goodbye = "Until next time, Sir."   # printed on /exit
 
 `hint`/`success`/`error` are painted over their `*_bg` tints, and each whole-line
 message carries a `*_icon` glyph, so a confirmation or error reads as a
-highlighted, labelled chip (e.g. ` ✓ renamed to "…" `). Select with `/skin`,
-`--skin`, or `skin = "midnight"` in `config.toml`; malformed TOML is skipped
+highlighted, labelled chip (e.g. ` ✓ renamed to "…" `). Select with `/skin` in
+chat, or `skin = "midnight"` in `config.toml`; malformed TOML is skipped
 silently.
 
 A *built-in* skin (shipped in every install) is a code change: add a
 `pub const NAME: Skin = Skin { … };` to `src/ui/skin.rs` and push it onto the
 `ALL` slice, then rebuild.
 
-**Plugin tool** — `./tools/<name>/manifest.json` (or `--tools-dir`/
-`tools_dir`) is discovered at startup; no code, no rebuild:
+**Plugin tool** — `./tools/<name>/manifest.json` (or `tools_dir` in
+`config.toml`) is discovered at startup; no code, no rebuild:
 
 ```json
 {
@@ -230,7 +230,7 @@ A *built-in* skin (shipped in every install) is a code change: add a
 
 `command` runs with the JSON-serialized arguments as a single `argv[1]`; any
 executable that reads that JSON and prints its result to stdout works. Verify
-with `grace --chat` and a question that should trigger it.
+with `grace` (chat mode) and a question that should trigger it.
 
 ## Built-in tool in Rust (requires rebuild)
 
@@ -253,11 +253,11 @@ tool is not hot-loadable.
 ## Security (opt-in guardrails)
 
 ```bash
-GRACE_ALLOW_DIR="/home/u/projects" grace --chat                 # file access
-GRACE_TERMINAL_ALLOW="ls,cat,rg,cargo" grace --chat             # allow-list
-GRACE_TERMINAL_DENY="rm -rf,shutdown" grace --chat              # deny patterns
-GRACE_TERMINAL_ALLOW_DIR="/home/u/projects" grace --chat        # workdir
-GRACE_TERMINAL_TIMEOUT=60 grace --chat                          # fg kill (default 30s, 0=off)
+GRACE_ALLOW_DIR="/home/u/projects" grace                        # file access
+GRACE_TERMINAL_ALLOW="ls,cat,rg,cargo" grace                    # allow-list
+GRACE_TERMINAL_DENY="rm -rf,shutdown" grace                     # deny patterns
+GRACE_TERMINAL_ALLOW_DIR="/home/u/projects" grace               # workdir
+GRACE_TERMINAL_TIMEOUT=60 grace                                 # fg kill (default 30s, 0=off)
 ```
 
 Defaults are permissive for local use. Allow-lists are a first step, not a

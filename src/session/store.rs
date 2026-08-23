@@ -2,8 +2,8 @@
 //!
 //! Backed by the same rusqlite pattern as `memory`, plus an FTS5 virtual
 //! table so past turns are actually searchable (not just replayable). This is
-//! the concrete fix for "--chat forgets everything on exit": a session id
-//! groups messages; `--chat --session <id>` (or the default id) resumes.
+//! the concrete fix for "chat forgets everything on exit": a session id
+//! groups messages; `grace --session <id>` (or the default id) resumes.
 
 use crate::util::{AgentError, Result};
 use crate::message::{Message, Role};

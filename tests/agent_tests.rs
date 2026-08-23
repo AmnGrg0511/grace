@@ -209,8 +209,8 @@ fn a_failing_tool_is_reported_to_the_model_rather_than_aborting_the_turn() {
 fn a_tool_failure_reports_the_error_prefix_exactly_once() {
     // Regression (G3): the failure wrapper formatted "tool error: {e}" for
     // any `AgentError` — but the `Tool` variant's own Display already starts
-    // with "tool error: ", so the model (and `--verbose`) saw the prefix
-    // twice.
+    // with "tool error: ", so the model (and users on /verbose) saw the
+    // prefix twice.
     let transport = ScriptedTransport::new(vec![
         call_tool("c1", "definitely_not_a_tool", r#"{}"#),
         answer("fine"),

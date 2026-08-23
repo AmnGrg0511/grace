@@ -18,8 +18,8 @@ use crate::ui::skin::{no_color, Role, Skin};
 
 /// Whether a tool's result body should be printed: `edit` (diffs) always
 /// shows since seeing the diff is the point; every other tool
-/// (read/bash/etc.) is noise by default, gated behind
-/// `--verbose`/`/verbose`. Pulled out as its own function (not inlined in
+/// (read/bash/etc.) is noise by default, gated behind the `/verbose` toggle.
+/// Pulled out as its own function (not inlined in
 /// `print_agent_event`) so it's directly unit-testable without touching
 /// stdout at all.
 fn should_show_tool_output(tool_name: &str, verbose: bool) -> bool {
@@ -334,7 +334,7 @@ pub fn print_agent_event_to(
             // Tool output is noisy by default — `edit` is the one tool
             // whose result (a diff) is the point of looking at it, so it
             // always shows; everything else (read/bash/etc.)
-            // is hidden unless `--verbose`/`/verbose` is on. The one-line
+            // is hidden unless the `/verbose` toggle is on. The one-line
             // "call + timing" summary below still always prints, so you
             // always see *that* something ran, just not its full body.
             if should_show_tool_output(name, verbose) {
@@ -394,7 +394,7 @@ pub fn print_agent_event_to(
             summary,
         } => {
             let _ = finalize_stream(stream, skin, disable_color, out);
-            // Always surfaced, not gated behind --verbose: history silently
+            // Always surfaced, not gated behind /verbose: history silently
             // disappearing is exactly the kind of thing a user needs told.
             let summary_suffix = match summary {
                 Some(s) if !s.is_empty() => format!("\n  · summary: {s}"),

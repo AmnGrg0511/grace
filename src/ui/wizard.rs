@@ -1,5 +1,4 @@
-//! Interactive onboarding flows: first-run provider/model wizard and the
-//! standalone skin picker (`--select-skin`).
+//! Interactive onboarding flow: the first-run provider/model wizard.
 
 use crate::config::settings::PROVIDER_PRESETS;
 use crate::transport::ProviderTransport;
@@ -181,45 +180,6 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");
 
     Ok((model, base_url, api_key))
-}
-
-/// Interactive skin picker with color previews, shared with `/skin`
-/// mid-chat; persists the choice to `~/.grace/config.toml`. The
-/// already-active skin is shown but not selectable.
-pub fn run_skin_picker() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::ui::picker::{pick, Pick};
-
-    let names = crate::ui::skin::all_names();
-    if names.is_empty() {
-        println!("no skins available.");
-        return Ok(());
-    }
-    let settings = crate::config::settings::Settings::load();
-    let active_skin = crate::ui::skin::by_name(settings.skin.as_deref());
-    let items: Vec<Pick> = names
-        .iter()
-        .map(|n| {
-            let mut row = Pick::new(n.clone(), n.clone()).extra_lines(
-                crate::ui::chat::skin_preview_lines(&crate::ui::skin::by_name(Some(n))),
-            );
-            if settings.skin.as_deref() == Some(n.as_str()) {
-                row = row.disabled().hint("already active");
-            }
-            row
-        })
-        .collect();
-    let Some(picked) = pick(&items, &active_skin, "pick a skin") else {
-        return Ok(());
-    };
-
-    let mut settings = crate::config::settings::Settings::load();
-    settings.skin = Some(picked.clone());
-    if let Err(e) = settings.save() {
-        eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
-    } else {
-        println!("\nskin set to \"{picked}\" — saved to ~/.grace/config.toml.\n");
-    }
-    Ok(())
 }
 
 #[cfg(test)]

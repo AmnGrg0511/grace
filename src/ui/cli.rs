@@ -31,17 +31,10 @@ pub struct CliArgs {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
-    pub chat: bool,
     pub max_iterations: Option<u32>,
     pub system_prompt: Option<String>,
     pub remember: Option<String>,
     pub session_id: Option<String>,
-    pub skills_dir: Option<String>,
-    pub memory_path: Option<String>,
-    pub tools_dir: Option<String>,
-    pub stream: bool,
-    pub skin: Option<String>,
-    pub verbose: bool,
     /// A terminal action that short-circuits everything else.
     pub action: Option<Action>,
 }
@@ -53,8 +46,6 @@ pub enum Action {
     Version,
     ListSessions,
     SearchSessions(String),
-    ListSkins,
-    SelectSkin,
     Completions(String),
     /// An unrecognized flag. Carried rather than printed at parse time so
     /// parsing stays pure.
@@ -102,21 +93,6 @@ impl CliArgs {
                     out.model = trimmed(&args, i);
                     i += 2;
                 }
-                "--verbose" | "-v" => {
-                    out.verbose = true;
-                    i += 1;
-                }
-                "--openrouter" => {
-                    // Sugar for `--base-url https://openrouter.ai/api/v1`.
-                    // OpenRouter is just another HTTP provider; this flag only
-                    // saves typing, it creates no separate code path.
-                    out.base_url = Some(crate::config::OPENROUTER_BASE_URL.to_string());
-                    i += 1;
-                }
-                "--chat" => {
-                    out.chat = true;
-                    i += 1;
-                }
                 "--max-iterations" => {
                     out.max_iterations = args.get(i + 1).and_then(|s| s.trim().parse().ok());
                     i += 2;
@@ -133,26 +109,6 @@ impl CliArgs {
                     out.session_id = value(&args, i);
                     i += 2;
                 }
-                "--skills-dir" => {
-                    out.skills_dir = value(&args, i);
-                    i += 2;
-                }
-                "--skin" => {
-                    out.skin = value(&args, i);
-                    i += 2;
-                }
-                "--memory-path" => {
-                    out.memory_path = value(&args, i);
-                    i += 2;
-                }
-                "--tools-dir" => {
-                    out.tools_dir = value(&args, i);
-                    i += 2;
-                }
-                "--stream" => {
-                    out.stream = true;
-                    i += 1;
-                }
                 "--list-sessions" => {
                     out.action = Some(Action::ListSessions);
                     i += 1;
@@ -162,14 +118,6 @@ impl CliArgs {
                         value(&args, i).unwrap_or_default(),
                     ));
                     i += 2;
-                }
-                "--list-skins" => {
-                    out.action = Some(Action::ListSkins);
-                    i += 1;
-                }
-                "--select-skin" => {
-                    out.action = Some(Action::SelectSkin);
-                    i += 1;
                 }
                 "--completions" => {
                     out.action = Some(Action::Completions(value(&args, i).unwrap_or_default()));
@@ -197,7 +145,7 @@ impl CliArgs {
     /// A bare `grace` with nothing else means chat — matching the "just run
     /// it" expectation from other agent CLIs, rather than a hard error.
     pub fn wants_chat(&self) -> bool {
-        self.chat || (self.prompt.is_none() && self.remember.is_none())
+        self.prompt.is_none() && self.remember.is_none()
     }
 }
 
@@ -343,23 +291,15 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
     }
 
     // Layered settings: defaults -> ~/.grace/config.toml -> CLI flags.
+    // The CLI no longer carries path flags: ~/.grace/config.toml is the sole
+    // override for where things live.
     let settings = Settings::load();
-    let skin = crate::ui::skin::by_name(args.skin.as_deref().or(settings.skin.as_deref()));
+    let skin = crate::ui::skin::by_name(settings.skin.as_deref());
 
     let mut base_url = args.base_url.clone();
     let mut model = args.model.clone();
-    let mut memory_path = args.memory_path.clone();
-    let mut skills_dir = args.skills_dir.clone();
-    let mut tools_dir = args.tools_dir.clone();
     let mut settings_iterations: Option<u32> = None;
-    settings.merge_into_args(
-        &mut base_url,
-        &mut model,
-        &mut memory_path,
-        &mut skills_dir,
-        &mut tools_dir,
-        &mut settings_iterations,
-    );
+    settings.merge_into_args(&mut base_url, &mut model, &mut settings_iterations);
     // CLI wins over the config file, which wins over the built-in default.
     let max_iterations = args
         .max_iterations
@@ -368,7 +308,9 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
 
     // Memory is always opened — it is a cheap local file, not a network dep.
     let memory = Memory::open(
-        memory_path
+        settings
+            .memory_path
+            .clone()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(Memory::default_path),
     )?;
@@ -440,10 +382,13 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
     }
 
     // Seed the default skills into ~/.grace/skills on first run.
-    let skills_root = skills_dir
+    let skills_root = settings
+        .skills_dir
+        .clone()
         .unwrap_or_else(|| crate::skill::default_root().to_string_lossy().to_string());
     let _ = crate::skill::ensure_default_skills();
-    let tools_root = tools_dir.unwrap_or_else(|| "tools".to_string());
+    let tools_root =
+        settings.tools_dir.clone().unwrap_or_else(|| "tools".to_string());
     let skills = crate::skill::SkillStore::new(&skills_root);
 
     // One assembly point for the whole tool set — including `delegate`, whose
@@ -497,7 +442,6 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
             session_id.as_deref(),
             &skin,
             &config.context_compression,
-            args.verbose,
             &memory,
             &skills,
             args.system_prompt.as_deref(),
@@ -531,17 +475,6 @@ fn run_action(action: &Action) -> Result<ExitCode, BoxedError> {
             println!("grace {}", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)
         }
-        Action::ListSkins => {
-            println!("available skins:");
-            for name in crate::ui::skin::all_names() {
-                println!("  {name}");
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        Action::SelectSkin => {
-            crate::ui::wizard::run_skin_picker()?;
-            Ok(ExitCode::SUCCESS)
-        }
         Action::Completions(shell) => {
             print_completions(shell);
             Ok(ExitCode::SUCCESS)
@@ -550,7 +483,7 @@ fn run_action(action: &Action) -> Result<ExitCode, BoxedError> {
             let sessions = SessionStore::open(SessionStore::default_path())?;
             let ids = sessions.list_sessions()?;
             if ids.is_empty() {
-                println!("no sessions yet — use --session <id> --chat to start one.");
+                println!("no sessions yet — use --session <id> to start one.");
             } else {
                 println!("sessions (most recently active first):");
                 let titles = sessions.get_titles(&ids).unwrap_or_default();
@@ -624,9 +557,8 @@ fn run_one_shot(
     // Same thinking spinner as chat mode (TTY only, no-op when piped).
     let mut spinner = crate::ui::spinner::Spinner::start(skin);
 
-    // `--stream` is no longer a separate code path that skips the tool loop.
-    // It is a flag on the same loop, so a streamed run can still call tools —
-    // the old one-shot-only streaming silently dropped that ability.
+    // One-shot runs are not streamed: tool events still print live through
+    // the sink, and the answer is rendered once at the end.
     let turn = {
         let mut sink = |event: crate::core::AgentEvent<'_>| {
             let tool_end = matches!(
@@ -641,7 +573,7 @@ fn run_one_shot(
                 crate::ui::skin::no_color(),
             );
             let guard = spinner.begin_write();
-            crate::ui::stream::print_agent_event(event, skin, args.verbose, &mut stream_state);
+            crate::ui::stream::print_agent_event(event, skin, false, &mut stream_state);
             spinner.end_write(guard, at_start);
             if tool_end {
                 spinner.resume();
@@ -650,8 +582,7 @@ fn run_one_shot(
         let options = crate::core::TurnOptions::new()
             .with_events(&mut sink)
             .with_interrupt(&interrupted)
-            .with_compression(&config.context_compression)
-            .streaming(args.stream);
+            .with_compression(&config.context_compression);
         crate::core::run_turn_with_options(
             transport,
             tools,
@@ -706,7 +637,7 @@ fn run_one_shot(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Pick the session for a bare `grace --chat`: the most recently active one
+/// Pick the session for a bare `grace`: the most recently active one
 /// not already open in another terminal, else a fresh short id.
 ///
 /// The message when everything is locked is deliberate — silently minting a
@@ -731,41 +662,35 @@ pub fn pick_or_create_default_session(sessions: &SessionStore) -> String {
 pub const HELP_TEXT: &str = r#"grace — minimal vendor-neutral ReAct agent
 
 Usage:
-  grace --chat --session work
+  grace                        Interactive REPL (bare grace means chat)
+  grace --session work         Chat in a named, resumable session
+  grace --prompt "..."         One-shot: run a turn, print the answer, exit
   grace --base-url https://api.openai.com/v1 --api-key KEY --model M --prompt "..."
-  grace --openrouter --model tencent/hy3:free --prompt "..."   (key from --api-key or $OPENROUTER_API_KEY; free-only keys need a :free model)
   grace --remember "user prefers concise answers"
 
 Flags:
   --prompt <text>        The user instruction (one-shot mode)
-  --chat                 Interactive REPL (state persists across turns)
   --session <id>         Persist/resume chat history across process restarts (SQLite)
   --list-sessions        List saved session ids, most recently active first, and exit
   --search-sessions <q>  Full-text search past session turns (SQLite FTS5) and exit
-  --skin <name>          Use a named skin for this run (solaris/royal/ocean/sakura, or a custom one)
-  --list-skins           List every available skin name and exit
-  --select-skin          Interactive skin picker with color previews; saves the choice to ~/.grace/config.toml
   --remember <fact>      Store a durable fact (SQLite memory) and exit
-  --memory-path <path>   Override memory DB path (default ~/.grace/memory.db)
-  --skills-dir <path>    Directory of skills/<name>/SKILL.md (default ~/.grace/skills)
-  --openrouter           Use OpenRouter (HTTPS via reqwest/rustls)
   --base-url <url>       OpenAI-compatible endpoint (http:// or https://) — GitHub Copilot's
-                         is https://api.githubcopilot.com; the picker (no --model given) will
-                         mint its key via OAuth device flow instead of asking you to paste one
-  --api-key <key>        Bearer token (default empty; for OpenRouter uses $OPENROUTER_API_KEY)
-  --model <name>         Model id (required for http/openrouter mode)
+                          is https://api.githubcopilot.com; the picker (no --model given) will
+                          mint its key via OAuth device flow instead of asking you to paste one
+                          (OpenRouter: https://openrouter.ai/api/v1, key from --api-key
+                          or $OPENROUTER_API_KEY)
+  --api-key <key>        Bearer token (default: the env var matching the base URL's host)
+  --model <name>         Model id (required for http mode)
   --max-iterations <n>   Tool-call round cap (default 256)
   --system <text>        Optional system prompt
-   --tools-dir <path>     Directory of tools/<name>/manifest.json plugins (default ./tools)
-   --stream               Stream tokens as they arrive (chat and one-shot; tool calls still work)
-   --verbose, -v          Show full tool output (patch diffs always show)
-   --completions <shell>  Print shell completions (bash, zsh, fish) and exit
-   -h, --help             Show this help
-   --version, -V          Show version number and exit
+  --completions <shell>  Print shell completions (bash, zsh, fish) and exit
+  -h, --help             Show this help
+  --version, -V          Show version number and exit
 
 Config file (optional, CLI flags always win):
-  ~/.grace/config.toml   default_model, default_base_url, memory_path, skills_dir,
-                         tools_dir, max_iterations, request_timeout_secs"#;
+  ~/.grace/config.toml   default_model, default_base_url, skin, memory_path, skills_dir,
+                          tools_dir (default ~/.grace/tools), max_iterations,
+                          request_timeout_secs"#;
 
 pub fn print_help() {
     println!("{HELP_TEXT}");
@@ -788,22 +713,12 @@ const FLAGS: &[&str] = &[
     "--base-url",
     "--api-key",
     "--model",
-    "--openrouter",
-    "--chat",
     "--max-iterations",
     "--system",
     "--remember",
     "--session",
     "--list-sessions",
     "--search-sessions",
-    "--skills-dir",
-    "--skin",
-    "--list-skins",
-    "--select-skin",
-    "--memory-path",
-    "--tools-dir",
-    "--stream",
-    "--verbose",
     "--completions",
     "--help",
     "-h",
@@ -825,7 +740,6 @@ _grace() {{
     fi
 
     case "${{COMP_WORDS[COMP_CWORD-1]}}" in
-        --skin) COMPREPLY=($(compgen -W "solaris royal ocean sakura" -- "$cur")) ;;
         --completions) COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur")) ;;
         --model) ;;
         --session) ;;
@@ -852,7 +766,6 @@ _grace() {{
     fi
 
     case ${{words[CURRENT-1]}} in
-        --skin) _values 'skin' 'solaris' 'royal' 'ocean' 'sakura' ;;
         --completions) _values 'shell' 'bash' 'zsh' 'fish' ;;
     esac
 }}
@@ -875,7 +788,6 @@ fn fish_completions() -> String {
             f.trim_start_matches('-')
         ));
     }
-    out.push_str("complete -c grace -l skin -d 'skin name' -a 'solaris royal ocean sakura'\n");
     out.push_str("complete -c grace -l completions -d 'shell' -a 'bash zsh fish'\n");
     out
 }
@@ -908,20 +820,6 @@ mod tests {
         let a = parse(&["--remember", "a fact"]);
         assert_eq!(a.remember.as_deref(), Some("a fact"));
         assert!(!a.wants_chat());
-    }
-
-    #[test]
-    fn explicit_chat_with_a_prompt_still_means_chat() {
-        assert!(parse(&["--chat", "--prompt", "x"]).wants_chat());
-    }
-
-    #[test]
-    fn openrouter_is_sugar_for_its_base_url() {
-        let a = parse(&["--openrouter"]);
-        assert_eq!(
-            a.base_url.as_deref(),
-            Some(crate::config::OPENROUTER_BASE_URL)
-        );
     }
 
     #[test]
@@ -1052,18 +950,9 @@ mod tests {
     }
 
     #[test]
-    fn boolean_flags_parse() {
-        let a = parse(&["--chat", "--stream", "--verbose"]);
-        assert!(a.chat && a.stream && a.verbose);
-        assert!(parse(&["-v"]).verbose);
-    }
-
-    #[test]
     fn terminal_actions_are_recognized() {
         assert_eq!(parse(&["--help"]).action, Some(Action::Help));
         assert_eq!(parse(&["-h"]).action, Some(Action::Help));
-        assert_eq!(parse(&["--list-skins"]).action, Some(Action::ListSkins));
-        assert_eq!(parse(&["--select-skin"]).action, Some(Action::SelectSkin));
         assert_eq!(
             parse(&["--list-sessions"]).action,
             Some(Action::ListSessions)
@@ -1102,26 +991,9 @@ mod tests {
     }
 
     #[test]
-    fn all_paths_and_dirs_parse() {
-        let a = parse(&[
-            "--session",
-            "work",
-            "--skills-dir",
-            "/s",
-            "--memory-path",
-            "/m.db",
-            "--tools-dir",
-            "/t",
-            "--skin",
-            "ocean",
-            "--system",
-            "be terse",
-        ]);
+    fn session_and_system_parse() {
+        let a = parse(&["--session", "work", "--system", "be terse"]);
         assert_eq!(a.session_id.as_deref(), Some("work"));
-        assert_eq!(a.skills_dir.as_deref(), Some("/s"));
-        assert_eq!(a.memory_path.as_deref(), Some("/m.db"));
-        assert_eq!(a.tools_dir.as_deref(), Some("/t"));
-        assert_eq!(a.skin.as_deref(), Some("ocean"));
         assert_eq!(a.system_prompt.as_deref(), Some("be terse"));
     }
 

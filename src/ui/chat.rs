@@ -54,7 +54,6 @@ pub fn run_chat(
     session_id: Option<&str>,
     skin: &Skin,
     compression_config: &ContextCompressionConfig,
-    verbose: bool,
     memory: &crate::memory::Memory,
     skills: &crate::skill::SkillStore,
     system_override: Option<&str>,
@@ -70,8 +69,8 @@ pub fn run_chat(
     // rather than holding the original --session lock for the whole process.
     let mut session_lock: Option<crate::session::SessionLock> =
         current_session.as_deref().and_then(|s| crate::session::SessionLock::acquire(s).ok());
-    // `/verbose` toggles this mid-chat; starts from `--verbose`/`-v`.
-    let mut verbose = verbose;
+    // Hidden by default; the `/verbose` command toggles it mid-chat.
+    let mut verbose = false;
 
     // Ctrl-C mid-turn cancels the current turn (tool calls already run stay
     // recorded) and returns to the prompt, instead of killing the whole
@@ -153,7 +152,7 @@ pub fn run_chat(
         .join(match session_id {
             // Scope up-arrow history to the active session from the very
             // start, not just after a mid-chat `/session` switch — starting
-            // `grace --chat --session <id>` should already show that
+            // `grace --session <id>` should already show that
             // session's own past inputs, not the global stack's.
             Some(sid) => format!("history_{sid}.txt"),
             None => "history.txt".to_string(),
@@ -608,9 +607,6 @@ fn handle_info_command(view: InfoView<'_>, skin: &Skin) {
 
 
 
-/// `/skin` (interactive picker, same as `--select-skin`) or `/skin <name>`
-/// (direct switch) mid-chat. Session-only — use `--select-skin` to persist
-/// a default across runs.
 /// A compact color snapshot of `skin` for picker rows: prompt glyph, a
 /// tool-call line, and an answer with inline code — every role color at
 /// once, using real Grace shapes. Kept under ~70 columns so it never wraps.
@@ -639,6 +635,9 @@ pub(crate) fn skin_preview_lines(s: &Skin) -> Vec<String> {
     ]
 }
 
+/// `/skin` (interactive picker with color previews) or `/skin <name>`
+/// (direct switch) mid-chat. The choice is persisted to
+/// ~/.grace/config.toml so the next run starts on the same skin.
 fn handle_skin_command(arg: &str, skin: &mut Skin) {
     let names = crate::ui::skin::all_names();
     let picked = if arg.is_empty() {
@@ -964,7 +963,7 @@ pub fn run_one_chat_turn(
                 .with_compression(compression_config)
                 // Chat mode streams AND renders markdown: ContentFragment
                 // appends each finalized line as markdown (append-only, no
-                // re-rendering).  One-shot `--stream` does the same (cli.rs).
+                // re-rendering). One-shot runs never stream (see cli.rs).
                 .streaming(transport.supports_streaming()),
         )
     };

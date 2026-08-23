@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/ins
 curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/install.sh | bash
 
 # 2. First run: interactive provider setup (OpenRouter, OpenAI, Copilot, Ollama, ...)
-grace --chat
+grace
 
 # 3. Use it
 > "Read the codebase and add a health check endpoint"
@@ -41,7 +41,6 @@ grace --chat
 **One-shot mode:**
 ```bash
 grace --prompt "Add a health check to main.rs"
-grace --stream --prompt "Explain this codebase"   # tokens as they arrive
 ```
 
 ---
@@ -61,7 +60,7 @@ Your prompt
 
 - **Bounded iterations** (default 256, configurable) — the only guaranteed termination condition
 - **Ctrl-C interrupts mid-turn** — completed tool calls are kept, and it kills a running `bash` command (nothing is left stuck at its timeout)
-- **Streaming** in both chat and one-shot mode, with tool calls still working
+- **Streaming** in chat mode, with tool calls still working
 - **Typical task: 3–8 tool calls, 10–30 seconds**
 
 ---
@@ -215,16 +214,16 @@ is how a tool ends up missing everywhere except one code path.
 
 ```bash
 # File access: only within allowed dirs (resolves `..` before checking)
-GRACE_ALLOW_DIR="/home/user/projects" grace --chat
+GRACE_ALLOW_DIR="/home/user/projects" grace
 
 # Commands: allow-list only
-GRACE_TERMINAL_ALLOW="ls,cat,rg,cargo" grace --chat
+GRACE_TERMINAL_ALLOW="ls,cat,rg,cargo" grace
 
 # Or deny specific patterns
-GRACE_TERMINAL_DENY="rm -rf,shutdown" grace --chat
+GRACE_TERMINAL_DENY="rm -rf,shutdown" grace
 
 # Kill hung commands (default 30s; 0 disables)
-GRACE_TERMINAL_TIMEOUT=60 grace --chat
+GRACE_TERMINAL_TIMEOUT=60 grace
 ```
 
 Defaults are permissive for local use. Allow-lists are a first step, not a
