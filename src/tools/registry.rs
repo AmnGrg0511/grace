@@ -48,11 +48,6 @@ impl ToolRegistry {
         self.read_only = flag;
     }
 
-    /// The shared flag, for registries being built from the same options.
-    pub fn shared_read_only(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-        std::sync::Arc::clone(&self.read_only)
-    }
-
     /// Toggle the read-only posture for every registry sharing this flag.
     pub fn set_read_only(&self, on: bool) {
         self.read_only.store(on, std::sync::atomic::Ordering::SeqCst);

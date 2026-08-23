@@ -26,7 +26,7 @@ pub struct Settings {
     /// short startup probes (model lists, context windows) keep their own
     /// small caps so a slow endpoint can't delay boot.
     pub request_timeout_secs: Option<u64>,
-    /// Name of the color skin to use (see [`crate::skin`]). `None` (or an
+    /// Name of the color skin to use (see [`crate::ui::skin`]). `None` (or an
     /// unrecognized name) falls back to the default "solaris" skin.
     pub skin: Option<String>,
     /// Model endpoints previously selected via `/model`, persisted so the

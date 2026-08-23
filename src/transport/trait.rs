@@ -9,7 +9,6 @@
 
 use crate::message::{Message, ToolCall};
 use crate::util::Result;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::AtomicBool;
 
@@ -77,13 +76,11 @@ impl FinishReason {
 }
 
 /// Information about a model as reported by its provider.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
     pub context_window: Option<u32>,
-    pub max_output_tokens: Option<u32>,
-    pub provider: String,
 }
 
 /// A normalized LLM endpoint.

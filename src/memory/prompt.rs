@@ -6,7 +6,7 @@
 //! injection format can change without touching the schema, and the schema can
 //! gain columns without every caller re-learning the prompt shape.
 
-use super::store::{Fact, Memory};
+use super::store::Memory;
 use crate::util::Result;
 
 impl Memory {
@@ -22,44 +22,6 @@ impl Memory {
             s.push_str(&format!("- {}\n", f.content));
         }
         Ok(Some(s))
-    }
-
-    /// Extract `[[wikilink]]` targets referenced in `content` (one hop, no
-    /// vault dependency — just a marker inside a fact's own text).
-    pub fn extract_links(content: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut rest = content;
-        while let Some(start) = rest.find("[[") {
-            let after = &rest[start + 2..];
-            if let Some(end) = after.find("]]") {
-                out.push(after[..end].trim().to_string());
-                rest = &after[end + 2..];
-            } else {
-                break;
-            }
-        }
-        out
-    }
-
-    /// Resolve one hop of `[[wikilink]]`s inside `content` by keyword match
-    /// against other facts' content (case-insensitive substring). Used by
-    /// recall to pull in a linked fact without a vault or embeddings.
-    pub fn resolve_links(&self, content: &str) -> Result<Vec<Fact>> {
-        let links = Self::extract_links(content);
-        if links.is_empty() {
-            return Ok(Vec::new());
-        }
-        let all = self.all()?;
-        let mut out = Vec::new();
-        for link in &links {
-            let link_lower = link.to_lowercase();
-            for f in &all {
-                if f.content.to_lowercase().contains(&link_lower) && f.content != content {
-                    out.push(f.clone());
-                }
-            }
-        }
-        Ok(out)
     }
 
     /// Mirror all facts to a human-readable `~/.grace/memory.md` (best
@@ -124,50 +86,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn extract_links_finds_wikilink_targets() {
-        let links = Memory::extract_links("see [[acme]] and [[grace core]]");
-        assert_eq!(links, vec!["acme", "grace core"]);
-    }
-
-    #[test]
-    fn extract_links_ignores_an_unterminated_marker() {
-        // An unclosed `[[` must not loop forever or panic on the slice.
-        assert!(Memory::extract_links("dangling [[oops").is_empty());
-    }
-
-    #[test]
-    fn extract_links_returns_empty_for_plain_text() {
-        assert!(Memory::extract_links("no links here").is_empty());
-    }
-
-    #[test]
-    fn resolve_links_pulls_in_a_referenced_fact() {
-        let (dir, mem) = scratch("resolve");
-        mem.remember("acme is the build tool we work on").unwrap();
-        mem.remember("today we debug [[acme]]").unwrap();
-        let resolved = mem.resolve_links("today we debug [[acme]]").unwrap();
-        assert!(resolved.iter().any(|f| f.content.contains("build tool")));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn resolve_links_does_not_return_the_source_fact_itself() {
-        let (dir, mem) = scratch("selfref");
-        let text = "the [[topic]] topic note";
-        mem.remember(text).unwrap();
-        let resolved = mem.resolve_links(text).unwrap();
-        assert!(
-            resolved.iter().all(|f| f.content != text),
-            "a fact must not resolve to itself"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn resolve_links_on_unlinked_text_is_empty_without_a_query() {
-        let (dir, mem) = scratch("nolinks");
-        assert!(mem.resolve_links("plain text").unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

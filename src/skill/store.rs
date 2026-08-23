@@ -2,8 +2,9 @@
 //!
 //! A "skill" is just a directory `skills/<name>/SKILL.md`: a plain markdown
 //! file the model can load into context via the `load_skill` tool when a task
-//! matches. No frontmatter parser, no vault indexing yet — the smallest thing
-//! that gives the agent "I can look up a known procedure" behavior.
+//! matches. There's an optional `description:` frontmatter but no vault
+//! indexing — the smallest thing that gives the agent "I can look up a known
+//! procedure" behavior.
 
 use crate::util::{AgentError, Result};
 use std::path::{Path, PathBuf};
@@ -51,14 +52,10 @@ impl SkillStore {
         Self { root: root.into() }
     }
 
-    /// Default location: `./skills` relative to the current working directory.
-    pub fn default_root() -> PathBuf {
-        PathBuf::from("skills")
-    }
-
     /// List available skill names (directories under root containing a
     /// SKILL.md), sorted alphabetically.
-    pub fn list(&self) -> Vec<String> {
+    #[cfg(test)]
+    pub(crate) fn list(&self) -> Vec<String> {
         self.list_meta().into_iter().map(|m| m.name).collect()
     }
 

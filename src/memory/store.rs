@@ -4,8 +4,8 @@
 //! turn) but Grace backs with a real embedded database instead of re-reading
 //! a markdown file: a single SQLite file via `rusqlite` (bundled, no system
 //! libsqlite3 required). Facts are plain rows; there is no LLM-driven
-//! "consolidation" happening automatically — that is a deliberate choice
-//! (see `dream` module) so memory never mutates itself silently.
+//! "consolidation" happening automatically — that is a deliberate choice so
+//! memory never mutates itself silently.
 
 use crate::util::{AgentError, Result};
 use rusqlite::Connection;
@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 pub struct Fact {
     pub id: i64,
     pub content: String,
-    pub created_at: i64,
 }
 
 /// Owns the SQLite connection backing persistent memory.
@@ -73,14 +72,13 @@ impl Memory {
     pub fn all(&self) -> Result<Vec<Fact>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, content, created_at FROM facts ORDER BY id ASC")
+            .prepare("SELECT id, content FROM facts ORDER BY id ASC")
             .map_err(|e| AgentError::Tool(format!("prepare: {e}")))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(Fact {
                     id: row.get(0)?,
                     content: row.get(1)?,
-                    created_at: row.get(2)?,
                 })
             })
             .map_err(|e| AgentError::Tool(format!("query: {e}")))?;
@@ -89,15 +87,6 @@ impl Memory {
             out.push(r.map_err(|e| AgentError::Tool(format!("row: {e}")))?);
         }
         Ok(out)
-    }
-
-    /// Delete a fact by id. Returns true if a row was removed.
-    pub fn forget(&self, id: i64) -> Result<bool> {
-        let n = self
-            .conn
-            .execute("DELETE FROM facts WHERE id = ?1", [id])
-            .map_err(|e| AgentError::Tool(format!("delete fact: {e}")))?;
-        Ok(n > 0)
     }
 
     /// Default location for the read-only markdown mirror: `~/.grace/memory.md`.
@@ -136,10 +125,6 @@ mod tests {
 
         let block = mem.as_prompt_block().unwrap().unwrap();
         assert!(block.contains("user prefers concise answers"));
-
-        assert!(mem.forget(id).unwrap());
-        assert!(mem.all().unwrap().is_empty());
-        assert!(mem.as_prompt_block().unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -216,11 +216,6 @@ impl<'a> Delegation<'a> {
         self
     }
 
-    /// This delegator's nesting depth.
-    pub fn depth(&self) -> DelegationDepth {
-        self.depth
-    }
-
     /// Run `task` to completion against `tools`.
     ///
     /// Budget exhaustion is folded into a [`SubAgentReport`] with

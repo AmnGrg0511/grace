@@ -64,10 +64,6 @@ impl LineReader {
         }
     }
 
-    pub fn is_interactive_editor(&self) -> bool {
-        matches!(self, LineReader::Rustyline { .. })
-    }
-
     /// Re-point the live input-line highlighter at a new skin — called
     /// after `/skin` switches mid-chat so subsequently typed lines pick up
     /// the new color instead of staying on the skin active at startup.

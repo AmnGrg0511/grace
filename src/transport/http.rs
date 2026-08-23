@@ -146,7 +146,8 @@ impl HttpTransport {
 
     /// Preset: OpenRouter's OpenAI-compatible endpoint (HTTPS, real TLS via
     /// reqwest — no proxy needed anymore).
-    pub fn openrouter(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    #[cfg(test)]
+    fn openrouter(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::with_model("https://openrouter.ai/api/v1", api_key, model)
     }
 
@@ -431,16 +432,10 @@ fn parse_model_list(json: &Value) -> Vec<ModelInfo> {
                 .iter()
                 .find_map(|k| m.get(*k).and_then(Value::as_u64))
                 .and_then(|v| u32::try_from(v).ok());
-            let max_output_tokens = m
-                .get("max_output_tokens")
-                .and_then(Value::as_u64)
-                .and_then(|v| u32::try_from(v).ok());
             Some(ModelInfo {
                 id: id.to_string(),
                 name: name.to_string(),
                 context_window,
-                max_output_tokens,
-                provider: "openai-http".to_string(),
             })
         })
         .collect()

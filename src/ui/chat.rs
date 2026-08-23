@@ -165,7 +165,6 @@ pub fn run_chat(
     // below (`/model`, `/skin`, `/session`) takes `&mut reader` instead of
     // opening its own `std::io::stdin()`.
     let mut reader = LineReader::new(history_path, skin);
-    let is_rustyline = reader.is_interactive_editor();
     // Input queued by the command palette (a bare `/` line): consumed by the
     // next iteration as if it had been typed.
     let mut pending_input: Option<String> = None;
@@ -187,10 +186,6 @@ pub fn run_chat(
             // rustyline draws its own prompt glyph via readline(prompt); the
             // plain fallback prints it manually inside LineReader::read_line.
             let Some(line) = reader.read_line(&prompt_label(&skin)) else {
-                if !is_rustyline {
-                    // Plain fallback: blank line before exit for parity with
-                    // the old loop's trailing newline behavior on EOF.
-                }
                 break;
             };
             line
@@ -220,7 +215,7 @@ pub fn run_chat(
         // a mistyped `/model`. An unambiguous abbreviation (`/e`, `/m`) is
         // rewritten to the command it names; an ambiguous one (`/s`) opens a
         // picker between the candidates; no match falls through to the model.
-        let mut cmd_word = text.split_whitespace().next().unwrap_or(text).to_string();
+        let mut cmd_word = text.split_whitespace().next().unwrap().to_string();
         let rest = text[cmd_word.len()..].trim();
         if cmd_word.len() > 1 && cmd_word.starts_with('/') {
             let word = cmd_word[1..].to_string();

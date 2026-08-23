@@ -34,24 +34,6 @@ pub enum TransportConfig {
 }
 
 impl TransportConfig {
-    /// Re-derive the CLI flags that would reproduce this transport.
-    pub fn to_cli_args(&self) -> Vec<String> {
-        match self {
-            TransportConfig::Http {
-                base_url,
-                api_key,
-                model,
-            } => vec![
-                "--base-url".to_string(),
-                base_url.clone(),
-                "--api-key".to_string(),
-                api_key.clone(),
-                "--model".to_string(),
-                model.clone(),
-            ],
-        }
-    }
-
     /// The configured model id.
     pub fn model(&self) -> &str {
         match self {
@@ -116,12 +98,6 @@ impl RegistryOptions {
     #[must_use]
     pub fn with_compression(mut self, compression: ContextCompressionConfig) -> Self {
         self.compression = compression;
-        self
-    }
-
-    #[must_use]
-    pub fn with_read_only(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
-        self.read_only = flag;
         self
     }
 }
@@ -460,19 +436,6 @@ mod tests {
         match &c.transport {
             TransportConfig::Http { api_key, .. } => assert_eq!(api_key, ""),
         }
-    }
-
-    #[test]
-    fn to_cli_args_round_trips_the_transport() {
-        let t = TransportConfig::Http {
-            base_url: "https://x/v1".into(),
-            api_key: "k".into(),
-            model: "m".into(),
-        };
-        assert_eq!(
-            t.to_cli_args(),
-            vec!["--base-url", "https://x/v1", "--api-key", "k", "--model", "m"]
-        );
     }
 
     #[test]

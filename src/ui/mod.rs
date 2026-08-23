@@ -9,7 +9,7 @@
 //! commands.rs     the single slash-command registry (completer/palette/dispatch)
 //! line_reader.rs  line editing / history
 //! completer.rs    tab completion + hinting for the REPL
-//! picker.rs       the shared dropdown (palette, /model, /forget, /jump)
+//! picker.rs       the shared dropdown (palette, /model, /jump)
 //! skin.rs         color skins
 //! markdown.rs     pulldown-cmark + syntect terminal rendering
 //! wizard.rs       first-run onboarding

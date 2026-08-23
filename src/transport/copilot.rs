@@ -30,26 +30,16 @@ const TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/tok
 
 /// GitHub Copilot OAuth device flow response.
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct DeviceCodeResponse {
     device_code: String,
     user_code: String,
     verification_uri: String,
-    expires_in: u64,
-    interval: u64,
 }
 
 /// GitHub OAuth token response.
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct TokenResponse {
     access_token: Option<String>,
-    token_type: String,
-    expires_in: Option<u64>,
-    refresh_token: Option<String>,
-    scope: String,
-    error: Option<String>,
-    error_description: Option<String>,
 }
 
 /// Get a Copilot bearer token, running the OAuth device flow (browser +
@@ -137,14 +127,6 @@ fn poll_token(device_code: &str) -> Result<String> {
                 return Ok(token);
             }
         }
-        match token_resp.error.as_deref() {
-            Some("authorization_pending") | Some("slow_down") => continue,
-            Some("expired_token") => return Err(AgentError::Config("Device code expired".into())),
-            Some("access_denied") => {
-                return Err(AgentError::Config("User denied authorization".into()))
-            }
-            _ => {}
-        }
     }
     Err(AgentError::Config("Device flow timed out".into()))
 }
@@ -179,15 +161,10 @@ pub fn fetch_models(token: &str) -> Result<Vec<ModelInfo>> {
         let context_window = model["capabilities"]["context_window"]
             .as_u64()
             .map(|v| v as u32);
-        let max_output_tokens = model["capabilities"]["max_output_tokens"]
-            .as_u64()
-            .map(|v| v as u32);
         result.push(ModelInfo {
             id: id.to_string(),
             name: name.to_string(),
             context_window,
-            max_output_tokens,
-            provider: "github-copilot".to_string(),
         });
     }
     if result.is_empty() {

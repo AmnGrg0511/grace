@@ -111,7 +111,8 @@ pub struct CompressionOutcome {
 
 impl CompressionOutcome {
     /// Whether anything was actually removed.
-    pub fn changed(&self) -> bool {
+    #[cfg(test)]
+    fn changed(&self) -> bool {
         self.dropped_messages > 0
     }
 }
@@ -177,7 +178,8 @@ impl<C: TokenCounter> Compressor<C> {
     }
 
     /// The window this compressor is budgeting against.
-    pub fn context_window(&self) -> u32 {
+    #[cfg(test)]
+    fn context_window(&self) -> u32 {
         self.context_window
     }
 
@@ -201,7 +203,8 @@ impl<C: TokenCounter> Compressor<C> {
     /// Returns `None` when nothing was done (disabled, under the trigger, or
     /// nothing safely droppable), so a caller can distinguish "compressed" from
     /// "considered and declined".
-    pub fn compress_in_place(&self, messages: &mut Vec<Message>) -> Option<CompressionOutcome> {
+    #[cfg(test)]
+    fn compress_in_place(&self, messages: &mut Vec<Message>) -> Option<CompressionOutcome> {
         if !self.should_compress(messages) {
             return None;
         }

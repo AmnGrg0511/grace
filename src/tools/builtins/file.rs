@@ -86,7 +86,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file and return its contents with line count. For large files (>500 lines), falls back to grep search."
+        "Read a text file and return its lines with a line count. Defaults to the first 500 lines; a file longer than 500 lines (with no offset or limit given) returns the first and last 50 lines plus an omission count. Pass offset and/or limit to read a specific range."
     }
 
     fn parameters(&self) -> Value {

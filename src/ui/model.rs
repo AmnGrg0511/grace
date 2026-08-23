@@ -577,10 +577,8 @@ pub(crate) fn handle_provider_command(
     // only — no prompting here): an unknown model id would otherwise surface
     // as a confusing provider 404 mid-conversation.
     let key = std::env::var(&picked.key_env).ok().filter(|k| !k.is_empty());
-    let ids: Vec<String> = fetched_models(&picked.base_url, key.as_deref().unwrap_or(""))
-        .into_iter()
-        .map(|m| m.id)
-        .collect();
+    let fetched = fetched_models(&picked.base_url, key.as_deref().unwrap_or(""));
+    let ids: Vec<String> = fetched.iter().map(|m| m.id.clone()).collect();
     if !ids.is_empty() && !ids.contains(&model) {
         println!(
             "{}",
@@ -594,13 +592,12 @@ pub(crate) fn handle_provider_command(
             .filter(|c| c.name == picked.name)
             .map(|c| (c.model.clone(), c.context_window))
             .collect();
-        let fetched = fetched_models(&picked.base_url, std::env::var(&picked.key_env).ok().as_deref().unwrap_or(""));
         if let Some((m, ctx)) =
             pick_model_for_endpoint(fetched, &known, reader, skin, None)
         {
             transport.set_model(&m);
-            if ctx.is_some() {
-                *cached_context_window = ctx.or(*cached_context_window);
+            if let Some(ctx) = ctx {
+                *cached_context_window = Some(ctx);
             }
             println!("model switched to \"{m}\".");
         }

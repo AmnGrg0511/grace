@@ -6,8 +6,8 @@
 //! deliberate — memory that mutates itself silently is memory you cannot trust.
 //!
 //! ```text
-//! store.rs   the SQLite side: open, remember, all, forget, export
-//! prompt.rs  the model-facing side: as_prompt_block, wikilink resolution
+//! store.rs   the SQLite side: open, remember, all, export
+//! prompt.rs  the model-facing side: as_prompt_block, markdown export
 //! ```
 
 pub mod prompt;

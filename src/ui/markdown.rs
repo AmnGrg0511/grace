@@ -159,9 +159,7 @@ pub fn render_terminal_width(md: &str, skin: &Skin, color: bool, width: Option<u
                     // ▏ prefix will be added by the first Text/SoftBreak
                 }
                 Tag::List(ordered) => {
-                    if !list_stack.is_empty() {
-                        // Nested list — no blank line between items of the same list
-                    } else {
+                    if list_stack.is_empty() {
                         ensure_blank(&mut out, 1);
                     }
                     list_stack.push((ordered.is_some(), 0));

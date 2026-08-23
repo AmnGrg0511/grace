@@ -259,7 +259,6 @@ pub fn run_turn_with_options(
                         // kills its child and returns whatever it had). Treat
                         // the result as void: close out every open call so
                         // the next request isn't corrupted, then unwind.
-                        let _ = result;
                         for pending in &resp.tool_calls[i..] {
                             messages.push(Message::tool(
                                 pending.id.clone(),

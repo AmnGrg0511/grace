@@ -1,5 +1,5 @@
 //! One dropdown primitive for every "pick one of these" moment — slash-command
-//! palette, `/model`, `/forget`, `/jump`, … — so muscle memory and keyboard
+//! palette, `/model`, `/jump`, … — so muscle memory and keyboard
 //! behavior are identical everywhere.
 //!
 //! Keyboard: type to filter (case-insensitive substring over label or

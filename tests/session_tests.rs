@@ -244,40 +244,13 @@ fn releasing_a_lock_makes_the_session_pickable_again() {
 fn facts_survive_reopening_and_reach_the_prompt() {
     let dir = scratch_dir("memory");
     let db = dir.join("memory.db");
-    let id = {
+    {
         let mem = Memory::open(&db).unwrap();
-        mem.remember("user prefers concise answers").unwrap()
-    };
+        mem.remember("user prefers concise answers").unwrap();
+    }
     let mem = Memory::open(&db).unwrap();
     let block = mem.as_prompt_block().unwrap().unwrap();
     assert!(block.contains("user prefers concise answers"));
-
-    assert!(mem.forget(id).unwrap());
-    assert!(mem.as_prompt_block().unwrap().is_none());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn forgetting_an_unknown_fact_reports_false_rather_than_erroring() {
-    let dir = scratch_dir("forget");
-    let mem = Memory::open(dir.join("memory.db")).unwrap();
-    assert!(!mem.forget(9_999).unwrap());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn wikilinks_resolve_one_hop_between_facts() {
-    let dir = scratch_dir("links");
-    let mem = Memory::open(dir.join("memory.db")).unwrap();
-    mem.remember("acme is the build tool we use")
-        .unwrap();
-    mem.remember("today we debug [[acme]] sequential moves")
-        .unwrap();
-
-    let resolved = mem
-        .resolve_links("today we debug [[acme]] sequential moves")
-        .unwrap();
-    assert!(resolved.iter().any(|f| f.content.contains("build tool")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
