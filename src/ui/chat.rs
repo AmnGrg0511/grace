@@ -127,6 +127,26 @@ pub fn run_chat(
     }
 
     println!("{}", chat_banner(&skin));
+    // The transport/resume summary sits directly under the wordmark so it's
+    // visible at the very start of the session (one-shot prints it up top,
+    // where there's no banner for it to sit under).
+    let prior_turns = messages.len().saturating_sub(1); // exclude the system prompt
+    println!(
+        "[grace] transport={} model={} ctx={} tools={}",
+        transport.name(),
+        transport.current_model().unwrap_or_else(|| "?".into()),
+        transport
+            .context_window()
+            .map_or_else(|| "?".to_string(), |n| n.to_string()),
+        tools.len(),
+    );
+    if prior_turns > 0 {
+        let label = current_session
+            .as_deref()
+            .and_then(|sid| sessions.get_title(sid).ok().flatten())
+            .unwrap_or_else(|| current_session.as_deref().unwrap_or("?").to_string());
+        println!("[grace] resumed \"{label}\" ({prior_turns} prior turns)");
+    }
     // The persona greeting is skin-controlled (see `Skin::welcome`), so a
     // custom skin sets its own tone without a code change.
     println!("{}\n", skin.paint(Role::Accent, skin.welcome));

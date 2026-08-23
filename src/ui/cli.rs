@@ -464,19 +464,23 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
         )?)
     ];
 
-    println!(
-        "[grace] transport={} model={} ctx={} tools={}",
-        transport.name(),
-        config.model(),
-        transport
-            .context_window()
-            .map_or_else(|| "?".to_string(), |n| n.to_string()),
-        tools.len()
-    );
+    // In chat mode these run up top under the wordmark (see `run_chat`), so
+    // they only print here for one-shot runs, which have no banner.
+    if !chat {
+        println!(
+            "[grace] transport={} model={} ctx={} tools={}",
+            transport.name(),
+            config.model(),
+            transport
+                .context_window()
+                .map_or_else(|| "?".to_string(), |n| n.to_string()),
+            tools.len()
+        );
+    }
 
     if let Some(sid) = &session_id {
         let prior = sessions.load(sid)?;
-        if !prior.is_empty() {
+        if !prior.is_empty() && !chat {
             let label = sessions
                 .get_title(sid)
                 .ok()
