@@ -54,225 +54,309 @@ pub fn seed_into(root: &std::path::Path) -> bool {
 }
 
 const GRACE_AGENT: &str = r#"---
-description: Know thyself — Grace's own architecture, tools, and conventions.
+description: Know thyself — Grace's architecture, tools, commands, and conventions.
 ---
 # Grace Agent
 
-You are Grace — a minimal, fast, vendor-neutral ReAct agent core written in Rust.
-You operate as a CLI tool (no TUI). Your job is to assist with code, research,
-analysis, creative work, and system operations.
+You are Grace — a fast, minimal, vendor-neutral ReAct agent core written in
+Rust (~21,000 lines, single binary, `#![forbid(unsafe_code)]`, no async
+runtime, no TUI). You run as a CLI. Your job is to assist with code,
+research, analysis, creative work, and system operations.
+
+## The loop
+
+```
+your prompt
+   → compress context if it passes the trigger fraction
+   → transport.complete(messages, tools)
+   → if tool_calls: run each, append the results ──┐
+   └──────────────── loop ─────────────────────────┘
+         until FinishReason::Stop or the iteration budget is spent
+```
+
+- The whole conversation + tool specs goes to an OpenAI-compatible
+  `ProviderTransport`; a request that asks for tool calls is executed locally
+  and the results are appended, then the loop continues.
+- Default iteration budget is **256** (`--max-iterations`, or
+  `max_iterations` in `config.toml`). That bound is the only guaranteed
+  termination condition you should rely on.
+- **Ctrl-C mid-turn** cancels the in-flight turn (already-run tool calls are
+  kept) and, for a running `bash` command, kills that process rather than
+  waiting it out.
 
 ## Architecture
 
-Grace is a layered Rust crate. Dependencies point strictly downward — a cycle
-is a design bug:
+Dependencies point strictly downward — a cycle is a design bug.
 
 ```
 src/
-  main.rs        thin entry point; everything real lives in ui/cli.rs
+  main.rs        thin entry point; the real dispatch lives in ui/cli.rs
   core/          the agent engine
     agent.rs       the ReAct loop (run_turn, run_turn_with_options)
     delegation.rs  bounded sub-agents
-    context.rs     token-aware context compression
+    context.rs     token-aware compression
     lifecycle.rs   AgentEvent + IterationBudget
   transport/     LLM providers
     trait.rs       ProviderTransport, ModelResponse, ToolSpec, FinishReason
     wire.rs        shared OpenAI request/response shaping
     http.rs        any OpenAI-compatible endpoint
-    copilot.rs     GitHub Copilot (OAuth token exchange)
+    copilot.rs     GitHub Copilot (OAuth device flow + token refresh)
     stream.rs      SSE accumulation
   tools/         the tool system
-    trait.rs, registry.rs, builtins/{terminal,file,patch}.rs,
+    trait.rs, registry.rs, builtins/{terminal,file,patch}.rs
     delegate.rs, session.rs, plugin.rs
   memory/        durable facts (store.rs + prompt.rs)
   session/       chat history (store.rs, lock.rs, title.rs)
   skill/         skills (store.rs, load.rs, defaults.rs)
   recall/        pre-flight context injection
   config/        args.rs, settings.rs, soul.rs
-  ui/            chat REPL, cli, markdown, skins, wizard
+  ui/            chat REPL, cli, markdown, skins, wizard, picker, commands
   util/          error.rs, tokens.rs, diff.rs
 ```
 
-The core is a ReAct loop:
-
-1. Compress the conversation if it exceeds the model's context trigger
-2. Send conversation + tool specs to an LLM via `ProviderTransport`
-3. If the model requests tool calls, execute them and append results
-4. Loop until `FinishReason::Stop` or the iteration budget is exhausted
+`core` depends only on `message`, `transport`, `tools`, and `util` — it knows
+nothing about the CLI, sessions, or persistence. That is what lets the same
+loop run in the REPL, a one-shot, and a delegated sub-agent. `core/agent.rs`
+is the whole heart of it and fits in your head.
 
 ## Built-in tools
 
-- `bash` — execute shell commands (gated by `GRACE_TERMINAL_ALLOW`); pass `background=true` for
-  long jobs and check with `bash(job_id="...")`
-- `read` — read a file (gated by `GRACE_ALLOW_DIR`); large files are
-  summarized head+tail rather than dumped whole
-- `write` — write/overwrite a file, creating parent directories
-- `edit` — literal find-and-replace edit in a file (no fuzz, by design)
-- `list_skills` / `load_skill` — discover and load a skill on demand
-- `session_search` — FTS5 search across past conversations
-- `delegate` — run a self-contained subtask as a sub-agent with its own
-  iteration budget and no access to this conversation
+- `bash` — run a shell command. Long jobs: `bash(command=..., background=true)`
+  returns a `job_id`; poll with `bash(job_id="…")`. Ctrl-C kills a running
+  command (it is not allowed to run to its own timeout).
+- `read` — read a file; large files are summarized head+tail, not dumped whole.
+- `write` — write/overwrite a file, creating parent directories.
+- `edit` — literal find-and-replace in a file (no fuzzy matching, by design).
+- `list_skills` / `load_skill` — discover a skill and load its body on demand.
+- `session_search` — full-text (FTS5) search across past conversations.
+- `delegate` — run a self-contained subtask as a sub-agent (see below).
+
+File tools are gated by `GRACE_ALLOW_DIR`; `bash` by the `GRACE_TERMINAL_*`
+gates (see Security).
 
 ## Delegation
 
-`delegate` spawns a fresh ReAct loop in-process. Use it when a subtask would
-otherwise flood the main context with noise — searching a codebase,
-summarizing many files, a long build-and-fix loop.
+`delegate` spawns a **fresh, in-process** ReAct loop for a subtask. Use it when
+doing the work inline would flood the main context with noise — searching a
+large codebase, summarizing many files, a long build-and-fix loop.
 
-- Default budget: 25 iterations (`max_iterations`, capped at 200)
-- The sub-agent CANNOT see the parent conversation. State everything it needs
+- Default budget **25** iterations, max **200**. A runaway subtask exhausts
+  *its own* budget and the parent keeps the rest.
+- The sub-agent **cannot see** the parent conversation. Say everything it needs
   in `task` and `context`.
-- Restrict its capabilities with `tools: ["read", ...]` when it has no
-   business holding `bash`.
-- Nesting stops at depth 3; past that the tool is simply not registered.
-- Budget exhaustion returns a partial answer marked incomplete, not an error.
+- Narrow its tools (`tools: ["read", "edit"]`) when it has no business holding
+  `bash` or `delegate`.
+- Nesting stops at depth **3** — past that `delegate` is simply not registered,
+  so recursion ends structurally.
+- Budget exhaustion returns the partial answer marked incomplete, not an error.
 
-Do not delegate work you can finish in a step or two — the round-trip costs
+Do **not** delegate work finishable in a step or two — the round-trip costs
 more than doing it.
 
 ## Context compression
 
-Fires automatically at 75% of the model's real context window (asked from the
-transport, not assumed). Keeps the system prompt and the most recent messages,
-elides the middle behind a marker, and never splits a tool-call pair.
+Fires automatically at **75%** of the model's real context window (asked from
+the transport, not assumed) and compresses down toward **50%**, keeping the
+system prompt and the most recent messages. The middle is elided behind a
+marker the model can see; tool-call pairs are never split; an orphaned `tool`
+message is what would otherwise turn a size problem into a 400.
 
-## Conventions
+To compress on demand mid-chat: `/compact`.
 
-- Be concise. Lead with the answer, not methodology.
-- Use tools to verify claims — don't fabricate output.
-- When a task matches a skill, load it before proceeding.
-- If you discover a reusable procedure, consider creating a skill.
-- Durable facts (user preferences, environment) go in memory via `--remember`.
+## In-chat commands (the `/` palette)
+
+Everything the user can type is in `src/ui/commands.rs`, the single source of
+truth the palette, the tab-completer, and the dispatcher all read from:
+
+| command | what it does |
+|---------|--------------|
+| `/model` | Switch model — a model **list for the current endpoint** only |
+| `/provider` | Switch provider/endpoint (keeps the current model) |
+| `/effort` | Reasoning effort `none`/`low`/`medium`/`high` |
+| `/skin` | Switch color skin |
+| `/session` | Switch to / start a session |
+| `/rename` | Rename the current session (prefills the current name) |
+| `/jump` | Rewind context to an earlier message |
+| `/compact` | Compress context now |
+| `/dump` | Copy the context to the clipboard (`/dump FILE` writes a file) |
+| `/info` | Session report: turns, per-turn tokens, model, effort, provider |
+| `/readonly` | Read-only posture — hide `write`/`edit`/`bash`/`delegate` |
+| `/verbose` | Toggle tool-output visibility |
+| `/clear` | Clear the view (context untouched) |
+| `/exit` | Leave |
+
+Model, endpoint, and effort are **decoupled** on purpose: `/model` never asks
+you to re-pick the provider, and `/provider` never re-asks the model.
+
+## Memory (durable facts)
+
+Durable facts — user preferences, environment details, corrections — live in
+SQLite at `~/.grace/memory.db` and are injected into every system prompt.
+Persist a new fact by running it yourself, not by asking the user:
+
+```bash
+grace --remember "user prefers concise responses"
+```
+
+`grace --remember "<fact>"` is standalone — it stores the fact and exits, no
+model call. Pre-flight recall also re-searches memory, skills, and past
+sessions (FTS5) on every turn and injects only what genuinely matches —
+deterministic, free, no embedding call. You don't need the user to say
+"remember X"; it just knows.
+
+## Skills
+
+Skills are `~/.grace/skills/<name>/SKILL.md` with a `description:` front-matter
+line. They are discovered by name + description and loaded **on demand** via
+`load_skill` — never concatenated into every prompt. Three ship on first run:
+`grace-agent` (this file), `memory-update`, `skill-author`. Creating or
+editing a skill is a `write`/`edit` of a markdown file — no rebuild.
 
 ## Config
 
-- `~/.grace/config.toml` — default_model, default_base_url, skin, etc.
-- `~/.grace/memory.db` — SQLite durable facts
-- `~/.grace/skills/` — this directory
-- `~/.grace/sessions.db` — SQLite chat history (FTS5-indexed)
+- `~/.grace/config.toml` — `default_model`, `default_base_url`, `default_reasoning`, `skin`, `tools_dir`, `max_iterations`, …
+- `~/.grace/memory.db` — durable facts (SQLite)
+- `~/.grace/sessions.db` — chat history (SQLite, FTS5-indexed)
+- `~/.grace/skills/` — skills, including the three shipped ones
+- `~/.grace/skins/<name>.toml` — custom skins (no rebuild)
 - `~/.grace/soul.md` — the editable persona
 - `~/.grace/.env` — API keys written by the onboarding wizard
-- `~/.grace/history_<session>.txt` — per-session rustyline history
+- `~/.grace/history_<session>.txt` — per-session input history
 
-## How to add a custom skin (no rebuild needed)
+## Extending without a rebuild
 
-Skins are user-facing color palettes — no Rust code required:
+| Add a… | How |
+|--------|-----|
+| **Skill** | `~/.grace/skills/<name>/SKILL.md` with a `description:` line |
+| **Skin** | `~/.grace/skins/<name>.toml` (RGB arrays per role; see below) |
+| **Tool** | `./tools/<name>/manifest.json` + an executable |
 
-1. Create `~/.grace/skins/<name>.toml` with 3-byte RGB arrays for every role:
-   ```toml
-   name = "midnight"
-   prompt = [80, 90, 200]
-   answer = [120, 140, 255]
-   thinking = [100, 100, 110]
-   tool_bullet = [255, 200, 0]
-   tool_name = [220, 220, 230]
-   tool_dim = [90, 90, 100]
-   code = [140, 200, 255]
-   ```
-   `prompt_glyph`/`answer_glyph` are optional (default `❯`/`◆`).
-2. Select it: `grace --skin midnight`, or `/skin` mid-chat, or set
-   `skin = "midnight"` in `~/.grace/config.toml` to persist it.
-3. Malformed TOML is skipped silently at load — if it doesn't show up in
-   `/skin`'s picker, re-check the TOML syntax (all 7 RGB fields required).
+**Custom skin** — every color the UI emits comes from a skin, so a custom one
+only needs RGB triplets (0–255) in `~/.grace/skins/<name>.toml`:
 
-To add a new *built-in* skin instead (ships with every install), that IS a
-code change: add a `pub const NAME: Skin = Skin { ... };` to `src/ui/skin.rs`
-and append it to the `ALL` slice — requires a rebuild + release.
+```toml
+name = "midnight"
+prompt_glyph = "❯"     # optional, default ❯
+answer_glyph = "◆"     # optional, default ◆
+prompt = [80, 90, 200]
+answer = [120, 140, 255]
+thinking = [100, 100, 110]
+tool_bullet = [255, 200, 0]
+tool_name = [220, 220, 230]
+tool_dim = [90, 90, 100]
+code = [140, 200, 255]
+# all optional (serde-defaulted), for a fully bespoke look:
+accent = [80, 200, 255]
+hint = [120, 120, 140]
+success = [120, 200, 145]
+error = [245, 100, 115]
+hint_bg = [30, 27, 24]      # translucent background tints
+success_bg = [18, 44, 26]
+error_bg = [54, 18, 18]
+welcome = "At your service, Sir."   # the greeting under the banner
+goodbye = "Until next time, Sir."   # printed on /exit
+```
 
-## How to add a new tool WITHOUT writing Rust (plugin tools, no rebuild)
+`hint`/`success`/`error` are painted over their `*_bg` tints, so a
+confirmation or error reads as a highlighted chip. Select with `/skin`,
+`--skin`, or `skin = "midnight"` in `config.toml`; malformed TOML is skipped
+silently.
 
-`./tools/<name>/manifest.json` (relative to the cwd `grace` was launched
-in; override with `--tools-dir <path>` or `tools_dir` in `config.toml`) is
-discovered automatically at startup — no code, no rebuild:
+A *built-in* skin (shipped in every install) is a code change: add a
+`pub const NAME: Skin = Skin { … };` to `src/ui/skin.rs` and push it onto the
+`ALL` slice, then rebuild.
+
+**Plugin tool** — `./tools/<name>/manifest.json` (or `--tools-dir`/
+`tools_dir`) is discovered at startup; no code, no rebuild:
 
 ```json
 {
   "name": "weather",
   "description": "Get current weather for a city.",
-  "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+  "parameters": {"type":"object","properties":{"city":{"type":"string"}},"required":["city"]},
   "command": "./run.sh"
 }
 ```
 
-`command` (resolved relative to the manifest's own directory, or absolute)
-is invoked with the JSON-serialized arguments as a single `argv[1]` —
-write any executable (shell script, Python, compiled binary) that reads
-that JSON string and prints its result to stdout. Verify with
-`grace --chat` and ask a question that should trigger it; if it doesn't
-appear, check the manifest is valid JSON and `command` is executable
-(`chmod +x`).
+`command` runs with the JSON-serialized arguments as a single `argv[1]`; any
+executable that reads that JSON and prints its result to stdout works. Verify
+with `grace --chat` and a question that should trigger it.
 
-## How to add a new tool IN RUST (built-in, requires rebuild)
+## Built-in tool in Rust (requires rebuild)
 
-Tools are Rust structs implementing the `Tool` trait (`src/tools/trait.rs`):
+Implement the `Tool` trait (`src/tools/trait.rs`) — `name`, `description`,
+`parameters` (a JSON Schema `Value`), and `run(&self, &Value) -> Result<String>`.
+Register it in exactly **one** place, `Config::build_registry_full()`
+(`src/config/args.rs`) — registering from `main.rs` is how a tool goes missing
+everywhere but one code path. Then `cargo build --release` and reinstall (`cp`
+`target/release/grace` to `~/.local/bin/grace`); unlike a skin or skill, a new
+tool is not hot-loadable.
 
-1. In `src/tools/builtins/` (or a new module under `src/tools/`), define a
-   struct and implement `Tool`:
-   ```rust
-   struct MyTool;
-   impl Tool for MyTool {
-       fn name(&self) -> &str { "my_tool" }
-       fn description(&self) -> &str { "What it does, when to call it." }
-       fn parameters(&self) -> Value { json!({"type":"object","properties":{...},"required":[...]}) }
-       fn run(&self, args: &Value) -> Result<String> { /* side effect, return short string */ }
-   }
-   ```
-2. Register it: add `registry.register(Box::new(MyTool));` to
-   `register_builtins()` in `src/tools/builtins/mod.rs` (for a default
-   built-in), or to `Config::build_registry_full()` in `src/config/args.rs`
-   (for something conditional, e.g. `delegate` or `session_search`). Do NOT
-   register tools from `main.rs` — that is how a tool ends up missing from
-   every entry point except one.
-3. Rebuild: `cargo build --release`
-   then reinstall (`cp` `target/release/grace` to `~/.local/bin/grace`) — a new tool
-   is NOT hot-loadable, unlike a skin or a skill.
-4. Verify: `grace --chat` then ask a question that should trigger the
-   tool; confirm it appears in the tool-call tree with the right name.
+## Conventions
+
+- Be concise. Lead with the answer, not the methodology.
+- Verify claims with tools — never fabricate output.
+- When a task matches a skill, `load_skill` it first.
+- If you discover a durable fact, persist it (`grace --remember`).
+- If you discover a reusable procedure, consider a new skill.
+
+## Security (opt-in guardrails)
+
+```bash
+GRACE_ALLOW_DIR="/home/u/projects" grace --chat                 # file access
+GRACE_TERMINAL_ALLOW="ls,cat,rg,cargo" grace --chat             # allow-list
+GRACE_TERMINAL_DENY="rm -rf,shutdown" grace --chat              # deny patterns
+GRACE_TERMINAL_ALLOW_DIR="/home/u/projects" grace --chat        # workdir
+GRACE_TERMINAL_TIMEOUT=60 grace --chat                          # fg kill (default 30s, 0=off)
+```
+
+Defaults are permissive for local use. Allow-lists are a first step, not a
+sandbox — use a container or VM for untrusted models.
 "#;
 
 const MEMORY_UPDATE: &str = r#"---
-description: Consolidate durable facts from the current session into memory.
+description: Persist durable facts from the current session to memory.
 ---
 # Memory Update
 
-Use this skill when you detect that the user has shared a stable fact that should
-persist across sessions — a preference, a correction, an environment detail, or
-a convention.
+Use this skill when the user shares a stable fact that should persist across
+sessions — a preference, a correction, an environment detail, or a convention.
 
-## When to update memory
+## When to save
 
 - User states a preference: "I prefer concise responses"
 - User corrects your behavior: "Don't use sed, use patch"
 - User reveals an environment fact: "My project uses pytest with xdist"
 - User establishes a convention: "Always run tests before committing"
 
-## When NOT to update memory
+## When NOT to save
 
 - Temporary task state (what we're doing right now)
 - Ephemeral context (the current file we're editing)
 - Things that will be stale in a week (PR numbers, commit SHAs)
 
-## How
+## How — run it yourself
 
-The CLI has a `--remember "<fact>"` flag that persists a fact to the SQLite
-memory DB at `~/.grace/memory.db`. Those facts are injected into every system
-prompt automatically.
+Persist the fact directly with your `bash` tool. Do not just mention it in the
+conversation, and do not ask the user to do it:
 
-In chat mode, you can suggest the user run:
-```
-grace --remember "user prefers X"
+```bash
+grace --remember "user prefers concise responses"
 ```
 
-Or if the `write` tool is available and `~/.grace/memory.db` is within
-the allow-listed path, you can note the fact in the conversation and remind
-the user to persist it.
+`grace --remember "<fact>"` is a standalone action: it writes the fact to the
+SQLite memory DB at `~/.grace/memory.db` and exits — no model call, no API key
+needed. Facts are injected into every future system prompt, and pre-flight
+recall picks them up again from the very next turn, so persist the moment the
+fact is stable.
 
 ## Procedure
 
-1. Identify the durable fact from the conversation
-2. Phrase it declaratively: "User prefers concise responses" (not "Always...")
-3. Suggest the user persist it, or persist it yourself if tools allow
-4. Confirm it was saved
+1. Identify the durable fact from the conversation.
+2. Phrase it declaratively: "User prefers concise responses" (not "Always…").
+3. Run `grace --remember "<fact>"` with your `bash` tool.
+4. Confirm on the `remembered (id N): <fact>` line it prints; on a failure
+   line, retry once, then say so plainly.
 "#;
 
 const SKILL_AUTHOR: &str = r#"---
@@ -327,7 +411,9 @@ How to confirm the task was done correctly.
 3. Write the SKILL.md following the format above
 4. Create the directory: `~/.grace/skills/<name>/`
 5. Write the file: `~/.grace/skills/<name>/SKILL.md`
-6. Confirm it loads: the user can verify with `grace --chat` then `load_skill <name>`
+6. Confirm it loads: a new `grace` process auto-discovers it by name +
+   description. Verify the body by having Grace `load_skill` it and quoting a
+   line back, or by re-running the task it was meant to cover.
 "#;
 
 #[cfg(test)]

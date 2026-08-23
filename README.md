@@ -1,6 +1,6 @@
 # Grace
 
-**A production-grade agent CLI that learns.** ~9,000 lines of Rust. No framework. No async runtime. Single binary. `#![forbid(unsafe_code)]`.
+**A production-grade agent CLI that learns.** ~21,000 lines of Rust. No framework. No async runtime. Single binary. `#![forbid(unsafe_code)]`.
 
 ```bash
 # Install in 10 seconds
@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/AmnGrg0511/grace/master/scripts/ins
 | Problem | Grace |
 |---------|-------|
 | **Slow setup** | `curl ... \| bash` → works in 10s. No Rust, no Docker, no config. |
-| **Fragile tools** | Built-in `run_terminal`, `read_file`, `write_file`, `patch` with allow-lists. |
+| **Fragile tools** | Built-in `bash`, `read`, `write`, `edit` with allow-lists — plus `delegate`, `session_search`, and loadable skills. |
 | **Amnesia** | Persistent SQLite memory + FTS5 session search. Remembers across restarts. |
 | **Context overflow** | Token-aware compression against the model's *real* context window. |
 | **Noisy subtasks** | `delegate` runs a sub-agent with its own iteration budget and a clean history. |
@@ -60,7 +60,7 @@ Your prompt
 ```
 
 - **Bounded iterations** (default 256, configurable) — the only guaranteed termination condition
-- **Ctrl-C interrupts mid-turn** — completed tool calls are kept, nothing is stuck
+- **Ctrl-C interrupts mid-turn** — completed tool calls are kept, and it kills a running `bash` command (nothing is left stuck at its timeout)
 - **Streaming** in both chat and one-shot mode, with tool calls still working
 - **Typical task: 3–8 tool calls, 10–30 seconds**
 
@@ -79,15 +79,15 @@ floods the main conversation with output nobody needs afterwards.
 
   ⇢ delegating (budget 25): audit every module for missing error handling
       · sub-agent done after 11 iterations
-  ● patch(src/main.rs)
+  ● edit(src/main.rs)
 ```
 
 - **Its own iteration budget** (default 25, max 200). A runaway subtask fails
   *its own* budget; the parent keeps every round it had left and can react.
 - **A clean history.** The sub-agent cannot see the parent conversation — which
   is the entire point. State what it needs in `task` and `context`.
-- **A narrowable tool set.** `tools: ["read_file"]` for a sub-agent that has no
-  business holding `run_terminal`.
+- **A narrowable tool set.** `tools: ["read"]` for a sub-agent that has no
+  business holding `bash`.
 - **Bounded nesting.** Past depth 3 the `delegate` tool is simply not
   registered, so recursion terminates structurally rather than by asking the
   model nicely.
@@ -246,7 +246,7 @@ sandbox — use a container or VM for untrusted models.
 ## Development
 
 ```bash
-cargo test                                  # ~380 tests, no network required
+cargo test                                  # 460+ tests, no network required
 cargo clippy --all-targets -- -D warnings   # clean
 cargo build --release
 ```
