@@ -493,28 +493,25 @@ fn handle_info_command(view: InfoView<'_>, skin: &Skin) {
 
     println!("{}", accent("session"));
     match current_session {
-        Some(sid) => {
-            let title = sessions.get_title(sid).ok().flatten();
-            println!(
-                "  {}{}",
-                dim("id      "),
-                match &title {
-                    Some(t) => format!("{t} ({sid})"),
-                    None => sid.to_string(),
-                }
-            );
-        }
+        Some(sid) => println!(
+            "  {}{}",
+            dim("name     "),
+            match sessions.get_title(sid).ok().flatten() {
+                Some(t) => t,
+                None => sid.to_string(),
+            }
+        ),
         None => println!(
             "  {}{}",
-            dim("id      "),
+            dim("name     "),
             dim("(unsaved — send a message to start one)")
         ),
     }
-    println!("  {}{}", dim("elapsed "), elapsed);
+    println!("  {}{}", dim("elapsed  "), elapsed);
     println!(
         "  {}{}",
-        dim("posture "),
-        if read_only { "read-only" } else { "full tools" }
+        dim("readonly "),
+        if read_only { "on" } else { "off" }
     );
 
     println!("{}", accent("model"));
@@ -524,26 +521,26 @@ fn handle_info_command(view: InfoView<'_>, skin: &Skin) {
         .unwrap_or_else(|| "off".into());
     println!(
         "  {}{}",
-        dim("provider"),
+        dim("provider "),
         transport
             .current_base_url()
             .as_deref()
             .map(short_url)
             .unwrap_or_else(|| "(unknown)".to_string())
     );
-    println!("  {}{}", dim("name    "), model);
-    println!("  {}{}", dim("effort  "), effort);
+    println!("  {}{}", dim("model    "), model);
+    println!("  {}{}", dim("effort   "), effort);
     println!(
         "  {}{}",
-        dim("window  "),
+        dim("window   "),
         match window {
-            Some(w) => format!("{w}k tokens"),
+            Some(w) => format!("{} tokens", crate::ui::status::human_tokens(w as u64)),
             None => "unknown".to_string(),
         }
     );
     println!(
         "  {}{}",
-        dim("context "),
+        dim("context  "),
         match last_usage {
             Some(u) => format!(
                 "{} tokens measured (provider)",
