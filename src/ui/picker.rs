@@ -786,11 +786,16 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
         let raw = String::from_utf8(out).unwrap();
-        // Solaris hint is rgb(155,130,100); the summary must wear it while
-        // the label keeps its row style — a lone row is selected, i.e.
-        // solaris answer (220,100,40), not tool_dim.
-        assert!(raw.contains("\x1b[38;2;155;130;100mExit the chat"), "{raw:?}");
-        assert!(raw.contains("\x1b[38;2;220;100;40m/exit"), "{raw:?}");
+        // Derive the expected escapes from the live skin (not hardcoded RGB)
+        // so a palette re-tune can't silently break this: the summary wears
+        // the hint color, the lone selected row's label wears the answer
+        // color (not tool_dim).
+        let hint = crate::ui::skin::SOLARIS.hint;
+        let ans = crate::ui::skin::SOLARIS.answer;
+        let hint_esc = format!("\x1b[38;2;{};{};{}mExit the chat", hint.0, hint.1, hint.2);
+        let ans_esc = format!("\x1b[38;2;{};{};{}m/exit", ans.0, ans.1, ans.2);
+        assert!(raw.contains(&hint_esc), "{raw:?}");
+        assert!(raw.contains(&ans_esc), "{raw:?}");
         // Filtering still matches the plain sublabel text.
         assert_eq!(filter_items(&items, "chat"), vec![0]);
         std::env::remove_var("CLICOLOR_FORCE");
