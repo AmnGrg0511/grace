@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.3.6
+
+**Added**
+- A command palette replaces `/help`, `/commands`, and `/quit`: an
+  unambiguous slash prefix dispatches instantly, and an ambiguous one opens
+  the palette to pick from. `/skin`, `/session`, and `/model` all route
+  through the shared picker, which now wraps instead of truncating and shows
+  a live color snapshot of each skin.
+- `/model` picks provider, model, and reasoning level in staged, accented
+  pickers; every transport now sends the choice as a `reasoning_effort`
+  hint. `/effort` sets the reasoning level on its own and the idle status
+  line shows the bare level (e.g. `high`); `/provider` switches the endpoint
+  while keeping the model choice separate.
+- `/info` — per-turn token usage and session posture; `/rename` — set the
+  session title (prefilled with the current one) as shown by `/session`;
+  `/dump` — copy the full context to the clipboard (OSC 52) or a file;
+  `/compact` — compress context on demand, without the automatic trigger
+  gate.
+- Onboarding is fully picker-based, with API keys typed blind.
+- Skins gain `accent`, `hint`, `success`, and `error` roles plus
+  configurable `welcome`/`goodbye` persona lines and the layered amber
+  palettes. Confirmations and errors read as highlighted chips — a skin-tinted
+  background, a leading glyph, and side padding — and the chip glyphs are
+  themselves skin-configurable (`hint_icon` / `success_icon` / `error_icon`).
+- `list_skills` now shows each skill's one-line `description:` alongside its
+  name, so the model can tell what a skill is for before loading it.
+- The transport/resume summary prints below the ASCII banner, and the bundled
+  skills and README are rewritten for the current module layout.
+
+**Fixed**
+- Ctrl-C during a running tool now kills the command (it previously only took
+  effect on the next input).
+- `list_skills` was returning bare names; it now includes the frontmatter
+  description (falling back to the name).
+- FTS5 `session_search` tokens are quoted so bare identifiers and punctuation
+  no longer error; list items opening with inline code keep the word on the
+  bullet row.
+
 ## v0.3.5
 
 **Added**
