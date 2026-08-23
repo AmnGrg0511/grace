@@ -86,6 +86,12 @@ pub struct Skin {
     pub welcome: &'static str,
     /// The farewell printed on `/exit` / EOF. Same control as [`Self::welcome`].
     pub goodbye: &'static str,
+    /// Leading glyph for [`Role::Hint`] message chips (see [`Skin::paint_badge`]).
+    pub hint_icon: &'static str,
+    /// Leading glyph for [`Role::Success`] message chips.
+    pub success_icon: &'static str,
+    /// Leading glyph for [`Role::Error`] message chips.
+    pub error_icon: &'static str,
 }
 
 impl Skin {
@@ -150,9 +156,9 @@ impl Skin {
     /// pickers, where an icon + padding per row would clutter the list.
     pub fn paint_badge(&self, role: Role, text: &str) -> String {
         let icon = match role {
-            Role::Hint => "ℹ",
-            Role::Success => "✓",
-            Role::Error => "✗",
+            Role::Hint => self.hint_icon,
+            Role::Success => self.success_icon,
+            Role::Error => self.error_icon,
             _ => return self.paint(role, text),
         };
         if no_color() {
@@ -205,6 +211,9 @@ pub const SOLARIS: Skin = Skin {
     error_bg: RgbColor(54, 18, 18),
     welcome: "Grace is ready. How may I help you, Sir?",
     goodbye: "Until next time, Sir.",
+    hint_icon: "ℹ",
+    success_icon: "✓",
+    error_icon: "✗",
 };
 
 /// "royal" — deep violet/indigo with a brighter gold, more formal.
@@ -228,6 +237,9 @@ pub const ROYAL: Skin = Skin {
     error_bg: RgbColor(54, 18, 18),
     welcome: "At your service, Sir.",
     goodbye: "Until next time, Sir.",
+    hint_icon: "ℹ",
+    success_icon: "✓",
+    error_icon: "✗",
 };
 
 /// "ocean" — cool teal/blue, calm and low-contrast.
@@ -251,6 +263,9 @@ pub const OCEAN: Skin = Skin {
     error_bg: RgbColor(54, 18, 18),
     welcome: "Grace is ready. How can I help you?",
     goodbye: "Goodbye.",
+    hint_icon: "ℹ",
+    success_icon: "✓",
+    error_icon: "✗",
 };
 
 /// "sakura" — warm pinks, soft and bright.
@@ -274,6 +289,9 @@ pub const SAKURA: Skin = Skin {
     error_bg: RgbColor(54, 18, 18),
     welcome: "I'm here. What shall we do?",
     goodbye: "Goodbye.",
+    hint_icon: "ℹ",
+    success_icon: "✓",
+    error_icon: "✗",
 };
 
 pub const ALL: &[Skin] = &[SOLARIS, ROYAL, OCEAN, SAKURA];
@@ -313,6 +331,12 @@ pub struct CustomSkin {
     pub welcome: String,
     #[serde(default = "default_goodbye")]
     pub goodbye: String,
+    #[serde(default = "default_hint_icon")]
+    pub hint_icon: String,
+    #[serde(default = "default_success_icon")]
+    pub success_icon: String,
+    #[serde(default = "default_error_icon")]
+    pub error_icon: String,
 }
 
 fn default_prompt_glyph() -> String {
@@ -332,6 +356,11 @@ fn default_error() -> [u8; 3] { [240, 85, 65] }
 fn default_hint_bg() -> [u8; 3] { [30, 27, 24] }
 fn default_success_bg() -> [u8; 3] { [18, 44, 26] }
 fn default_error_bg() -> [u8; 3] { [54, 18, 18] }
+// Serde fallbacks for the message chip icons — an old ~/.grace/skins/*.toml that
+// lacks these fields must keep parsing, and their defaults mirror (solaris).
+fn default_hint_icon() -> String { "ℹ".to_string() }
+fn default_success_icon() -> String { "✓".to_string() }
+fn default_error_icon() -> String { "✗".to_string() }
 // Serde fallbacks for persona lines — an old ~/.grace/skins/*.toml that
 // predates them keeps parsing (defaults mirror solaris).
 fn default_welcome() -> String { "Grace is ready. How may I help you, Sir?".to_string() }
@@ -407,6 +436,9 @@ fn leak_custom(c: CustomSkin) -> Skin {
         error_bg: RgbColor(c.error_bg[0], c.error_bg[1], c.error_bg[2]),
         welcome: leak_str(c.welcome),
         goodbye: leak_str(c.goodbye),
+        hint_icon: leak_str(c.hint_icon),
+        success_icon: leak_str(c.success_icon),
+        error_icon: leak_str(c.error_icon),
     }
 }
 

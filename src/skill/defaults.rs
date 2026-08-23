@@ -127,7 +127,8 @@ is the whole heart of it and fits in your head.
 - `read` — read a file; large files are summarized head+tail, not dumped whole.
 - `write` — write/overwrite a file, creating parent directories.
 - `edit` — literal find-and-replace in a file (no fuzzy matching, by design).
-- `list_skills` / `load_skill` — discover a skill and load its body on demand.
+ - `list_skills` / `load_skill` — list shows each skill's one-line `description:`
+   (its purpose), `load_skill` pulls in the full body when a task matches.
 - `session_search` — full-text (FTS5) search across past conversations.
 - `delegate` — run a self-contained subtask as a sub-agent (see below).
 
@@ -253,12 +254,16 @@ error = [245, 100, 115]
 hint_bg = [30, 27, 24]      # translucent background tints
 success_bg = [18, 44, 26]
 error_bg = [54, 18, 18]
+hint_icon = "ℹ"             # leading glyph on hint chips (default ℹ / ✓ / ✗)
+success_icon = "✓"          # leading glyph on success chips
+error_icon = "✗"            # leading glyph on error chips
 welcome = "At your service, Sir."   # the greeting under the banner
 goodbye = "Until next time, Sir."   # printed on /exit
 ```
 
-`hint`/`success`/`error` are painted over their `*_bg` tints, so a
-confirmation or error reads as a highlighted chip. Select with `/skin`,
+`hint`/`success`/`error` are painted over their `*_bg` tints, and each whole-line
+message carries a `*_icon` glyph, so a confirmation or error reads as a
+highlighted, labelled chip (e.g. ` ✓ renamed to "…" `). Select with `/skin`,
 `--skin`, or `skin = "midnight"` in `config.toml`; malformed TOML is skipped
 silently.
 
