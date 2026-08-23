@@ -126,9 +126,16 @@ pub fn run_chat(
         let _ = std::io::stdout().flush();
     }
 
+    println!("{}", chat_banner(&skin));
+    // The persona greeting is skin-controlled (see `Skin::welcome`), so a
+    // custom skin sets its own tone without a code change.
+    println!("{}\n", skin.paint(Role::Accent, skin.welcome));
     println!(
-        "{}\nchat mode — type a message, \"/\" for the command palette, '/exit' to leave, '/model [name]' to switch models, '/skin [name]' to retheme, '/session' to switch sessions, '/verbose' to toggle tool output.\n",
-        chat_banner(&skin)
+        "{}\n",
+        skin.paint(
+            Role::Hint,
+            "\"/\" for commands · /model the model list · /provider the endpoint · /effort the reasoning · /skin the theme · /info this session · /verbose tool output · /exit to leave"
+        )
     );
 
     let started_at = std::time::Instant::now();
@@ -252,7 +259,7 @@ pub fn run_chat(
         }
         match cmd_word.strip_prefix('/') {
             Some("exit") => {
-                println!("goodbye.");
+                println!("{}", skin.paint(Role::Accent, skin.goodbye));
                 break;
             }
             Some("model") => {
@@ -750,30 +757,36 @@ fn persist_model_choice(target: &ModelCandidate, context_window: Option<u32>) {
     }
 }
 
-/// `/model` (no arg) — crossterm picker over the endpoints the candidates
-/// know about (persisted ones first), then a model list: what the endpoint
-/// reports, merged with the known static models, plus an "other" escape
-/// hatch for ids we don't know. Returns `None` on cancel/EOF (no-op).
+/// `/model` (no arg) — the model list for the endpoint this session is
+/// already pointed at: what the endpoint reports, merged with the known
+/// static models, plus an "other" escape hatch for ids we don't know. The
+/// provider/endpoint is *not* re-chosen here — that is `/provider` — so this
+/// is a single, focused model list. Returns `None` on cancel/EOF (no-op).
 fn pick_model_interactive(
     candidates: &[ModelCandidate],
     reader: &mut LineReader,
     skin: &Skin,
     transport: &(dyn crate::transport::ProviderTransport + '_),
 ) -> Option<ModelCandidate> {
-    let picked = pick_provider_endpoint(candidates, reader, skin, "pick a provider to switch to")?;
-    let fetched = fetched_models(&picked.base_url, &picked.key_env);
-    let current_model = transport.current_model();
-    let same_endpoint = transport
+    let base_url = transport
         .current_base_url()
-        .as_deref()
-        .map(|b| short_url(b) == short_url(&picked.base_url))
-        .unwrap_or(false);
+        .or_else(|| crate::config::settings::Settings::load().default_base_url.clone())
+        .unwrap_or_default();
+    if base_url.is_empty() {
+        println!("no provider configured — /provider picks one first.");
+        return None;
+    }
+    let name = friendly_endpoint_name(&base_url);
+    let picked = endpoint_pick(candidates, &name, &base_url);
+    let fetched = fetched_models(&picked.base_url, &picked.key_env);
+    // The endpoint is unchanged, so the active model is always the anchor
+    // that should be marked in the list.
     let (model, ctx) = pick_model_for_endpoint(
         fetched,
         &picked.known_models,
         reader,
         skin,
-        current_model.as_deref().filter(|_| same_endpoint),
+        transport.current_model().as_deref(),
     )?;
     Some(ModelCandidate {
         name: picked.name,
@@ -846,10 +859,20 @@ fn pick_provider_endpoint(
         )
     };
 
-    // Which key var + known models does this endpoint have?
+    Some(endpoint_pick(candidates, &name, &base_url))
+}
+
+/// Resolve the key env var + known-model list for a `(name, base_url)` among
+/// the candidates, falling back to the standard env-var naming for the URL
+/// when no candidate carries an explicit key var.
+fn endpoint_pick(
+    candidates: &[ModelCandidate],
+    name: &str,
+    base_url: &str,
+) -> EndpointPick {
     let (key_env, known): (String, Vec<(String, Option<u32>)>) = candidates
         .iter()
-        .filter(|c| c.name == name && short_url(&c.base_url) == short_url(&base_url))
+        .filter(|c| c.name == name && short_url(&c.base_url) == short_url(base_url))
         .fold(
         (String::new(), Vec::new()),
         |(mut ke, mut known), c| {
@@ -861,16 +884,16 @@ fn pick_provider_endpoint(
         },
     );
     let key_env = if key_env.is_empty() {
-        crate::config::settings::env_var_for_base_url(&base_url).to_string()
+        crate::config::settings::env_var_for_base_url(base_url).to_string()
     } else {
         key_env
     };
-    Some(EndpointPick {
-        name,
-        base_url,
+    EndpointPick {
+        name: name.to_string(),
+        base_url: base_url.to_string(),
         key_env,
         known_models: known,
-    })
+    }
 }
 
 /// The `/effort` picker: the reasoning-effort hint sent as
@@ -1107,9 +1130,12 @@ fn handle_rename_command(
         );
         return;
     };
+    // A bare `/rename` opens on the current name already typed in, so a user
+    // tweaking it edits in place; an explicit `/rename <name>` replaces it.
+    let current_title = sessions.get_title(sid).ok().flatten().unwrap_or_default();
     let mut title = rest.trim().to_string();
     if title.is_empty() {
-        let Some(asked) = reader.read_line("new name: ") else {
+        let Some(asked) = reader.read_line_default("new name: ", &current_title) else {
             return;
         };
         title = asked.trim().to_string();
@@ -1279,7 +1305,7 @@ const SPINNER_FRAMES: [&str; 10] = [
 ];
 
 /// The idle status line text:
-/// `· host · model[RO] · high effort · [context bar] · elapsed`.
+/// `· host · model[RO] · high · [context bar] · elapsed`.
 #[allow(clippy::too_many_arguments)]
 fn status_line_content(
     provider: Option<&str>,
@@ -1310,8 +1336,11 @@ fn status_line_content(
         Some(host) => format!("· {host} · {model}{ro}"),
         None => format!("· {model}{ro}"),
     };
+    // The effort level sits next to the model it shapes. Shown bare (`high`,
+    // not "high effort") — the slot is narrow and "effort" would only repeat
+    // what /effort's own label already says. Hidden when off (the default).
     match effort {
-        Some(level) => format!("{lead} · {level} effort · {bar} · {time}"),
+        Some(level) => format!("{lead} · {level} · {bar} · {time}"),
         None => format!("{lead} · {bar} · {time}"),
     }
 }
@@ -1568,7 +1597,7 @@ mod spinner_tests {
         );
         assert!(
             line.starts_with(
-                "· api.example.com · gpt-4o · high effort · [███░░░░░] 40% · "
+                "· api.example.com · gpt-4o · high · [███░░░░░] 40% · "
             ),
             "unexpected line: {line}"
         );
