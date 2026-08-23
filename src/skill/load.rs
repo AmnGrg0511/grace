@@ -20,17 +20,33 @@ impl Tool for ListSkillsTool {
         "list_skills"
     }
     fn description(&self) -> &str {
-        "List available skill names that can be loaded with load_skill."
+        "List available skills (name — one-line description) that can be loaded with load_skill."
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {}})
     }
     fn run(&self, _args: &serde_json::Value) -> Result<String> {
-        let names = self.store.list();
-        if names.is_empty() {
+        let meta = self.store.list_meta();
+        if meta.is_empty() {
             Ok("no skills available".to_string())
         } else {
-            Ok(names.join("\n"))
+            // Name plus the frontmatter description — that is the whole point
+            // of the list: the model decides what to load_skill from these
+            // lines, so a bare name (recall may not have surfaced it) would
+            // leave it guessing at the skill's purpose. When a skill has no
+            // frontmatter the description falls back to its name; don't print
+            // "name — name".
+            Ok(meta
+                .iter()
+                .map(|m| {
+                    if m.description == m.name {
+                        m.name.clone()
+                    } else {
+                        format!("{} — {}", m.name, m.description)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
         }
     }
 }
@@ -90,6 +106,32 @@ mod tests {
             .run(&serde_json::json!({}))
             .unwrap();
         assert_eq!(out, "greet");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_skills_shows_the_frontmatter_description_not_just_the_name() {
+        // The model picks what to load_skill from these lines — a bare name is
+        // guesswork when pre-flight recall hasn't already surfaced the skill.
+        let dir = std::env::temp_dir().join(format!(
+            "grace_skill_list_desc_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("perforce-review")).unwrap();
+        std::fs::write(
+            dir.join("perforce-review").join("SKILL.md"),
+            "---\ndescription: Reviews a pending Perforce changelist for correctness.\n---\n# body",
+        )
+        .unwrap();
+        let store = Arc::new(SkillStore::new(&dir));
+        let out = ListSkillsTool { store }
+            .run(&serde_json::json!({}))
+            .unwrap();
+        assert_eq!(
+            out,
+            "perforce-review — Reviews a pending Perforce changelist for correctness."
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

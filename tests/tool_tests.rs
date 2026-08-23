@@ -298,7 +298,12 @@ fn skill_tools_discover_and_load_from_a_directory() {
     .unwrap();
 
     let reg = grace::config::Config::build_registry_with_skills(&dir);
-    assert_eq!(reg.execute("list_skills", "{}").unwrap(), "greet");
+    // list_skills shows the frontmatter description — the model's one-shot
+    // view of a skill's purpose before it decides to load_skill.
+    assert_eq!(
+        reg.execute("list_skills", "{}").unwrap(),
+        "greet — Says hello."
+    );
     let loaded = reg
         .execute("load_skill", r#"{"name":"greet"}"#)
         .unwrap();
