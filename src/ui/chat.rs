@@ -561,26 +561,46 @@ fn handle_info_command(view: InfoView<'_>, skin: &Skin) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let mut tin = 0u64;
-            let mut tout = 0u64;
+            let tin: u64 = rows.iter().map(|r| r.input_tokens).sum();
+            let tout: u64 = rows.iter().map(|r| r.output_tokens).sum();
+            // Measure before painting: recency labels ("2h 47m ago" vs "3m
+            // ago") and model names are variable width, so the in/out
+            // columns only line up if every row — and the total — shares
+            // their true maxes. Pad the plain text, then paint: ANSI
+            // escapes carry no display width and must not count.
+            let recs: Vec<String> = rows
+                .iter()
+                .map(|r| recency_label(r.created_at, now))
+                .collect();
+            let in_s: Vec<String> = rows.iter().map(|r| group(r.input_tokens)).collect();
+            let out_s: Vec<String> = rows.iter().map(|r| group(r.output_tokens)).collect();
+            let recency_w = recs.iter().map(|s| s.len()).max().unwrap_or(0);
+            let model_w = rows.iter().map(|r| r.model.len()).max().unwrap_or(0);
+            let total_in = group(tin);
+            let total_out = group(tout);
+            let in_w = in_s.iter().map(|s| s.len()).max().unwrap_or(0).max(total_in.len());
+            let out_w = out_s.iter().map(|s| s.len()).max().unwrap_or(0).max(total_out.len());
             for (i, r) in rows.iter().enumerate() {
-                tin += r.input_tokens;
-                tout += r.output_tokens;
+                let rec = format!("{:<recency_w$}", recs[i]);
+                let mdl = format!("{:<model_w$}", r.model);
+                let inp = format!("{:>in_w$}", in_s[i]);
+                let outp = format!("{:>out_w$}", out_s[i]);
                 println!(
-                    "  {:>4}  {}  {}  {} in · {} out",
+                    "  {:>5}  {}  {}  {} in · {} out",
                     i + 1,
-                    dim(&recency_label(r.created_at, now)),
-                    r.model,
-                    group(r.input_tokens),
-                    group(r.output_tokens)
+                    dim(&rec),
+                    mdl,
+                    inp,
+                    outp
                 );
             }
             println!(
-                "  {}  {} in · {} out across {} turns",
-                dim("total"),
-                accent(&group(tin)),
-                accent(&group(tout)),
-                rows.len()
+                "  {total:>5}  {blank:<recency_w$}  {blank:<model_w$}  {in_cell:>in_w$} in · {out_cell:>out_w$} out across {count} turns",
+                total = dim("total"),
+                blank = "",
+                in_cell = accent(&total_in),
+                out_cell = accent(&total_out),
+                count = rows.len()
             );
         }
     }
