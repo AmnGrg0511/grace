@@ -786,14 +786,18 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
         let raw = String::from_utf8(out).unwrap();
-        // Derive the expected escapes from the live skin (not hardcoded RGB)
-        // so a palette re-tune can't silently break this: the summary wears
-        // the hint color, the lone selected row's label wears the answer
+        // Derive the expected escapes from the live skin's style() (not
+        // hardcoded RGB) so a palette re-tune can't silently break this: the
+        // summary wears the hint role — now foreground *and* its *_bg tint —
+        // and the lone selected row's label wears the answer color.
+        use crate::ui::skin::{Role, SOLARIS};
+        // paint() is `style.render()` directly followed by the text (no gap).
+        // Derive it from the live skin so a palette re-tune can't silently
+        // break this: the summary wears the hint role — foreground *and* its
+        // *_bg tint — and the lone selected row's label wears the answer
         // color (not tool_dim).
-        let hint = crate::ui::skin::SOLARIS.hint;
-        let ans = crate::ui::skin::SOLARIS.answer;
-        let hint_esc = format!("\x1b[38;2;{};{};{}mExit the chat", hint.0, hint.1, hint.2);
-        let ans_esc = format!("\x1b[38;2;{};{};{}m/exit", ans.0, ans.1, ans.2);
+        let hint_esc = format!("{}{}", SOLARIS.style(Role::Hint).render(), "Exit the chat");
+        let ans_esc = format!("{}{}", SOLARIS.style(Role::Answer).render(), "/exit");
         assert!(raw.contains(&hint_esc), "{raw:?}");
         assert!(raw.contains(&ans_esc), "{raw:?}");
         // Filtering still matches the plain sublabel text.

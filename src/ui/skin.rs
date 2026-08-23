@@ -71,6 +71,15 @@ pub struct Skin {
     pub success: RgbColor,
     /// Failures and warnings that must be impossible to miss.
     pub error: RgbColor,
+    /// Background tint behind [`Self::hint`] text — a faint, low-luminance
+    /// wash rather than a distinct foreground hue, so secondary text reads as
+    /// a soft "chip" over any terminal background.
+    pub hint_bg: RgbColor,
+    /// Background tint behind [`Self::success`] — a deep green that makes
+    /// confirmations read as highlighted, independent of the text color.
+    pub success_bg: RgbColor,
+    /// Background tint behind [`Self::error`] — a deep red for the same reason.
+    pub error_bg: RgbColor,
     /// The one-line persona greeting printed under the banner at startup —
     /// fully skin-controlled so a custom skin can set the tone (formal,
     /// casual, a particular name of address) without touching code.
@@ -98,9 +107,20 @@ impl Skin {
             Role::ToolDim => Style::new().fg_color(Some(Color::from(self.tool_dim))),
             Role::Code => Style::new().fg_color(Some(Color::from(self.code))),
             Role::Accent => Style::new().fg_color(Some(Color::from(self.accent))),
-            Role::Hint => Style::new().fg_color(Some(Color::from(self.hint))),
-            Role::Success => Style::new().fg_color(Some(Color::from(self.success))),
-            Role::Error => Style::new().fg_color(Some(Color::from(self.error))),
+            // These three read as *highlighted* via a low-luminance
+            // background tint rather than a distinct foreground hue, so they
+            // stand out against the terminal's own background (dark wash for
+            // hint, deep green/red for success/error) while staying in-step
+            // with whatever palette the skin chooses for the text.
+            Role::Hint => Style::new()
+                .fg_color(Some(Color::from(self.hint)))
+                .bg_color(Some(Color::from(self.hint_bg))),
+            Role::Success => Style::new()
+                .fg_color(Some(Color::from(self.success)))
+                .bg_color(Some(Color::from(self.success_bg))),
+            Role::Error => Style::new()
+                .fg_color(Some(Color::from(self.error)))
+                .bg_color(Some(Color::from(self.error_bg))),
         }
     }
 
@@ -159,6 +179,9 @@ pub const SOLARIS: Skin = Skin {
     hint: RgbColor(176, 148, 116),
     success: RgbColor(150, 205, 90),
     error: RgbColor(240, 85, 65),
+    hint_bg: RgbColor(30, 27, 24),
+    success_bg: RgbColor(18, 44, 26),
+    error_bg: RgbColor(54, 18, 18),
     welcome: "Grace is ready. How may I help you, Sir?",
     goodbye: "Until next time, Sir.",
 };
@@ -179,6 +202,9 @@ pub const ROYAL: Skin = Skin {
     hint: RgbColor(156, 146, 178),
     success: RgbColor(120, 200, 145),
     error: RgbColor(245, 100, 115),
+    hint_bg: RgbColor(30, 27, 24),
+    success_bg: RgbColor(18, 44, 26),
+    error_bg: RgbColor(54, 18, 18),
     welcome: "At your service, Sir.",
     goodbye: "Until next time, Sir.",
 };
@@ -199,6 +225,9 @@ pub const OCEAN: Skin = Skin {
     hint: RgbColor(126, 146, 160),
     success: RgbColor(80, 200, 145),
     error: RgbColor(248, 112, 98),
+    hint_bg: RgbColor(30, 27, 24),
+    success_bg: RgbColor(18, 44, 26),
+    error_bg: RgbColor(54, 18, 18),
     welcome: "Grace is ready. How can I help you?",
     goodbye: "Goodbye.",
 };
@@ -219,6 +248,9 @@ pub const SAKURA: Skin = Skin {
     hint: RgbColor(176, 148, 158),
     success: RgbColor(135, 195, 125),
     error: RgbColor(232, 72, 96),
+    hint_bg: RgbColor(30, 27, 24),
+    success_bg: RgbColor(18, 44, 26),
+    error_bg: RgbColor(54, 18, 18),
     welcome: "I'm here. What shall we do?",
     goodbye: "Goodbye.",
 };
@@ -250,6 +282,12 @@ pub struct CustomSkin {
     pub success: [u8; 3],
     #[serde(default = "default_error")]
     pub error: [u8; 3],
+    #[serde(default = "default_hint_bg")]
+    pub hint_bg: [u8; 3],
+    #[serde(default = "default_success_bg")]
+    pub success_bg: [u8; 3],
+    #[serde(default = "default_error_bg")]
+    pub error_bg: [u8; 3],
     #[serde(default = "default_welcome")]
     pub welcome: String,
     #[serde(default = "default_goodbye")]
@@ -268,6 +306,11 @@ fn default_accent() -> [u8; 3] { [255, 105, 45] }
 fn default_hint() -> [u8; 3] { [155, 130, 100] }
 fn default_success() -> [u8; 3] { [150, 205, 90] }
 fn default_error() -> [u8; 3] { [240, 85, 65] }
+// Dark background tints for the three semantic roles — near-black washes so
+// they read as translucent chips on any terminal background.
+fn default_hint_bg() -> [u8; 3] { [30, 27, 24] }
+fn default_success_bg() -> [u8; 3] { [18, 44, 26] }
+fn default_error_bg() -> [u8; 3] { [54, 18, 18] }
 // Serde fallbacks for persona lines — an old ~/.grace/skins/*.toml that
 // predates them keeps parsing (defaults mirror solaris).
 fn default_welcome() -> String { "Grace is ready. How may I help you, Sir?".to_string() }
@@ -338,6 +381,9 @@ fn leak_custom(c: CustomSkin) -> Skin {
         hint: RgbColor(c.hint[0], c.hint[1], c.hint[2]),
         success: RgbColor(c.success[0], c.success[1], c.success[2]),
         error: RgbColor(c.error[0], c.error[1], c.error[2]),
+        hint_bg: RgbColor(c.hint_bg[0], c.hint_bg[1], c.hint_bg[2]),
+        success_bg: RgbColor(c.success_bg[0], c.success_bg[1], c.success_bg[2]),
+        error_bg: RgbColor(c.error_bg[0], c.error_bg[1], c.error_bg[2]),
         welcome: leak_str(c.welcome),
         goodbye: leak_str(c.goodbye),
     }
