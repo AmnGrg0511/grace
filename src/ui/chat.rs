@@ -152,7 +152,7 @@ pub fn run_chat(
     println!("{}\n", skin.paint(Role::Accent, skin.welcome));
     println!(
         "{}\n",
-        skin.paint(
+        skin.paint_badge(
             Role::Hint,
             "\"/\" for commands · /model the model list · /provider the endpoint · /effort the reasoning · /skin the theme · /info this session · /verbose tool output · /exit to leave"
         )
@@ -380,7 +380,7 @@ pub fn run_chat(
                 println!("{}\n", chat_banner(&skin));
                 println!(
                     "{}",
-                    skin.paint(Role::Hint, "(view cleared — conversation context unchanged)")
+                    skin.paint_badge(Role::Hint, "(view cleared — conversation context unchanged)")
                 );
                 continue;
             }
@@ -1003,7 +1003,7 @@ fn handle_provider_command(
     if !ids.is_empty() && !ids.contains(&model) {
         println!(
             "{}",
-            skin.paint(
+            skin.paint_badge(
                 Role::Error,
                 &format!("note: \"{model}\" is not in {name}'s model list — pick one:", name = picked.name)
             )
@@ -1046,11 +1046,11 @@ fn handle_effort_command(
         match level {
             Some(l) => println!(
                 "{}",
-                skin.paint(Role::Success, &format!("reasoning effort set to {l}."))
+                skin.paint_badge(Role::Success, &format!("reasoning effort set to {l}."))
             ),
             None => println!(
                 "{}",
-                skin.paint(Role::Success, "reasoning effort cleared.")
+                skin.paint_badge(Role::Success, "reasoning effort cleared.")
             ),
         }
     };
@@ -1146,7 +1146,7 @@ fn handle_rename_command(
     let Some(sid) = current_session else {
         println!(
             "{}",
-            skin.paint(Role::Error, "no open session to rename — start one with a message or /session")
+            skin.paint_badge(Role::Error, "no open session to rename — start one with a message or /session")
         );
         return;
     };
@@ -1161,7 +1161,7 @@ fn handle_rename_command(
         title = asked.trim().to_string();
     }
     if title.is_empty() {
-        println!("{}", skin.paint(Role::Error, "a name needs at least one character"));
+        println!("{}", skin.paint_badge(Role::Error, "a name needs at least one character"));
         return;
     }
     // Same cap as auto-titles so picker rows never blow their layout budget.
@@ -1169,9 +1169,9 @@ fn handle_rename_command(
     match sessions.set_title(sid, &title) {
         Ok(()) => println!(
             "{}",
-            skin.paint(Role::Success, &format!("renamed to \"{title}\""))
+            skin.paint_badge(Role::Success, &format!("renamed to \"{title}\""))
         ),
-        Err(e) => println!("{}", skin.paint(Role::Error, &format!("rename failed: {e}"))),
+        Err(e) => println!("{}", skin.paint_badge(Role::Error, &format!("rename failed: {e}"))),
     }
 }
 

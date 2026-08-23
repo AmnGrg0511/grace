@@ -140,6 +140,27 @@ impl Skin {
         // `anstyle::Reset` is the actual `\x1b[0m` sequence.
         format!("{}{}{}", style.render(), text, anstyle::Reset.render())
     }
+
+    /// Render a standalone one-line message as a padded, glyph-led chip:
+    /// ` ␣{icon} {text} ␣ ` over the role's background tint, so a
+    /// confirmation / warning / note reads as a labelled badge. Only the
+    /// highlighted roles (hint, success, error) have a glyph; any other role
+    /// falls through to a plain [`Self::paint`]. Kept separate from `paint`
+    /// on purpose — `paint` also styles the dimmed sublabels in dense
+    /// pickers, where an icon + padding per row would clutter the list.
+    pub fn paint_badge(&self, role: Role, text: &str) -> String {
+        let icon = match role {
+            Role::Hint => "ℹ",
+            Role::Success => "✓",
+            Role::Error => "✗",
+            _ => return self.paint(role, text),
+        };
+        if no_color() {
+            return format!("{icon} {text}");
+        }
+        let style = self.style(role);
+        format!("{} {icon} {text} {}", style.render(), anstyle::Reset.render())
+    }
 }
 
 /// Color roles used throughout the CLI.
