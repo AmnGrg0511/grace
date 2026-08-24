@@ -148,16 +148,18 @@ fn friendly_endpoint_name(url: &str) -> String {
 }
 
 /// Fetch the target endpoint's own model list (best-effort; a slow or
-/// keyless endpoint simply yields the static list).
-fn fetched_models(base_url: &str, key_env: &str) -> Vec<crate::transport::ModelInfo> {
+/// keyless endpoint simply yields the static list). `api_key` is the resolved
+/// key *value* to authenticate with (empty for none) — not an env-var name —
+/// so a key that was just prompted and saved to ~/.grace/.env in this session
+/// (not yet in the process env) still authenticates.
+fn fetched_models(base_url: &str, api_key: &str) -> Vec<crate::transport::ModelInfo> {
     if base_url.is_empty() {
         return Vec::new();
     }
     if base_url == crate::transport::copilot::BASE_URL {
         return Vec::new(); // copilot enumerates via its own session flow
     }
-    let key = std::env::var(key_env).unwrap_or_default();
-    let transport = crate::transport::http::HttpTransport::new(base_url, key);
+    let transport = crate::transport::http::HttpTransport::new(base_url, api_key);
     crate::transport::ProviderTransport::list_models(&transport).unwrap_or_default()
 }
 
@@ -209,19 +211,24 @@ pub(crate) fn handle_model_command(
         }
     };
 
-    apply_model_switch(transport, target, reader, cached_context_window);
+    let _ = apply_model_switch(transport, target, reader, cached_context_window);
 }
 
 /// Execute a resolved switch: key handling (env/OAuth/prompt), endpoint
 /// re-point, model swap, context-window re-resolution + change notice, and
 /// persistence (config.toml endpoint upsert + .env key upsert).
+///
+/// Returns the resolved API key (non-Copilot endpoints only) when the endpoint
+/// was re-pointed, so a caller can validate against the live model list with
+/// the *same* key that was just saved — including a key just prompted this
+/// session, which is not yet in the process env.
 #[allow(clippy::too_many_arguments)]
 fn apply_model_switch(
     transport: &(dyn crate::transport::ProviderTransport + '_),
     target: ModelCandidate,
     reader: &mut LineReader,
     cached_context_window: &mut Option<u32>,
-) {
+) -> Option<String> {
     let is_copilot_target = target.base_url == crate::transport::copilot::BASE_URL;
     let same_endpoint = transport
         .current_base_url()
@@ -242,9 +249,10 @@ fn apply_model_switch(
             transport.name(),
             name = target.name
         );
-        return;
+        return None;
     }
 
+    let mut resolved_key: Option<String> = None;
     if !same_endpoint {
         let key = if is_copilot_target {
             // Copilot uses the OAuth device flow, not a typed API key —
@@ -287,7 +295,7 @@ fn apply_model_switch(
             if !is_copilot_target {
                 println!("no key provided — staying on the current endpoint.");
             }
-            return;
+            return None;
         };
         transport.set_endpoint(&target.base_url, &key);
         if !is_copilot_target {
@@ -299,6 +307,9 @@ fn apply_model_switch(
                     crate::ui::cli::env_file_path().display()
                 );
             }
+            // Hand the just-resolved key back so a caller (e.g. /provider's
+            // validation) authenticates with the same key that was saved.
+            resolved_key = Some(key);
         }
     }
 
@@ -322,9 +333,10 @@ fn apply_model_switch(
     commit_model_choice(&mut settings, &target, resolved);
     if settings.save().is_err() {
         eprintln!("[grace] warning: could not save ~/.grace/config.toml");
-        return;
+        return resolved_key;
     }
     println!("model switched to \"{}\" (saved to config).", target.model);
+    resolved_key
 }
 
 /// Write the chosen model/endpoint/window into settings (the endpoint list
@@ -379,7 +391,11 @@ fn pick_model_interactive(
     }
     let name = friendly_endpoint_name(&base_url);
     let picked = endpoint_pick(candidates, &name, &base_url);
-    let fetched = fetched_models(&picked.base_url, &picked.key_env);
+    // The key value (resolved from the process env, which startup loaded from
+    // ~/.grace/.env), not the env-var name — fetched_models authenticates with
+    // the value directly.
+    let key = std::env::var(&picked.key_env).unwrap_or_default();
+    let fetched = fetched_models(&picked.base_url, &key);
     // The endpoint is unchanged, so the active model is always the anchor
     // that should be marked in the list.
     let (model, ctx) = pick_model_for_endpoint(
@@ -571,12 +587,18 @@ pub(crate) fn handle_provider_command(
         key_env: picked.key_env.clone(),
         context_window: None,
     };
-    apply_model_switch(transport, target, reader, cached_context_window);
+    // Returns the key apply_model_switch resolved (possibly just prompted and
+    // saved to .env this session) — the same key to validate against below.
+    let resolved_key = apply_model_switch(transport, target, reader, cached_context_window);
 
-    // Best-effort validation against the endpoint's own list (env-var key
-    // only — no prompting here): an unknown model id would otherwise surface
-    // as a confusing provider 404 mid-conversation.
-    let key = std::env::var(&picked.key_env).ok().filter(|k| !k.is_empty());
+    // Best-effort validation against the endpoint's own list (no prompting
+    // here): an unknown model id would otherwise surface as a confusing
+    // provider 404 mid-conversation. Prefers the just-resolved key, falling
+    // back to the process env, so a freshly-saved key still authenticates.
+    let key = resolved_key
+        .clone()
+        .or_else(|| std::env::var(&picked.key_env).ok())
+        .filter(|k| !k.is_empty());
     let fetched = fetched_models(&picked.base_url, key.as_deref().unwrap_or(""));
     let ids: Vec<String> = fetched.iter().map(|m| m.id.clone()).collect();
     if !ids.is_empty() && !ids.contains(&model) {
@@ -592,14 +614,18 @@ pub(crate) fn handle_provider_command(
             .filter(|c| c.name == picked.name)
             .map(|c| (c.model.clone(), c.context_window))
             .collect();
-        if let Some((m, ctx)) =
-            pick_model_for_endpoint(fetched, &known, reader, skin, None)
-        {
-            transport.set_model(&m);
-            if let Some(ctx) = ctx {
-                *cached_context_window = Some(ctx);
-            }
-            println!("model switched to \"{m}\".");
+        if let Some((m, ctx)) = pick_model_for_endpoint(fetched, &known, reader, skin, None) {
+            // Re-route through apply_model_switch so the re-picked model is
+            // persisted to config (same endpoint, so no re-keying) instead of
+            // only landing in the in-memory transport and reverting on restart.
+            let retarget = ModelCandidate {
+                name: picked.name.clone(),
+                model: m,
+                base_url: picked.base_url.clone(),
+                key_env: picked.key_env.clone(),
+                context_window: ctx,
+            };
+            let _ = apply_model_switch(transport, retarget, reader, cached_context_window);
         }
     }
 }
