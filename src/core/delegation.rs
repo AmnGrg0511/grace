@@ -35,6 +35,7 @@ use crate::message::Message;
 use crate::tools::ToolRegistry;
 use crate::transport::ProviderTransport;
 use crate::util::{AgentError, Result};
+use std::sync::atomic::AtomicBool;
 
 /// Default iteration budget for a sub-agent when the caller does not say.
 ///
@@ -188,6 +189,7 @@ pub struct Delegation<'a> {
     transport: &'a (dyn ProviderTransport + 'a),
     depth: DelegationDepth,
     compression: Option<ContextCompressionConfig>,
+    interrupted: Option<&'a AtomicBool>,
 }
 
 impl<'a> Delegation<'a> {
@@ -197,6 +199,7 @@ impl<'a> Delegation<'a> {
             transport,
             depth: DelegationDepth::ROOT,
             compression: None,
+            interrupted: None,
         }
     }
 
@@ -216,6 +219,16 @@ impl<'a> Delegation<'a> {
         self
     }
 
+    /// Watch the parent's Ctrl-C latch while the sub-agent runs, so a Ctrl-C
+    /// mid-subtask unwinds the sub-agent (not just a running bash child). A
+    /// sub-agent is a nested turn; leaving it uninterruptible would let it keep
+    /// burning its budget after the user already asked to stop.
+    #[must_use]
+    pub fn with_interrupt(mut self, flag: &'a AtomicBool) -> Self {
+        self.interrupted = Some(flag);
+        self
+    }
+
     /// Run `task` to completion against `tools`.
     ///
     /// Budget exhaustion is folded into a [`SubAgentReport`] with
@@ -228,7 +241,7 @@ impl<'a> Delegation<'a> {
         &self,
         task: &SubTask,
         tools: &ToolRegistry,
-        mut on_event: Option<&mut dyn FnMut(AgentEvent)>,
+        on_event: &mut Option<&mut dyn FnMut(AgentEvent)>,
     ) -> Result<SubAgentReport> {
         if !self.depth.may_delegate() {
             return Err(AgentError::Delegation {
@@ -252,7 +265,7 @@ impl<'a> Delegation<'a> {
             });
         }
 
-        if let Some(cb) = &mut on_event {
+        if let Some(cb) = on_event.as_deref_mut() {
             cb(AgentEvent::DelegationStart {
                 task: &task.task,
                 budget: task.budget,
@@ -268,6 +281,9 @@ impl<'a> Delegation<'a> {
         let mut options = TurnOptions::new();
         if let Some(cfg) = &self.compression {
             options = options.with_compression(cfg);
+        }
+        if let Some(flag) = self.interrupted {
+            options = options.with_interrupt(flag);
         }
 
         let result = run_turn_with_options(
@@ -308,7 +324,7 @@ impl<'a> Delegation<'a> {
             }
         };
 
-        if let Some(cb) = &mut on_event {
+        if let Some(cb) = on_event.as_deref_mut() {
             cb(AgentEvent::DelegationEnd {
                 task: &task.task,
                 iterations: report.iterations,
@@ -414,16 +430,39 @@ mod tests {
         reg
     }
 
+    /// Run a sub-task with no event sink — most tests don't assert on events.
+    fn run_silent<'a>(
+        d: &Delegation<'a>,
+        task: &SubTask,
+        tools: &ToolRegistry,
+    ) -> Result<SubAgentReport> {
+        let mut sink: Option<&mut dyn FnMut(AgentEvent)> = None;
+        d.run(task, tools, &mut sink)
+    }
+
     #[test]
     fn a_sub_agent_returns_its_final_answer() {
         let transport = OneShot("the subtask is complete: 42");
         let d = Delegation::new(&transport);
-        let report = d
-            .run(&SubTask::new("compute the answer"), &ToolRegistry::new(), None)
+        let report = run_silent(&d, &SubTask::new("compute the answer"), &ToolRegistry::new())
             .unwrap();
         assert_eq!(report.answer, "the subtask is complete: 42");
         assert!(report.completed);
         assert_eq!(report.iterations, 1);
+    }
+
+    #[test]
+    fn a_latched_interrupt_unwinds_the_sub_agent_instead_of_letting_it_run() {
+        // A Ctrl-C latched before the sub-agent starts must stop it, not let
+        // it burn its whole budget while the parent already unwound.
+        let transport = OneShot("should never be returned");
+        let flag = std::sync::atomic::AtomicBool::new(true);
+        let d = Delegation::new(&transport).with_interrupt(&flag);
+        let err = run_silent(&d, &SubTask::new("do work"), &ToolRegistry::new()).unwrap_err();
+        assert!(
+            matches!(err, AgentError::Delegation { .. }),
+            "an interrupted sub-agent must surface as a delegation error, got: {err}"
+        );
     }
 
     #[test]
@@ -448,13 +487,12 @@ mod tests {
         // A truncated sub-answer is usually still useful; erroring would
         // discard work the parent already paid for.
         let d = Delegation::new(&NeverStops);
-        let report = d
-            .run(
-                &SubTask::new("loop forever").with_budget(3),
-                &builtin_registry(),
-                None,
-            )
-            .unwrap();
+        let report = run_silent(
+            &d,
+            &SubTask::new("loop forever").with_budget(3),
+            &builtin_registry(),
+        )
+        .unwrap();
         assert!(!report.completed);
         assert_eq!(report.budget, 3);
         assert!(report.to_tool_result().contains("incomplete"));
@@ -466,13 +504,12 @@ mod tests {
         // The core reason delegation has its own budget: a runaway subtask
         // must not consume the parent's remaining rounds.
         let d = Delegation::new(&NeverStops);
-        let report = d
-            .run(
-                &SubTask::new("runaway").with_budget(2),
-                &builtin_registry(),
-                None,
-            )
-            .unwrap();
+        let report = run_silent(
+            &d,
+            &SubTask::new("runaway").with_budget(2),
+            &builtin_registry(),
+        )
+        .unwrap();
         assert_eq!(report.iterations, 2, "spent exactly its own budget");
     }
 
@@ -484,8 +521,7 @@ mod tests {
             seen: RefCell::new(Vec::new()),
         };
         let d = Delegation::new(&transport);
-        d.run(&SubTask::new("summarize"), &ToolRegistry::new(), None)
-            .unwrap();
+        run_silent(&d, &SubTask::new("summarize"), &ToolRegistry::new()).unwrap();
         let seen = transport.seen.borrow();
         let first = &seen[0];
         assert_eq!(first.len(), 2, "system + the task, nothing else");
@@ -498,10 +534,10 @@ mod tests {
             seen: RefCell::new(Vec::new()),
         };
         let d = Delegation::new(&transport);
-        d.run(
+        run_silent(
+            &d,
             &SubTask::new("analyze").with_context("the build uses cargo"),
             &ToolRegistry::new(),
-            None,
         )
         .unwrap();
         let seen = transport.seen.borrow();
@@ -521,13 +557,12 @@ mod tests {
         // produces a baffling failure several iterations later.
         let transport = OneShot("ok");
         let d = Delegation::new(&transport);
-        let err = d
-            .run(
-                &SubTask::new("x").with_tools(vec!["teleport".into()]),
-                &builtin_registry(),
-                None,
-            )
-            .unwrap_err();
+        let err = run_silent(
+            &d,
+            &SubTask::new("x").with_tools(vec!["teleport".into()]),
+            &builtin_registry(),
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("teleport"), "got: {msg}");
         assert!(msg.contains("Available:"), "got: {msg}");
@@ -537,13 +572,12 @@ mod tests {
     fn requesting_available_tools_succeeds() {
         let transport = OneShot("ok");
         let d = Delegation::new(&transport);
-        let report = d
-            .run(
-                &SubTask::new("x").with_tools(vec!["read".into()]),
-                &builtin_registry(),
-                None,
-            )
-            .unwrap();
+        let report = run_silent(
+            &d,
+            &SubTask::new("x").with_tools(vec!["read".into()]),
+            &builtin_registry(),
+        )
+        .unwrap();
         assert!(report.completed);
     }
 
@@ -562,9 +596,7 @@ mod tests {
         // A sub-agent that can delegate is an unbounded recursion generator.
         let transport = OneShot("ok");
         let d = Delegation::new(&transport).at_depth(DelegationDepth(MAX_DELEGATION_DEPTH));
-        let err = d
-            .run(&SubTask::new("recurse"), &ToolRegistry::new(), None)
-            .unwrap_err();
+        let err = run_silent(&d, &SubTask::new("recurse"), &ToolRegistry::new()).unwrap_err();
         assert!(err.to_string().contains("maximum delegation depth"));
     }
 
@@ -585,9 +617,7 @@ mod tests {
             }
         }
         let d = Delegation::new(&Broken);
-        let err = d
-            .run(&SubTask::new("audit deps"), &ToolRegistry::new(), None)
-            .unwrap_err();
+        let err = run_silent(&d, &SubTask::new("audit deps"), &ToolRegistry::new()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("audit deps"), "failure must name its branch: {msg}");
         assert!(msg.contains("connection refused"));
@@ -611,10 +641,11 @@ mod tests {
             }
             _ => {}
         };
+        let mut sink_opt: Option<&mut dyn FnMut(AgentEvent)> = Some(&mut sink);
         d.run(
             &SubTask::new("x").with_budget(5),
             &ToolRegistry::new(),
-            Some(&mut sink),
+            &mut sink_opt,
         )
         .unwrap();
         assert!(started.get() && ended.get());

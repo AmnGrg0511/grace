@@ -8,10 +8,12 @@
 //! a test with no tools at all.
 
 use super::r#trait::Tool;
+use crate::core::lifecycle::AgentEvent;
 use crate::transport::ToolSpec;
 use crate::util::{AgentError, Result};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 
 /// Tools that read-only mode hides (from `specs`/`names`) and refuses (in
 /// `execute`) when on. `write`/`edit` mutate files, `bash` can do anything,
@@ -136,8 +138,24 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Parse `arguments` (a JSON object string) and run the named tool.
+    /// Parse `arguments` (a JSON object string) and run the named tool with no
+    /// per-turn context. For callers outside a turn (tests, setup); the agent
+    /// loop uses [`execute_with`] to hand the tool its events + Ctrl-C latch.
     pub fn execute(&self, name: &str, arguments: &str) -> Result<String> {
+        let mut on_event: Option<&mut dyn FnMut(AgentEvent)> = None;
+        self.execute_with(name, arguments, &mut on_event, None)
+    }
+
+    /// Parse `arguments` and run the named tool, handing it the caller's event
+    /// sink + Ctrl-C latch via [`Tool::run_with`] so a nested turn (delegate)
+    /// can surface progress and unwind.
+    pub fn execute_with<'o, 's>(
+        &self,
+        name: &str,
+        arguments: &str,
+        on_event: &'o mut Option<&'s mut dyn FnMut(AgentEvent)>,
+        interrupted: Option<&AtomicBool>,
+    ) -> Result<String> {
         let tool = self
             .get(name)
             .ok_or_else(|| AgentError::Tool(format!("unknown tool '{name}'")))?;
@@ -159,7 +177,7 @@ impl ToolRegistry {
             serde_json::from_str(trimmed)
                 .map_err(|e| AgentError::Tool(format!("bad arguments json: {e}")))?
         };
-        tool.run(&parsed)
+        tool.run_with(&parsed, on_event, interrupted)
     }
 }
 

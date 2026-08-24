@@ -12,12 +12,14 @@
 use crate::core::delegation::{
     Delegation, DelegationDepth, SubTask, DEFAULT_DELEGATION_BUDGET, MAX_DELEGATION_BUDGET,
 };
+use crate::core::lifecycle::AgentEvent;
 use crate::tools::r#trait::{arg_str, str_prop, Tool};
 use crate::tools::ToolRegistry;
 use crate::transport::ProviderTransport;
 use crate::util::Result;
 use serde_json::{json, Value};
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
 
 /// Builds the tool registry a sub-agent runs against.
 ///
@@ -136,6 +138,16 @@ impl Tool for DelegateTool {
     }
 
     fn run(&self, args: &Value) -> Result<String> {
+        let mut on_event: Option<&mut dyn FnMut(AgentEvent)> = None;
+        self.run_with(args, &mut on_event, None)
+    }
+
+    fn run_with<'o, 's>(
+        &self,
+        args: &Value,
+        on_event: &'o mut Option<&'s mut dyn FnMut(AgentEvent)>,
+        interrupted: Option<&AtomicBool>,
+    ) -> Result<String> {
         let task = self.parse_task(args)?;
         let child_depth = self.depth.child();
         let sub_tools = (self.make_registry)(child_depth);
@@ -144,8 +156,14 @@ impl Tool for DelegateTool {
         if let Some(cfg) = &self.compression {
             delegation = delegation.with_compression(cfg.clone());
         }
+        // A sub-agent is a nested turn: hand it the parent's Ctrl-C latch so it
+        // unwinds too, and forward the parent's event sink so its progress
+        // surfaces instead of the delegate call looking stuck.
+        if let Some(flag) = interrupted {
+            delegation = delegation.with_interrupt(flag);
+        }
 
-        let report = delegation.run(&task, &sub_tools, None)?;
+        let report = delegation.run(&task, &sub_tools, on_event)?;
         Ok(report.to_tool_result())
     }
 }

@@ -1,7 +1,9 @@
 //! The [`Tool`] trait — the contract every capability implements.
 
+use crate::core::lifecycle::AgentEvent;
 use crate::util::Result;
 use serde_json::Value;
+use std::sync::atomic::AtomicBool;
 
 /// A callable capability exposed to the model.
 ///
@@ -12,9 +14,9 @@ pub trait Tool {
     /// Stable name the model must emit to invoke this tool.
     fn name(&self) -> &str;
 
-    /// Human-readable description (sent to the model in the tool spec). This
-    /// is prompt text, not documentation — it is the only thing telling the
-    /// model *when* to reach for this tool.
+    /// Human-readable description (sent to the model in the tool spec). This is
+    /// prompt text, not documentation — it is the only thing telling the model
+    /// *when* to reach for this tool.
     fn description(&self) -> &str;
 
     /// JSON-schema object describing the arguments.
@@ -23,6 +25,24 @@ pub trait Tool {
     /// Execute the tool with already-parsed arguments. The returned string is
     /// fed back to the model as the tool result.
     fn run(&self, args: &Value) -> Result<String>;
+
+    /// Execute with the caller's per-turn event sink and Ctrl-C latch.
+    ///
+    /// Defaults to ignoring both and calling [`Tool::run`], so ordinary tools
+    /// are unaffected. Only a tool that runs *nested* work — `delegate` runs a
+    /// whole sub-agent — overrides it, to forward the sub-agent's events to the
+    /// same sink the top-level turn uses and to honor a Ctrl-C latched
+    /// mid-subtask. The sink is a `&mut Option<…>` (not the inner `&mut`) so it
+    /// can be re-borrowed for just this call, mirroring how the turn hands its
+    /// sink to [`crate::core`] elsewhere.
+    fn run_with<'o, 's>(
+        &self,
+        args: &Value,
+        _on_event: &'o mut Option<&'s mut dyn FnMut(AgentEvent)>,
+        _interrupted: Option<&AtomicBool>,
+    ) -> Result<String> {
+        self.run(args)
+    }
 }
 
 /// Pull a required string argument out of a tool's JSON arguments, with an

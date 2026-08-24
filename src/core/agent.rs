@@ -240,7 +240,14 @@ pub fn run_turn_with_options(
                     let started = std::time::Instant::now();
                     // A failing tool is data for the model, not a fatal turn
                     // error — it gets the message and can correct course.
-                    let result = match tools.execute(call.name(), call.arguments()) {
+                    // Hand the tool the turn's event sink + Ctrl-C latch so a
+                    // nested turn (delegate) can surface progress and unwind.
+                    let result = match tools.execute_with(
+                        call.name(),
+                        call.arguments(),
+                        &mut options.on_event,
+                        options.interrupted,
+                    ) {
                         Ok(out) => out,
                         Err(e) => {
                             // `AgentError::Tool`'s Display already carries the

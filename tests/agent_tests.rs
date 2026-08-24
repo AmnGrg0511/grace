@@ -8,7 +8,7 @@
 
 use grace::core::{
     run_turn, run_turn_with_options, AgentEvent, ContextCompressionConfig, Delegation,
-    DelegationDepth, SubTask, TurnOptions, MAX_DELEGATION_DEPTH,
+    DelegationDepth, SubAgentReport, SubTask, TurnOptions, MAX_DELEGATION_DEPTH,
 };
 use grace::message::{Message, Role, ToolCall};
 use grace::tools::{register_builtins, ToolRegistry};
@@ -373,12 +373,21 @@ fn a_compression_event_is_emitted_so_the_user_learns_history_was_dropped() {
 
 // ---- delegation -------------------------------------------------------------
 
+/// Run a sub-task with no event sink — most tests don't assert on events.
+fn run_silent<'a>(
+    d: &Delegation<'a>,
+    task: &SubTask,
+    tools: &ToolRegistry,
+) -> Result<SubAgentReport> {
+    let mut sink: Option<&mut dyn FnMut(AgentEvent)> = None;
+    d.run(task, tools, &mut sink)
+}
+
 #[test]
 fn a_sub_agent_runs_to_completion_and_reports_its_answer() {
     let transport = ScriptedTransport::new(vec![answer("the subtask found 3 matches")]);
-    let report = Delegation::new(&transport)
-        .run(&SubTask::new("count matches"), &ToolRegistry::new(), None)
-        .unwrap();
+    let d = Delegation::new(&transport);
+    let report = run_silent(&d, &SubTask::new("count matches"), &ToolRegistry::new()).unwrap();
     assert!(report.completed);
     assert_eq!(report.answer, "the subtask found 3 matches");
     assert_eq!(report.to_tool_result(), "the subtask found 3 matches");
@@ -390,13 +399,9 @@ fn a_sub_agent_can_use_tools_within_its_budget() {
         call_tool("c1", "bash", r#"{"command":"echo delegated"}"#),
         answer("the sub-agent ran the command"),
     ]);
-    let report = Delegation::new(&transport)
-        .run(
-            &SubTask::new("run echo").with_budget(5),
-            &builtin_registry(),
-            None,
-        )
-        .unwrap();
+    let d = Delegation::new(&transport);
+    let report =
+        run_silent(&d, &SubTask::new("run echo").with_budget(5), &builtin_registry()).unwrap();
     assert!(report.completed);
     assert_eq!(report.iterations, 2);
 }
@@ -410,13 +415,9 @@ fn a_runaway_sub_agent_spends_only_its_own_budget() {
         "bash",
         r#"{"command":"echo spin"}"#,
     )]);
-    let report = Delegation::new(&transport)
-        .run(
-            &SubTask::new("spin forever").with_budget(4),
-            &builtin_registry(),
-            None,
-        )
-        .unwrap();
+    let d = Delegation::new(&transport);
+    let report =
+        run_silent(&d, &SubTask::new("spin forever").with_budget(4), &builtin_registry()).unwrap();
 
     assert!(!report.completed, "should report truncation, not success");
     assert_eq!(report.iterations, 4);
@@ -439,20 +440,10 @@ fn the_parent_keeps_its_full_budget_after_a_sub_agent_exhausts_its_own() {
     )]);
     let delegation = Delegation::new(&transport);
 
-    let first = delegation
-        .run(
-            &SubTask::new("a").with_budget(2),
-            &builtin_registry(),
-            None,
-        )
-        .unwrap();
-    let second = delegation
-        .run(
-            &SubTask::new("b").with_budget(2),
-            &builtin_registry(),
-            None,
-        )
-        .unwrap();
+    let first =
+        run_silent(&delegation, &SubTask::new("a").with_budget(2), &builtin_registry()).unwrap();
+    let second =
+        run_silent(&delegation, &SubTask::new("b").with_budget(2), &builtin_registry()).unwrap();
 
     assert_eq!(first.iterations, 2);
     assert_eq!(
@@ -485,13 +476,8 @@ fn a_sub_agent_cannot_see_the_parents_conversation() {
     let spy = Spy {
         seen: RefCell::new(Vec::new()),
     };
-    Delegation::new(&spy)
-        .run(
-            &SubTask::new("do the subtask"),
-            &ToolRegistry::new(),
-            None,
-        )
-        .unwrap();
+    let d = Delegation::new(&spy);
+    run_silent(&d, &SubTask::new("do the subtask"), &ToolRegistry::new()).unwrap();
 
     let seen = spy.seen.into_inner();
     assert_eq!(seen.len(), 2, "only a system prompt and the task");
@@ -503,9 +489,7 @@ fn delegation_nesting_terminates_at_the_depth_cap() {
     let transport = ScriptedTransport::new(vec![answer("ok")]);
     let at_cap =
         Delegation::new(&transport).at_depth(DelegationDepth(MAX_DELEGATION_DEPTH));
-    let err = at_cap
-        .run(&SubTask::new("recurse"), &ToolRegistry::new(), None)
-        .unwrap_err();
+    let err = run_silent(&at_cap, &SubTask::new("recurse"), &ToolRegistry::new()).unwrap_err();
     assert!(err.to_string().contains("maximum delegation depth"));
 }
 
@@ -527,12 +511,9 @@ fn delegation_events_report_the_budget_and_what_was_actually_spent() {
         }
         _ => {}
     };
-    Delegation::new(&transport)
-        .run(
-            &SubTask::new("subtask").with_budget(25),
-            &builtin_registry(),
-            Some(&mut sink),
-        )
+    let d = Delegation::new(&transport);
+    let mut sink_opt: Option<&mut dyn FnMut(AgentEvent)> = Some(&mut sink);
+    d.run(&SubTask::new("subtask").with_budget(25), &builtin_registry(), &mut sink_opt)
         .unwrap();
 
     let recorded = recorded.into_inner();
