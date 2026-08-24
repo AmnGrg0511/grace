@@ -361,6 +361,7 @@ impl ProviderTransport for HttpTransport {
             &model,
             messages,
             tools,
+            self.current_reasoning().as_deref(),
             interrupted,
             on_fragment,
         )

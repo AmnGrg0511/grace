@@ -67,11 +67,12 @@ pub fn tools_to_json(tools: &[ToolSpec]) -> Value {
     serde_json::to_value(items).unwrap_or(Value::Array(vec![]))
 }
 
-/// Build the shared OpenAI `/chat/completions` request body for a non-streaming
-/// call. `temperature` is pinned to 0 for determinism; `tools` (with
-/// `tool_choice: "auto"`) are included only when non-empty, and the reasoning
-/// effort only when `Some` — matching what both providers send, so a future
-/// fix to one cannot silently drift from the other.
+/// Build the OpenAI `/chat/completions` request body base — the fields shared
+/// by the streaming and non-streaming paths. `temperature` is pinned to 0 for
+/// determinism; `tools` (with `tool_choice: "auto"`) are included only when
+/// non-empty, and the reasoning effort only when `Some`. Every request is built
+/// from here (streaming via [`stream_request_body`]), which is what keeps the
+/// two paths from silently drifting apart.
 pub fn chat_request_body(
     model: &str,
     messages: &[Message],
@@ -94,6 +95,23 @@ pub fn chat_request_body(
     if let Some(effort) = reasoning {
         body["reasoning_effort"] = serde_json::json!(effort);
     }
+    body
+}
+
+/// Build the streaming `/chat/completions` body: the shared base from
+/// [`chat_request_body`] plus `"stream": true` and the usage frame request.
+/// Layering on the base (rather than re-declaring the fields) is what guarantees
+/// the streaming path sends the same `temperature`/`tool_choice`/
+/// `reasoning_effort` as the non-streaming path.
+pub fn stream_request_body(
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolSpec],
+    reasoning: Option<&str>,
+) -> Value {
+    let mut body = chat_request_body(model, messages, tools, reasoning);
+    body["stream"] = Value::Bool(true);
+    body["stream_options"] = serde_json::json!({ "include_usage": true });
     body
 }
 
@@ -172,6 +190,32 @@ mod tests {
     #[test]
     fn empty_tool_list_is_an_empty_array_not_null() {
         assert_eq!(tools_to_json(&[]), json!([]));
+    }
+
+    #[test]
+    fn streaming_body_carries_the_same_base_fields_as_non_streaming() {
+        let specs = vec![ToolSpec {
+            name: "bash".into(),
+            description: "runs".into(),
+            parameters: json!({"type": "object"}),
+        }];
+        let stream = stream_request_body("m", &[], &specs, Some("high"));
+        // The three fields a past bug dropped from the streaming path.
+        assert_eq!(stream["temperature"], 0.0);
+        assert_eq!(stream["tool_choice"], "auto");
+        assert_eq!(stream["reasoning_effort"], "high");
+        // And the streaming-only bits.
+        assert_eq!(stream["stream"], true);
+        assert_eq!(stream["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn streaming_body_omits_optional_fields_when_absent() {
+        let stream = stream_request_body("m", &[], &[], None);
+        assert!(stream.get("tools").is_none());
+        assert!(stream.get("tool_choice").is_none());
+        assert!(stream.get("reasoning_effort").is_none());
+        assert_eq!(stream["stream"], true);
     }
 
     #[test]

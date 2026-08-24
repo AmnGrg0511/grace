@@ -14,7 +14,7 @@
 
 use crate::message::{Message, ToolCall};
 use crate::transport::r#trait::{FinishReason, ModelResponse, TokenUsage, ToolSpec};
-use crate::transport::wire::{parse_usage, tools_to_json};
+use crate::transport::wire::{parse_usage, stream_request_body};
 use crate::util::{AgentError, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -295,29 +295,23 @@ impl Read for InterruptibleRead<'_> {
 /// `interrupted` is polled while the socket read is silent (see
 /// [`InterruptibleRead`]); when set, the turn aborts with
 /// `AgentError::Interrupted` instead of waiting for the next token.
+#[allow(clippy::too_many_arguments)]
 pub fn stream_complete(
     base_url: &str,
     api_key: &str,
     model: &str,
     messages: &[Message],
     tools: &[ToolSpec],
+    reasoning: Option<&str>,
     interrupted: Option<&AtomicBool>,
     on_fragment: impl FnMut(&str) -> Result<()>,
 ) -> Result<ModelResponse> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let msgs_json = serde_json::to_value(messages).unwrap_or(Value::Array(vec![]));
-    // `include_usage` asks OpenAI (and conforming servers) to emit a final
-    // usage frame. Providers that always stream usage ignore the flag; the
-    // parse side is tolerant either way.
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": msgs_json,
-        "stream": true,
-        "stream_options": { "include_usage": true },
-    });
-    if !tools.is_empty() {
-        body["tools"] = tools_to_json(tools);
-    }
+    // Built from the shared base so the streaming path sends the same
+    // `temperature`/`tool_choice`/`reasoning_effort` as the non-streaming path
+    // (a past bug dropped all three here); `stream_request_body` layers on the
+    // `stream` flag and the `include_usage` request.
+    let body = stream_request_body(model, messages, tools, reasoning);
 
     // Connect timeout only — a global `.timeout()` would also cap the body
     // read and kill legitimately long generations mid-stream.
