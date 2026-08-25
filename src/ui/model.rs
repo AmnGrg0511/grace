@@ -229,7 +229,7 @@ fn apply_model_switch(
     reader: &mut LineReader,
     cached_context_window: &mut Option<u32>,
 ) -> Option<String> {
-    let is_copilot_target = target.base_url == crate::transport::copilot::BASE_URL;
+    let is_copilot_target = crate::transport::copilot::is_copilot_endpoint(&target.base_url);
     let same_endpoint = transport
         .current_base_url()
         .as_deref()

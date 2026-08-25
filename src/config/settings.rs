@@ -126,7 +126,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     },
     ProviderPreset {
         label: "GitHub Copilot",
-        base_url: "https://api.githubcopilot.com",
+        base_url: crate::transport::copilot::BASE_URL,
         env_var: "GITHUB_COPILOT_TOKEN",
         models: &[
             KnownModel {

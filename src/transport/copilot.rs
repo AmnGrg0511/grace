@@ -1,10 +1,14 @@
-//! GitHub Copilot OAuth device flow — mints a bearer token the same way a
-//! normal provider's API key would be typed in, except this one is fetched
-//! via browser authorization instead of pasted. Once minted, Copilot is
-//! wired up as a plain [`crate::config::TransportConfig::Http`] pointed at
-//! `https://api.githubcopilot.com` — there is no separate Copilot transport
-//! or CLI flag; the *only* difference from any other provider is how this
-//! one function obtains the key.
+//! GitHub Copilot support: OAuth device-flow key minting plus the transport
+//! that keeps its short-lived session token fresh.
+//!
+//! The device flow mints a bearer token the same way a normal provider's
+//! API key would be typed in, except it is fetched via browser
+//! authorization instead of pasted. Once minted, Copilot is wired up as a
+//! plain [`crate::config::TransportConfig::Http`] pointed at
+//! [`BASE_URL`] — no separate CLI flag. The one thing no other provider
+//! needs: the long-lived OAuth token is only good for minting; the
+//! chat/models bearer must be a ~25-minute session token, exchanged and
+//! auto-refreshed by [`CopilotTransport`].
 
 use crate::message::Message;
 use crate::transport::r#trait::{

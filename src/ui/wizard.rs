@@ -84,7 +84,7 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
         .iter()
         .find(|p| p.label == choice)
         .ok_or("unknown provider selection")?;
-    let is_copilot = preset.label == "GitHub Copilot";
+    let is_copilot = crate::transport::copilot::is_copilot_endpoint(preset.base_url);
 
     let base_url = if is_copilot || !preset.base_url.is_empty() {
         preset.base_url.to_string()
