@@ -1,32 +1,17 @@
 //! Context compression.
 //!
-//! # What was wrong before
-//!
-//! The previous implementation had three independent bugs that combined into
-//! "compression appears to work and then the request fails anyway":
-//!
-//! 1. **`content.len() / 4` token estimation.** Byte-length over four is not
-//!    a token count (see [`crate::util::tokens`] for why), and it ignored
-//!    per-message framing and tool-call JSON entirely. Under-counting is the
-//!    dangerous direction: it means we believe we are at 60% when we are at
-//!    95%, so we never compress and the provider rejects the request.
-//! 2. **Hardcoded 128k window.** Every model was budgeted as if it had a
-//!    128k context. An 8k model would blow past its real limit at ~6% of the
-//!    assumed budget, so compression would never once fire before failure.
-//! 3. **The compressed result could still be over target.** The old loop
-//!    broke out of message-collection on the first message that did not fit,
-//!    then — if still over budget — inserted a *summary line saying it had
-//!    compressed*, which added tokens rather than removing any.
-//!
-//! # What this does instead
-//!
 //! Compression is structural, not lossy-by-summarization: keep the system
 //! prompt (identity and durable facts — dropping it changes who the agent
 //! *is* mid-conversation), keep the most recent messages that fit the target
-//! budget, and replace the dropped middle with a single short marker so the
-//! model knows history was elided rather than silently rewritten.
+//! budget, and replace the dropped middle with a single short marker — or,
+//! when a model is available, a one-paragraph summary of it — so the model
+//! knows history was elided rather than silently rewritten.
 //!
-//! Two invariants the old code violated and the tests here pin down:
+//! The window is the transport's real one (falling back to
+//! [`FALLBACK_CONTEXT_WINDOW`]), and token cost comes from
+//! [`crate::util::tokens`] — a segment-aware estimate, not `len() / 4`.
+//!
+//! Two invariants the tests here pin down:
 //!
 //! - **Never split a tool-call pair.** An assistant message with `tool_calls`
 //!   must keep its answering `tool` messages, and a `tool` message must keep
@@ -42,7 +27,7 @@ use crate::util::tokens::{HeuristicCounter, TokenCounter};
 use crate::util::{truncate_utf8, Result};
 
 /// Context compression configuration.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone)]
 pub struct ContextCompressionConfig {
     /// Enable automatic context compression when the trigger is reached.
     pub enabled: bool,
@@ -138,19 +123,16 @@ struct CompressionSplit {
     system_cost: usize,
 }
 
-/// Decides when to compress and does it, against a pluggable token counter.
-pub struct Compressor<C: TokenCounter = HeuristicCounter> {
+/// Decides when to compress and does it, budgeting against the transport's
+/// real context window.
+pub struct Compressor {
     config: ContextCompressionConfig,
-    counter: C,
     context_window: u32,
 }
 
-impl Compressor<HeuristicCounter> {
+impl Compressor {
     /// Build a compressor for `transport`, asking it for the real context
     /// window and falling back only when the provider cannot say.
-    ///
-    /// This is the fix for the hardcoded 128k: the window now comes from the
-    /// model actually in use.
     pub fn for_transport(
         config: &ContextCompressionConfig,
         transport: &(dyn ProviderTransport + '_),
@@ -165,16 +147,13 @@ impl Compressor<HeuristicCounter> {
     pub fn with_window(config: &ContextCompressionConfig, context_window: u32) -> Self {
         Self {
             config: config.normalized(),
-            counter: HeuristicCounter,
             context_window: context_window.max(1_000),
         }
     }
-}
 
-impl<C: TokenCounter> Compressor<C> {
     /// Estimated token cost of a conversation.
-    pub fn estimate(&self, messages: &[Message]) -> usize {
-        self.counter.count_messages(messages)
+    fn estimate(&self, messages: &[Message]) -> usize {
+        HeuristicCounter.count_messages(messages)
     }
 
     /// The window this compressor is budgeting against.
@@ -184,17 +163,17 @@ impl<C: TokenCounter> Compressor<C> {
     }
 
     /// Token count at which compression fires.
-    pub fn trigger_tokens(&self) -> usize {
+    fn trigger_tokens(&self) -> usize {
         (f64::from(self.context_window) * f64::from(self.config.trigger_fraction)) as usize
     }
 
     /// Token count compression aims to land under.
-    pub fn target_tokens(&self) -> usize {
+    fn target_tokens(&self) -> usize {
         (f64::from(self.context_window) * f64::from(self.config.target_fraction)) as usize
     }
 
     /// Whether `messages` currently exceeds the trigger.
-    pub fn should_compress(&self, messages: &[Message]) -> bool {
+    fn should_compress(&self, messages: &[Message]) -> bool {
         self.config.enabled && self.estimate(messages) > self.trigger_tokens()
     }
 
@@ -212,9 +191,8 @@ impl<C: TokenCounter> Compressor<C> {
         let before_len = messages.len();
         let compressed = self.compress(messages);
 
-        // Refuse a pass that did not strictly help. The old implementation
-        // could append an explanatory summary line and hand back something
-        // *larger* than it was given, which then re-triggered forever.
+        // Refuse a pass that did not strictly reduce: handing back something
+        // larger would re-fire the trigger on the very next iteration.
         let after_tokens = self.estimate(&compressed);
         if compressed.len() >= before_len || after_tokens >= before_tokens {
             return None;
@@ -298,7 +276,7 @@ impl<C: TokenCounter> Compressor<C> {
 
     /// Compress `messages` using a model-generated summary for the dropped
     /// portion. Falls back to the plain elision marker on any error.
-    pub fn compress_with_model(
+    fn compress_with_model(
         &self,
         messages: &[Message],
         transport: &(dyn ProviderTransport + '_),
@@ -309,7 +287,7 @@ impl<C: TokenCounter> Compressor<C> {
         let split = self.compute_split(messages);
         let (system, rest) = messages.split_at(split.system_len);
 
-        let marker_cost = self.counter.count_message(&Message::user(ELISION_MARKER));
+        let marker_cost = HeuristicCounter.count_message(&Message::user(ELISION_MARKER));
         let body_budget =
             self.target_tokens().saturating_sub(split.system_cost + marker_cost);
 
@@ -329,23 +307,25 @@ impl<C: TokenCounter> Compressor<C> {
         }
 
         // Summarize the dropped span, then re-cut against the summary's REAL
-        // token cost (the old code reserved the cost of a fixed placeholder
-        // string, so a longer summary silently ate into the tail budget).
-        // If the re-cut drops more than the summary covers, re-summarize the
-        // larger final span — every dropped message must be in the summary,
-        // never neither kept nor summarized. The cut only moves forward
-        // (the budget never grows) and is floored by min_recent_messages, so
-        // this converges; the cap bounds pathological oscillation.
+        // token cost (unknown until it exists). If the re-cut drops more than
+        // the summary covers, re-summarize the larger final span — every
+        // dropped message must be in the summary, never neither kept nor
+        // summarized. The cut only moves forward (the budget never grows) and
+        // is floored by min_recent_messages, so this converges; the cap bounds
+        // pathological oscillation.
         let mut summary = summarize_dropped(&rest[..keep_from], transport).ok();
         for _ in 0..3 {
             let Some(sum) = summary.clone() else {
                 break;
             };
-            let summary_cost = self.counter.count_message(&Message::assistant(format!(
+            let summary_cost = HeuristicCounter.count_message(&Message::assistant(format!(
                 "[conversation summary]\n{sum}"
             )));
-            let final_keep =
-                final_keep_from(rest, body_budget, summary_cost, &self.counter, &self.config);
+            let final_keep = keep_from_within(
+                rest,
+                body_budget.saturating_sub(summary_cost),
+                self.config.min_recent_messages,
+            );
             if final_keep == keep_from {
                 break;
             }
@@ -371,28 +351,17 @@ impl<C: TokenCounter> Compressor<C> {
 
     /// Compute where to cut: returns system length, keep-from index, and costs.
     fn compute_split(&self, messages: &[Message]) -> CompressionSplit {
-        let target = self.target_tokens();
         let (system, rest) = split_system(messages);
-        let system_cost: usize = system.iter().map(|m| self.counter.count_message(m)).sum();
-        let marker_cost = self.counter.count_message(&Message::user(ELISION_MARKER));
-        let body_budget = target.saturating_sub(system_cost + marker_cost);
-
-        let mut keep_from = rest.len();
-        let mut used = 0usize;
-        for (idx, msg) in rest.iter().enumerate().rev() {
-            let cost = self.counter.count_message(msg);
-            let kept_so_far = rest.len() - idx - 1;
-            if used + cost > body_budget && kept_so_far >= self.config.min_recent_messages {
-                break;
-            }
-            used += cost;
-            keep_from = idx;
-        }
-        let keep_from = safe_boundary(rest, keep_from);
+        let system_cost: usize =
+            system.iter().map(|m| HeuristicCounter.count_message(m)).sum();
+        let marker_cost = HeuristicCounter.count_message(&Message::user(ELISION_MARKER));
+        let body_budget = self
+            .target_tokens()
+            .saturating_sub(system_cost + marker_cost);
 
         CompressionSplit {
             system_len: system.len(),
-            keep_from,
+            keep_from: keep_from_within(rest, body_budget, self.config.min_recent_messages),
             system_cost,
         }
     }
@@ -421,23 +390,17 @@ impl<C: TokenCounter> Compressor<C> {
     }
 }
 
-/// Re-derive the cut once the summary's real token cost is known: the kept
-/// tail must fit the body budget alongside the summary message. The same
-/// walk as `compute_split`, with the summary cost deducted up front.
-fn final_keep_from<C: TokenCounter>(
-    rest: &[Message],
-    body_budget: usize,
-    summary_cost: usize,
-    counter: &C,
-    config: &ContextCompressionConfig,
-) -> usize {
-    let available = body_budget.saturating_sub(summary_cost);
+/// The longest tail of `rest` that fits `budget` tokens: walk from the newest
+/// message backwards, keeping until the budget is spent, but always keeping
+/// at least `min_recent_messages` and snapping the cut forward so it never
+/// orphans a `tool` message.
+fn keep_from_within(rest: &[Message], budget: usize, min_recent_messages: usize) -> usize {
     let mut keep_from = rest.len();
     let mut used = 0usize;
     for (idx, msg) in rest.iter().enumerate().rev() {
-        let cost = counter.count_message(msg);
+        let cost = HeuristicCounter.count_message(msg);
         let kept_so_far = rest.len() - idx - 1;
-        if used + cost > available && kept_so_far >= config.min_recent_messages {
+        if used + cost > budget && kept_so_far >= min_recent_messages {
             break;
         }
         used += cost;

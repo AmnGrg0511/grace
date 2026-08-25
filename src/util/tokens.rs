@@ -18,10 +18,9 @@
 //! provider's context limit and the request hard-fails mid-turn, which is the
 //! exact failure compression exists to prevent.
 //!
-//! [`TokenCounter`] is the seam. The default [`HeuristicCounter`] is a
-//! segment-aware BPE approximation with no extra dependency and no model
-//! download; a real `tiktoken` implementation can be dropped in behind the
-//! same trait without touching the compressor.
+//! [`HeuristicCounter`] is a segment-aware BPE approximation with no extra
+//! dependency and no model download; a real `tiktoken` implementation could
+//! be dropped in behind the same [`TokenCounter`] seam.
 
 use crate::message::Message;
 
