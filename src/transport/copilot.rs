@@ -20,6 +20,13 @@ use std::time::Duration;
 /// any other provider's.
 pub const BASE_URL: &str = "https://api.githubcopilot.com";
 
+/// Whether `base_url` points at the Copilot endpoint (a trailing slash does
+/// not change the answer). This is the single definition of "is Copilot" —
+/// every other site that needs to special-case it goes through this.
+pub fn is_copilot_endpoint(base_url: &str) -> bool {
+    base_url.trim_end_matches('/') == BASE_URL
+}
+
 /// The long-lived OAuth device-flow token is NOT the Copilot API bearer —
 /// GitHub requires exchanging it for a short-lived (~25min) session token
 /// via this endpoint on every refresh. Feeding the OAuth token straight to

@@ -126,28 +126,12 @@ impl Config {
                 base_url,
                 api_key,
                 model,
-            } => {
-                // Copilot needs its OAuth token exchanged for a short-lived
-                // session token, auto-refreshed — a plain HttpTransport
-                // silently 404s after ~25 minutes.
-                if base_url.trim_end_matches('/') == crate::transport::copilot::BASE_URL {
-                    let mut t = crate::transport::CopilotTransport::new(api_key.clone(), model.clone());
-                    if let Some(secs) = self.request_timeout_secs {
-                        t = t.with_request_timeout(secs);
-                    }
-                    Ok(Box::new(t))
-                } else {
-                    let mut t = crate::transport::HttpTransport::with_model(
-                        base_url.clone(),
-                        api_key.clone(),
-                        model.clone(),
-                    );
-                    if let Some(secs) = self.request_timeout_secs {
-                        t = t.with_request_timeout(secs);
-                    }
-                    Ok(Box::new(t))
-                }
-            }
+            } => Ok(crate::transport::transport_for(
+                base_url,
+                api_key,
+                model,
+                self.request_timeout_secs,
+            )),
         }
     }
 
