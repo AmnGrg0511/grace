@@ -1,7 +1,7 @@
 //! Configuration — how the agent is wired, and who it is.
 //!
 //! ```text
-//! args.rs      Config / TransportConfig / registry assembly
+//! args.rs      Config / registry assembly
 //! settings.rs  ~/.grace/config.toml, provider presets, model context windows
 //! soul.rs      the persona (DEFAULT_SYSTEM_PROMPT + ~/.grace/soul.md)
 //! env.rs       ~/.grace/.env — the API-key store
@@ -14,7 +14,7 @@ pub mod env;
 pub mod settings;
 pub mod soul;
 
-pub use args::{Config, RegistryOptions, TransportConfig, OPENROUTER_BASE_URL};
+pub use args::{Config, RegistryOptions, OPENROUTER_BASE_URL};
 pub use settings::{context_window_for, KnownModel, ProviderPreset, Settings, PROVIDER_PRESETS};
 pub use soul::{build_system_prompt, load_soul, soul_path, DEFAULT_SYSTEM_PROMPT};
 
@@ -37,7 +37,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.model(), "m");
-        assert!(matches!(cfg.transport, TransportConfig::Http { .. }));
+        assert_eq!(cfg.base_url, "https://x/v1");
 
         let _opts = RegistryOptions::new("/s", "/t");
         let _settings = Settings::default();

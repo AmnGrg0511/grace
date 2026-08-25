@@ -20,28 +20,6 @@ use std::sync::Arc;
 /// OpenRouter's OpenAI-compatible base URL preset.
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-/// How the agent reaches a model.
-#[derive(Debug, Clone)]
-pub enum TransportConfig {
-    /// Real OpenAI-compatible endpoint (any base_url, including OpenRouter's
-    /// and GitHub Copilot's — Copilot is just an `Http` transport whose key
-    /// happens to be minted via OAuth device flow instead of pasted).
-    Http {
-        base_url: String,
-        api_key: String,
-        model: String,
-    },
-}
-
-impl TransportConfig {
-    /// The configured model id.
-    pub fn model(&self) -> &str {
-        match self {
-            TransportConfig::Http { model, .. } => model,
-        }
-    }
-}
-
 /// Which optional tool groups a registry should include.
 ///
 /// Explicit rather than a pile of `Option` parameters, so a caller cannot
@@ -105,7 +83,14 @@ impl RegistryOptions {
 /// Full agent configuration.
 #[derive(Debug)]
 pub struct Config {
-    pub transport: TransportConfig,
+    /// OpenAI-compatible endpoint (any base_url, including OpenRouter's and
+    /// GitHub Copilot's — Copilot is just a plain HTTP transport whose key
+    /// happens to be minted via OAuth device flow instead of pasted).
+    pub base_url: String,
+    /// The bearer token for that endpoint.
+    pub api_key: String,
+    /// The model id to send to the endpoint.
+    pub model: String,
     /// Hard cap on LLM round-trips per turn.
     pub max_iterations: u32,
     /// Optional system prompt prepended to the conversation.
@@ -120,24 +105,18 @@ pub struct Config {
 
 impl Config {
     /// Build the configured transport as a `dyn ProviderTransport`.
-    pub fn build_transport(&self) -> Result<Box<dyn ProviderTransport>> {
-        match &self.transport {
-            TransportConfig::Http {
-                base_url,
-                api_key,
-                model,
-            } => Ok(crate::transport::transport_for(
-                base_url,
-                api_key,
-                model,
-                self.request_timeout_secs,
-            )),
-        }
+    pub fn build_transport(&self) -> Box<dyn ProviderTransport> {
+        crate::transport::transport_for(
+            &self.base_url,
+            &self.api_key,
+            &self.model,
+            self.request_timeout_secs,
+        )
     }
 
     /// The model name.
     pub fn model(&self) -> &str {
-        self.transport.model()
+        &self.model
     }
 
     /// The built-in tool set only. Centralizes "which tools always exist".
@@ -242,11 +221,9 @@ impl Config {
             .unwrap_or_default();
         let model = model.ok_or_else(|| AgentError::Config("missing --model".into()))?;
         Ok(Config {
-            transport: TransportConfig::Http {
-                base_url,
-                api_key,
-                model,
-            },
+            base_url,
+            api_key,
+            model,
             max_iterations: max_iterations.max(1),
             system_prompt,
             context_compression: ContextCompressionConfig::default(),
@@ -363,9 +340,7 @@ mod tests {
             None,
         )
         .unwrap();
-        match &c.transport {
-            TransportConfig::Http { api_key, .. } => assert_eq!(api_key, "secret"),
-        }
+        assert_eq!(c.api_key, "secret");
     }
 
     #[test]
@@ -390,9 +365,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            match &c.transport {
-                TransportConfig::Http { api_key, .. } => assert_eq!(api_key, "copilot-key"),
-            }
+            assert_eq!(c.api_key, "copilot-key");
         });
         for (i, key) in ["OPENAI_API_KEY", "GITHUB_COPILOT_TOKEN"].iter().enumerate() {
             match &saved[i] {
@@ -417,9 +390,7 @@ mod tests {
             None,
         )
         .unwrap();
-        match &c.transport {
-            TransportConfig::Http { api_key, .. } => assert_eq!(api_key, ""),
-        }
+        assert_eq!(c.api_key, "");
     }
 
     #[test]
@@ -427,17 +398,15 @@ mod tests {
         // A plain HttpTransport against Copilot silently 404s once the OAuth
         // token needs refreshing, so this routing matters.
         let c = Config {
-            transport: TransportConfig::Http {
-                base_url: crate::transport::copilot::BASE_URL.to_string(),
-                api_key: "tok".into(),
-                model: "gpt-4o".into(),
-            },
+            base_url: crate::transport::copilot::BASE_URL.to_string(),
+            api_key: "tok".into(),
+            model: "gpt-4o".into(),
             max_iterations: 4,
             system_prompt: None,
             context_compression: ContextCompressionConfig::default(),
             request_timeout_secs: None,
         };
-        assert_eq!(c.build_transport().unwrap().name(), "github-copilot");
+        assert_eq!(c.build_transport().name(), "github-copilot");
     }
 
     #[test]
@@ -454,20 +423,18 @@ mod tests {
         )
         .unwrap();
         c.request_timeout_secs = Some(5);
-        assert_eq!(c.build_transport().unwrap().name(), "openai-http");
+        assert_eq!(c.build_transport().name(), "openai-http");
 
         let c = Config {
-            transport: TransportConfig::Http {
-                base_url: crate::transport::copilot::BASE_URL.to_string(),
-                api_key: "tok".into(),
-                model: "m".into(),
-            },
+            base_url: crate::transport::copilot::BASE_URL.to_string(),
+            api_key: "tok".into(),
+            model: "m".into(),
             max_iterations: 4,
             system_prompt: None,
             context_compression: ContextCompressionConfig::default(),
             request_timeout_secs: Some(5),
         };
-        assert_eq!(c.build_transport().unwrap().name(), "github-copilot");
+        assert_eq!(c.build_transport().name(), "github-copilot");
     }
 
     #[test]
@@ -480,7 +447,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(c.build_transport().unwrap().name(), "openai-http");
+        assert_eq!(c.build_transport().name(), "openai-http");
     }
 
     #[test]

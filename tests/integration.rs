@@ -140,7 +140,7 @@ fn parsed_cli_flags_produce_a_working_config_and_transport() {
 
     assert_eq!(config.model(), "gpt-4o-mini");
     assert_eq!(config.max_iterations, 12);
-    assert_eq!(config.build_transport().unwrap().name(), "openai-http");
+    assert_eq!(config.build_transport().name(), "openai-http");
 }
 
 #[test]
