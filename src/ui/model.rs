@@ -156,11 +156,11 @@ fn fetched_models(base_url: &str, api_key: &str) -> Vec<crate::transport::ModelI
     if base_url.is_empty() {
         return Vec::new();
     }
-    if base_url == crate::transport::copilot::BASE_URL {
-        return Vec::new(); // copilot enumerates via its own session flow
-    }
-    let transport = crate::transport::http::HttpTransport::new(base_url, api_key);
-    crate::transport::ProviderTransport::list_models(&transport).unwrap_or_default()
+    // The factory, not a raw HttpTransport: for the Copilot endpoint a raw
+    // transport would send the long-lived OAuth token as the bearer.
+    crate::transport::transport_for(base_url, api_key, "", None)
+        .list_models()
+        .unwrap_or_default()
 }
 
 /// `/model` — pick an endpoint (no arg) or resolve one (`<name>`), then

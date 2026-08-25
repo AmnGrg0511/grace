@@ -142,7 +142,7 @@ fn poll_token(device_code: &str) -> Result<String> {
 /// shape nests context window/max-output under `capabilities`, unlike the
 /// flat shape most OpenAI-compatible providers use, so this can't share
 /// `HttpTransport::list_models` — kept here since it's Copilot-specific.
-pub fn fetch_models(token: &str) -> Result<Vec<ModelInfo>> {
+fn fetch_models(token: &str) -> Result<Vec<ModelInfo>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()

@@ -1,7 +1,6 @@
 //! Interactive onboarding flow: the first-run provider/model wizard.
 
 use crate::config::settings::PROVIDER_PRESETS;
-use crate::transport::ProviderTransport;
 
 /// Read one line from the terminal with echo suppressed — API keys must not
 /// land on screen or in scrollback. Uses `stty -echo` against `/dev/tty`
@@ -130,14 +129,15 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     // Step 3: ask the provider itself what models it has, rather than
     // trusting only the hard-coded preset list. Falls back to the preset
     // list inside the shared stage-2 picker when the live call fails.
-    let live_models: Vec<crate::transport::ModelInfo> = if is_copilot {
-        crate::transport::copilot::fetch_models(&api_key).unwrap_or_default()
-    } else if !base_url.is_empty() {
-        crate::transport::http::HttpTransport::new(base_url.clone(), api_key.clone())
+    // The factory builds the right transport per endpoint — for Copilot
+    // that means the OAuth token is exchanged for a session token before
+    // the /models call, instead of sending the OAuth token directly.
+    let live_models: Vec<crate::transport::ModelInfo> = if base_url.is_empty() {
+        Vec::new()
+    } else {
+        crate::transport::transport_for(&base_url, &api_key, "", None)
             .list_models()
             .unwrap_or_default()
-    } else {
-        Vec::new()
     };
     if live_models.is_empty() && !preset.models.is_empty() {
         println!("(couldn't reach {}'s /models endpoint — showing known models)", preset.label);
