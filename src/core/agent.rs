@@ -10,13 +10,12 @@
 //! ```
 //!
 //! Everything configurable about a turn lives in [`TurnOptions`] rather than
-//! in a growing positional parameter list — `run_turn_with_events` had reached
-//! seven positional arguments, four of them `Option`, which is exactly the
-//! shape where a caller silently passes the wrong `None`.
+//! in a positional parameter list, so a caller cannot silently pass the wrong
+//! `None`.
 
 use crate::core::context::{Compressor, ContextCompressionConfig};
 use crate::core::lifecycle::{AgentEvent, IterationBudget};
-use crate::message::{Message, Role};
+use crate::message::{Message, Role, ToolCall};
 use crate::tools::ToolRegistry;
 use crate::transport::{FinishReason, ModelResponse, ProviderTransport, ToolSpec};
 use crate::util::{AgentError, Result};
@@ -213,85 +212,95 @@ pub fn run_turn_with_options(
                     });
                 }
                 emit_content(&mut options.on_event, &resp, options.stream);
-                for (i, call) in resp.tool_calls.iter().enumerate() {
-                    if is_interrupted() {
-                        // The assistant message above carries `tool_calls`,
-                        // and providers hard-reject it unless every call is
-                        // answered by a tool message. An interrupt mid-loop
-                        // would leave the remaining calls open, corrupting
-                        // the next request — so close them out with a
-                        // synthesized result before unwinding the turn.
-                        for pending in &resp.tool_calls[i..] {
-                            messages.push(Message::tool(
-                                pending.id.clone(),
-                                pending.name().to_string(),
-                                "[interrupted — no result]",
-                            ));
-                        }
-                        return Err(AgentError::Interrupted);
-                    }
-                    emit(
-                        &mut options.on_event,
-                        AgentEvent::ToolCallStart {
-                            name: call.name(),
-                            arguments: call.arguments(),
-                        },
-                    );
-                    let started = std::time::Instant::now();
-                    // A failing tool is data for the model, not a fatal turn
-                    // error — it gets the message and can correct course.
-                    // Hand the tool the turn's event sink + Ctrl-C latch so a
-                    // nested turn (delegate) can surface progress and unwind.
-                    let result = match tools.execute_with(
-                        call.name(),
-                        call.arguments(),
-                        &mut options.on_event,
-                        options.interrupted,
-                    ) {
-                        Ok(out) => out,
-                        Err(e) => {
-                            // `AgentError::Tool`'s Display already carries the
-                            // "tool error:" prefix — unwrap it, or the model
-                            // and the user (`/verbose`) would read
-                            // "tool error: tool
-                            // error: …".
-                            match e {
-                                AgentError::Tool(msg) => format!("tool error: {msg}"),
-                                other => format!("tool error: {other}"),
-                            }
-                        }
-                    };
-                    if is_interrupted() {
-                        // Ctrl-C latched *while this tool was running* (bash
-                        // kills its child and returns whatever it had). Treat
-                        // the result as void: close out every open call so
-                        // the next request isn't corrupted, then unwind.
-                        for pending in &resp.tool_calls[i..] {
-                            messages.push(Message::tool(
-                                pending.id.clone(),
-                                pending.name().to_string(),
-                                "[interrupted — no result]",
-                            ));
-                        }
-                        return Err(AgentError::Interrupted);
-                    }
-                    let elapsed = started.elapsed();
-                    emit(
-                        &mut options.on_event,
-                        AgentEvent::ToolCallEnd {
-                            name: call.name(),
-                            result: &result,
-                            elapsed,
-                        },
-                    );
-                    messages.push(Message::tool(
-                        call.id.clone(),
-                        call.name().to_string(),
-                        result,
-                    ));
-                }
+                run_tool_calls(
+                    tools,
+                    messages,
+                    &resp.tool_calls,
+                    &mut options.on_event,
+                    options.interrupted,
+                )?;
             }
         }
+    }
+}
+
+/// Execute every tool call in order, appending each result to the transcript.
+/// An interrupt latched before or during a call closes out the unanswered
+/// calls and propagates [`AgentError::Interrupted`].
+fn run_tool_calls(
+    tools: &ToolRegistry,
+    messages: &mut Vec<Message>,
+    tool_calls: &[ToolCall],
+    on_event: &mut Option<&mut dyn FnMut(AgentEvent)>,
+    interrupted: Option<&AtomicBool>,
+) -> Result<()> {
+    let is_interrupted = || interrupted.is_some_and(|f| f.load(Ordering::SeqCst));
+    for (i, call) in tool_calls.iter().enumerate() {
+        if is_interrupted() {
+            // The assistant message above carries `tool_calls`, and providers
+            // hard-reject it unless every call is answered by a tool message.
+            // An interrupt mid-loop would leave the remaining calls open,
+            // corrupting the next request — so close them out with a
+            // synthesized result before unwinding the turn.
+            close_out_pending(messages, &tool_calls[i..]);
+            return Err(AgentError::Interrupted);
+        }
+        emit(
+            on_event,
+            AgentEvent::ToolCallStart {
+                name: call.name(),
+                arguments: call.arguments(),
+            },
+        );
+        let started = std::time::Instant::now();
+        // A failing tool is data for the model, not a fatal turn error — it
+        // gets the message and can correct course. Hand the tool the turn's
+        // event sink + Ctrl-C latch so a nested turn (delegate) can surface
+        // progress and unwind.
+        let result = match tools.execute_with(call.name(), call.arguments(), on_event, interrupted)
+        {
+            Ok(out) => out,
+            // `AgentError::Tool`'s Display already carries the "tool error:"
+            // prefix — unwrap it, or the model and the user (`/verbose`)
+            // would read "tool error: tool error: …".
+            Err(AgentError::Tool(msg)) => format!("tool error: {msg}"),
+            Err(e) => format!("tool error: {e}"),
+        };
+        if is_interrupted() {
+            // Ctrl-C latched *while this tool was running* (bash kills its
+            // child and returns whatever it had). Treat the result as void:
+            // close out every open call so the next request isn't corrupted,
+            // then unwind.
+            close_out_pending(messages, &tool_calls[i..]);
+            return Err(AgentError::Interrupted);
+        }
+        let elapsed = started.elapsed();
+        emit(
+            on_event,
+            AgentEvent::ToolCallEnd {
+                name: call.name(),
+                result: &result,
+                elapsed,
+            },
+        );
+        messages.push(Message::tool(
+            call.id.clone(),
+            call.name().to_string(),
+            result,
+        ));
+    }
+    Ok(())
+}
+
+/// Give every unanswered call a synthesized result so an interrupted turn
+/// leaves a transcript the provider will accept on the next request.
+fn close_out_pending(messages: &mut Vec<Message>, pending: &[ToolCall]) {
+    for call in pending {
+        messages.push(Message::tool(
+            call.id.clone(),
+            call.name().to_string(),
+            "[interrupted — no result]",
+        ));
     }
 }
 
