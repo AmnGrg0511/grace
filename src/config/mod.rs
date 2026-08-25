@@ -4,11 +4,13 @@
 //! args.rs      Config / TransportConfig / registry assembly
 //! settings.rs  ~/.grace/config.toml, provider presets, model context windows
 //! soul.rs      the persona (DEFAULT_SYSTEM_PROMPT + ~/.grace/soul.md)
+//! env.rs       ~/.grace/.env — the API-key store
 //! ```
 //!
 //! Layering is defaults -> `config.toml` -> CLI flags, with CLI winning.
 
 pub mod args;
+pub mod env;
 pub mod settings;
 pub mod soul;
 

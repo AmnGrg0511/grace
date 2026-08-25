@@ -171,10 +171,10 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     }
     // Per-key upsert: a whole-file rewrite here would wipe the other
     // providers' keys every time onboarding ran for a new one.
-    if let Err(e) = crate::ui::cli::upsert_env_file(preset.env_var, &api_key) {
+    if let Err(e) = crate::config::env::upsert_env_file(preset.env_var, &api_key) {
         eprintln!(
             "[grace] warning: could not save {}: {e}",
-            crate::ui::cli::env_file_path().display()
+            crate::config::env::env_file_path().display()
         );
     }
     println!("\nsaved — future runs won't ask again. edit ~/.grace/config.toml or ~/.grace/.env to change.\n");

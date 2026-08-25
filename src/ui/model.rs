@@ -301,10 +301,10 @@ fn apply_model_switch(
         if !is_copilot_target {
             // Per-key upsert: a whole-file rewrite would wipe the other
             // providers' keys every time `/model` switched providers.
-            if let Err(e) = crate::ui::cli::upsert_env_file(&target.key_env, &key) {
+            if let Err(e) = crate::config::env::upsert_env_file(&target.key_env, &key) {
                 eprintln!(
                     "[grace] warning: could not save {}: {e}",
-                    crate::ui::cli::env_file_path().display()
+                    crate::config::env::env_file_path().display()
                 );
             }
             // Hand the just-resolved key back so a caller (e.g. /provider's

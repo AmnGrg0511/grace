@@ -54,7 +54,7 @@ src/
   session/       chat history (store.rs, lock.rs, title.rs)
   skill/         skills (store.rs, load.rs, defaults.rs)
   recall/        pre-flight context injection
-  config/        args.rs, settings.rs, soul.rs
+  config/        args.rs, settings.rs, soul.rs, env.rs (the ~/.grace/.env key store)
   ui/            chat REPL, cli, markdown, skins, wizard, picker, commands
   util/          error.rs, tokens.rs, diff.rs
 ```
