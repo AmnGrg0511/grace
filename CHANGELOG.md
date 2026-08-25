@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.7
+
+**Fixed**
+- Chat (streaming) mode now sends `temperature`, `tool_choice`, and
+  `reasoning_effort` to the model — the streaming request body dropped all
+  three, so `/effort` (and the pinned temperature) never took effect in the
+  interactive REPL.
+- `/provider` now actually validates against the endpoint: model listing ran
+  unauthenticated (it looked up an environment variable *named after the key
+  value*), so validation was silently skipped; and the model re-picked after
+  validation now persists instead of reverting on the next launch.
+- Ctrl-C now interrupts a running sub-agent (it previously kept burning its
+  iteration budget), and sub-agent start/finish now show in the UI.
+- The `/model` picker and the onboarding wizard now enumerate Copilot models
+  through its real transport — the picker offered only the static preset
+  list before, and the wizard sent the raw OAuth token where a short-lived
+  session token is required.
+
 ## v0.3.6
 
 **Added**
