@@ -435,45 +435,19 @@ fn run_one_shot(
     }
     // One-shot turns run tools too — same kill-the-command contract.
     crate::tools::builtins::terminal::set_turn_interrupt(interrupted.clone());
-    let mut stream_state = crate::ui::stream::StreamState::default();
-    // Same thinking spinner as chat mode (TTY only, no-op when piped).
-    let mut spinner = crate::ui::spinner::Spinner::start(skin);
-
-    // One-shot runs are not streamed: tool events still print live through
-    // the sink, and the answer is rendered once at the end.
-    let turn = {
-        let mut sink = |event: crate::core::AgentEvent<'_>| {
-            let tool_end = matches!(
-                &event,
-                crate::core::lifecycle::AgentEvent::ToolCallEnd { .. }
-            );
-            if !tool_end {
-                spinner.pause();
-            }
-            let at_start = crate::ui::spinner::event_ends_at_line_start(
-                &event,
-                crate::ui::skin::no_color(),
-            );
-            let guard = spinner.begin_write();
-            crate::ui::stream::print_agent_event(event, skin, false, &mut stream_state);
-            spinner.end_write(guard, at_start);
-            if tool_end {
-                spinner.resume();
-            }
-        };
-        let options = crate::core::TurnOptions::new()
-            .with_events(&mut sink)
-            .with_interrupt(&interrupted)
-            .with_compression(&config.context_compression);
-        crate::core::run_turn_with_options(
-            transport,
-            tools,
-            messages,
-            config.max_iterations,
-            options,
-        )
-    };
-    spinner.finish();
+    let turn = crate::ui::stream::run_turn_displayed(
+        transport,
+        tools,
+        messages,
+        config.max_iterations,
+        skin,
+        false,
+        // One-shot runs are not streamed: tool events still print live
+        // through the sink, and the answer is rendered once at the end.
+        false,
+        &interrupted,
+        &config.context_compression,
+    );
     let outcome = match turn {
         Ok(outcome) => outcome,
         // Ctrl-C: not an error report — the same "stop, I'm going" as a
@@ -496,12 +470,6 @@ fn run_one_shot(
             return Err(e.into());
         }
     };
-
-    // The agent emits no terminal event after its last ContentFragment, so a
-    // trailing line that arrived without a newline would stay buffered. Flush
-    // it here, before printing anything else for the turn.  (The closure that
-    // held the mutable borrow on stream_state has gone out of scope.)
-    crate::ui::stream::flush_stream_to_stdout(&mut stream_state, skin);
 
     if let Some(sid) = session_id {
         let _ = sessions.append(sid, &Message::assistant(outcome.answer.clone()));

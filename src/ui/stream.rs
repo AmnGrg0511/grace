@@ -236,6 +236,68 @@ pub fn flush_stream_to_stdout(stream: &mut StreamState, skin: &Skin) {
     let _ = finalize_stream(stream, skin, no_color(), &mut stdout);
 }
 
+/// Run a turn with the display glue both modes used to carry by hand: the
+/// thinking spinner covering the model's silences, every agent event through
+/// the shared sink, and the end-of-turn flush. Chat passes
+/// `stream = transport.supports_streaming()` (ContentFragment appends each
+/// finalized line as markdown, append-only); one-shot passes `false` and
+/// renders the answer once at the end. One owner here means the two paths
+/// cannot drift apart on spinner timing or event formatting.
+#[allow(clippy::too_many_arguments)]
+pub fn run_turn_displayed(
+    transport: &(dyn crate::transport::ProviderTransport + '_),
+    tools: &crate::tools::ToolRegistry,
+    messages: &mut Vec<crate::message::Message>,
+    max_iterations: u32,
+    skin: &Skin,
+    verbose: bool,
+    stream: bool,
+    interrupted: &std::sync::atomic::AtomicBool,
+    compression: &crate::core::context::ContextCompressionConfig,
+) -> crate::util::Result<crate::core::TurnOutcome> {
+    let mut spinner = crate::ui::spinner::Spinner::start(skin);
+    let mut stream_state = StreamState::default();
+    let outcome = {
+        let mut sink = |event: crate::core::lifecycle::AgentEvent<'_>| {
+            // Any event is real output: keep the spinner off from here on —
+            // except right after a tool result, where the model goes quiet
+            // again and the spinner covers that wait.
+            let tool_end =
+                matches!(&event, crate::core::lifecycle::AgentEvent::ToolCallEnd { .. });
+            if !tool_end {
+                spinner.pause();
+            }
+            let at_start =
+                crate::ui::spinner::event_ends_at_line_start(&event, no_color());
+            let guard = spinner.begin_write();
+            print_agent_event(event, skin, verbose, &mut stream_state);
+            spinner.end_write(guard, at_start);
+            if tool_end {
+                spinner.resume();
+            }
+        };
+        crate::core::run_turn_with_options(
+            transport,
+            tools,
+            messages,
+            max_iterations,
+            crate::core::TurnOptions::new()
+                .with_events(&mut sink)
+                .with_interrupt(interrupted)
+                .with_compression(compression)
+                .streaming(stream),
+        )
+    };
+    // The agent emits no terminal event after its last ContentFragment, so a
+    // trailing line that arrived without a newline would stay buffered.
+    // Flush it now, before anything else is printed for the turn. (The
+    // closure that held the mutable borrow on stream_state has gone out of
+    // scope.)
+    spinner.finish();
+    flush_stream_to_stdout(&mut stream_state, skin);
+    outcome
+}
+
 /// How many visual terminal rows `text` occupies when printed at `cols`
 /// columns wide.  ANSI escapes are zero-width; wide (CJK) characters count
 /// as two columns; a line exactly `cols` wide still fits on one row.  When

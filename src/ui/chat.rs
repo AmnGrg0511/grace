@@ -6,14 +6,12 @@
 use crate::core::context::ContextCompressionConfig;
 use crate::message::Message;
 use crate::session::SessionStore;
-use crate::ui::skin::{no_color, reset, Role, Skin};
+use crate::ui::skin::{reset, Role, Skin};
 
 use crate::ui::line_reader::LineReader;
-use crate::ui::spinner::{Spinner, event_ends_at_line_start};
 use crate::ui::model::{handle_effort_command, handle_model_command, handle_provider_command, short_url};
 use crate::ui::status::{chat_banner, prompt_label, print_status_line};
 
-use crate::ui::stream::{flush_stream_to_stdout, print_agent_event, StreamState};
 
 /// A short, readable session id — e.g. `s-4kq9`. Full UUIDs are needless
 /// noise for something the user only ever sees in a picker (never types by
@@ -923,51 +921,20 @@ pub fn run_one_chat_turn(
     // Clear any interrupt latched from a previous turn before starting a new
     // one — otherwise a stale Ctrl-C would abort every turn from here on.
     interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
-    // Thinking spinner for the silent waits (TTY only; a no-op when piped).
-    let mut spinner = Spinner::start(skin);
-    let mut stream_state = StreamState::default();
-    let outcome = {
-        let mut sink =
-            |event: crate::core::lifecycle::AgentEvent<'_>| {
-                // Any event is real output: keep the spinner off from here
-                // on — except right after a tool result, where the model
-                // goes quiet again and the spinner covers that wait.
-                let tool_end = matches!(
-                    &event,
-                    crate::core::lifecycle::AgentEvent::ToolCallEnd { .. }
-                );
-                if !tool_end {
-                    spinner.pause();
-                }
-                let at_start = event_ends_at_line_start(&event, no_color());
-                let guard = spinner.begin_write();
-                print_agent_event(event, skin, verbose, &mut stream_state);
-                spinner.end_write(guard, at_start);
-                if tool_end {
-                    spinner.resume();
-                }
-            };
-        crate::core::run_turn_with_options(
-            transport,
-            tools,
-            messages,
-            max_iterations,
-            crate::core::TurnOptions::new()
-                .with_events(&mut sink)
-                .with_interrupt(interrupted.as_ref())
-                .with_compression(compression_config)
-                // Chat mode streams AND renders markdown: ContentFragment
-                // appends each finalized line as markdown (append-only, no
-                // re-rendering). One-shot runs never stream (see cli.rs).
-                .streaming(transport.supports_streaming()),
-        )
-    };
-    // The agent emits no terminal event after its last ContentFragment, so a
-    // trailing line that arrived without a newline would otherwise stay
-    // buffered.  Flush it now, before anything else is printed for the turn.
-    // (The closure that held the mutable borrow has gone out of scope.)
-    spinner.finish();
-    flush_stream_to_stdout(&mut stream_state, skin);
+    let outcome = crate::ui::stream::run_turn_displayed(
+        transport,
+        tools,
+        messages,
+        max_iterations,
+        skin,
+        verbose,
+        // Chat mode streams AND renders markdown: ContentFragment appends
+        // each finalized line as markdown (append-only, no re-rendering).
+        // One-shot runs never stream (see cli.rs).
+        transport.supports_streaming(),
+        interrupted,
+        compression_config,
+    );
     match outcome {
         Ok(crate::core::TurnOutcome {
             answer,
