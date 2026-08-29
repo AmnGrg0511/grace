@@ -462,11 +462,9 @@ fn run_one_shot(
             return Ok(ExitCode::from(130));
         }
         Err(e) => {
-            // The user row is persisted before the turn runs; a failed one
-            // must not leave it dangling in the session history.
-            if let Some(sid) = session_id {
-                let _ = sessions.delete_last_user_row(sid);
-            }
+            // The user row stays: a failed one-shot should look the same as
+            // an interrupted chat turn when the session is resumed — the
+            // prompt is there, ready to retry with its progress intact.
             return Err(e.into());
         }
     };

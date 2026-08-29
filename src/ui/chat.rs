@@ -1016,30 +1016,20 @@ pub fn run_one_chat_turn(
         Err(crate::util::AgentError::Interrupted) => {
             // Tool calls up to this point already ran and are recorded in
             // `messages`/the session — only the final answer is missing.
-            // Don't pop the user message: unlike a hard error, there's real
-            // partial progress worth keeping in context for the next turn.
+            // Keep the partial progress in context so the next turn builds
+            // on it.
             println!("\n(interrupted — back to prompt)\n");
             None
         }
         Err(e) => {
             eprintln!("error: {e}");
-            // Rewind the transcript to before this turn's user message so a
-            // failed turn can be retried cleanly. A blind `pop()` is wrong:
-            // by the time a turn errors, assistant/tool messages have usually
-            // been pushed already (and the compressor may have rewritten the
-            // whole list), so the last message is not the user message.
-            if let Some(pos) = messages
-                .iter()
-                .rposition(|m| m.role == crate::message::Role::User)
-            {
-                messages.truncate(pos);
-            }
-            // The user row was persisted before the turn ran; without this a
-            // failed turn leaves a user message with no answer in the
-            // on-disk history.
-            if let Some(sid) = session_id {
-                let _ = sessions.delete_last_user_row(sid);
-            }
+            // Same treatment as a Ctrl-C: the completed iterations
+            // (assistant messages, tool results) and the on-disk user row
+            // stay put, so the next turn continues from real progress
+            // instead of the failed turn evaporating. Rewinding used to
+            // discard everything the turn had learned before the failure —
+            // with flaky endpoints that meant losing long tool-heavy
+            // analyses to a single transient drop.
             None
         }
     }
@@ -1098,6 +1088,121 @@ mod endpoint_and_recency_tests {
         assert_eq!(recency_label(now - 5 * 86400, now), "5d ago");
         // A future timestamp (clock skew) is clamped to "now", never negative.
         assert_eq!(recency_label(now + 500, now), "now");
+    }
+}
+
+#[cfg(test)]
+mod failed_turn_tests {
+    use super::*;
+    use crate::message::Role;
+    use crate::transport::r#trait::{FinishReason, ModelResponse, ProviderTransport, ToolSpec};
+    use crate::tools::r#trait::Tool;
+    use crate::util::AgentError;
+    use std::cell::Cell;
+    use std::sync::atomic::AtomicBool;
+
+    /// First call returns a tool call (real progress), second call dies with
+    /// the production mid-stream drop ("error decoding response body").
+    struct FailAfterProgress {
+        calls: Cell<u32>,
+    }
+
+    impl ProviderTransport for FailAfterProgress {
+        fn name(&self) -> &str {
+            "fail-after-progress"
+        }
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _model: &str,
+        ) -> crate::util::Result<ModelResponse> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            if n == 0 {
+                Ok(ModelResponse {
+                    content: "Let me look into that.".into(),
+                    tool_calls: vec![crate::message::ToolCall::new("call_1", "noop", "{}")],
+                    finish_reason: FinishReason::ToolCalls,
+                    usage: None,
+                })
+            } else {
+                Err(AgentError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "error decoding response body",
+                )))
+            }
+        }
+    }
+
+    struct NoopTool;
+
+    impl Tool for NoopTool {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn description(&self) -> &str {
+            "does nothing"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn run(&self, _args: &serde_json::Value) -> crate::util::Result<String> {
+            Ok("ok".into())
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_keeps_its_progress_and_the_user_row() {
+        let path = std::env::temp_dir().join(format!(
+            "grace_failed_turn_test_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let sessions = SessionStore::open(&path).unwrap();
+        let sid = "s-failturn";
+
+        let mut tools = crate::tools::ToolRegistry::new();
+        tools.register(Box::new(NoopTool));
+
+        let mut messages = vec![Message::system("you are grace")];
+        let interrupted = std::sync::Arc::new(AtomicBool::new(false));
+        let transport = FailAfterProgress { calls: Cell::new(0) };
+
+        run_one_chat_turn(
+            &transport,
+            &tools,
+            &mut messages,
+            8,
+            &sessions,
+            Some(sid),
+            "figure out the cyclic valid scenario",
+            None,
+            &crate::ui::skin::SOLARIS,
+            &interrupted,
+            &ContextCompressionConfig::default(),
+            false,
+        );
+
+        // The in-memory transcript keeps the completed iteration —
+        // system, user, assistant (tool call), tool result — instead of
+        // rewinding to just before the prompt.
+        let roles: Vec<Role> = messages.iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![Role::System, Role::User, Role::Assistant, Role::Tool],
+            "a failed turn must keep its progress in context"
+        );
+
+        // And the user's prompt stays on disk, so a resume can still see
+        // what was asked (the old behavior deleted it).
+        let loaded = sessions.load(sid).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].role, Role::User);
+        assert_eq!(loaded[0].content, "figure out the cyclic valid scenario");
+
+        drop(sessions);
+        let _ = std::fs::remove_file(&path);
     }
 }
 

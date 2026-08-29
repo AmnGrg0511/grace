@@ -107,11 +107,12 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Remove the most recent `user` row of a session — the prompt of a turn
-    /// that failed before producing an answer. Without this, every failed
-    /// (or Ctrl-C'd-into-a-hard-error) turn leaves a dangling user message
-    /// in the on-disk history. Returns the number of rows removed (0 or 1);
-    /// the `AFTER DELETE` trigger keeps the FTS index in sync.
+    /// Remove the most recent `user` row of a session. Chat-mode turns keep
+    /// their user row on failure or interrupt — the prompt (and the turn's
+    /// in-memory progress) is worth resuming from — so the only caller left
+    /// is the one-shot Ctrl-C path, which wants the prompt gone rather than
+    /// dangling. Returns the number of rows removed (0 or 1); the
+    /// `AFTER DELETE` trigger keeps the FTS index in sync.
     pub fn delete_last_user_row(&self, session_id: &str) -> Result<usize> {
         let n = self
             .conn
