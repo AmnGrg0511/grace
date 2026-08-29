@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn the_base_registry_holds_only_builtins() {
         let reg = Config::build_registry();
-        assert_eq!(reg.len(), 4);
+        assert_eq!(reg.len(), 5);
         assert!(reg.get("delegate").is_none());
     }
 

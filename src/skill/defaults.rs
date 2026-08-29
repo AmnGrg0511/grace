@@ -103,7 +103,7 @@ src/
     copilot.rs     GitHub Copilot (OAuth device flow + token refresh)
     stream.rs      SSE accumulation
   tools/         the tool system
-    trait.rs, registry.rs, builtins/{terminal,file,patch}.rs
+    trait.rs, registry.rs, builtins/{terminal,file,patch,ask}.rs
     delegate.rs, session.rs, plugin.rs, interaction.rs (mid-turn ask/answer)
   memory/        durable facts (store.rs + prompt.rs)
   session/       chat history (store.rs, lock.rs, title.rs)
@@ -131,6 +131,32 @@ is the whole heart of it and fits in your head.
    (its purpose), `load_skill` pulls in the full body when a task matches.
 - `session_search` — full-text (FTS5) search across past conversations.
 - `delegate` — run a self-contained subtask as a sub-agent (see below).
+- `ask` — ask the user a question mid-task and wait for their answer (see
+  "Building interactive tools").
+
+## Building interactive tools
+
+Tools can reach the human mid-turn through a single channel
+(`tools/interaction.rs`); the only terminal side lives in
+`ui/interaction.rs`.
+
+- The `ask` builtin is that channel's authoring face: `ask(question,
+  choices?, allow_custom?)`. A user answer comes back as the (trimmed) tool
+  result; a decline (Esc / Ctrl-C / Ctrl-D / empty) comes back as the
+  literal result `[no answer — user declined]` — a *result*, not an error.
+  With no channel (one-shot mode, no TTY) the call is a tool error that says
+  so. The channel is installed per displayed chat turn — a process-global
+  slot, RAII-guarded in `ui/stream.rs` — so sub-agents inherit it and
+  one-shot runs never have it.
+- Plugin tools get the same reach as a file mailbox: every invocation sets
+  `GRACE_PROMPT_DIR` to a private directory. Write `request.json`
+  (`{"question": "…", "choices": ["a","b"] (optional), "allow_custom": true
+  (optional, default true)}`), then wait for `response.json` — `{"answer":
+  "…"}`, `{"declined": true}`, `{"unavailable": true}` (no channel — fail
+  gracefully) or `{"error": "…"}` (malformed request). One prompt at a
+  time; remove both files before the next prompt. grace polls the mailbox
+  every 100 ms while the plugin runs; there is no other way for a plugin to
+  reach the user.
 
 File tools are gated by `GRACE_ALLOW_DIR`; `bash` by the `GRACE_TERMINAL_*`
 gates (see Security).

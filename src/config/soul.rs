@@ -25,7 +25,14 @@ conversation with noise (searching a codebase, summarizing many files, a long \
 build-and-fix loop), use the delegate tool. The sub-agent runs with its own \
 iteration budget and cannot see this conversation, so state everything it needs \
 in the task description. Do not delegate work you can finish in a step or two — \
-the round-trip costs more than doing it.\n\
+ the round-trip costs more than doing it.\n\
+\n\
+Asking: When a decision is genuinely the user's — a preference, an approval \
+for a consequential or hard-to-reverse action, or information you cannot \
+obtain yourself — use the ask tool and wait for their answer instead of \
+guessing. Never ask what you can determine from the task or your tools, and \
+never ask the same thing twice: if the answer comes back declined, proceed \
+with your best judgment and say what you assumed.\n\
 \n\
 Auto-identify: After completing a complex task (5+ tool calls, errors overcome, \
 a reusable workflow), proactively load the skill-author skill and offer to save \
@@ -152,7 +159,7 @@ mod tests {
 
     #[test]
     fn the_default_prompt_documents_the_tools_the_agent_actually_has() {
-        for tool in ["bash", "read", "write", "edit"] {
+        for tool in ["bash", "read", "write", "edit", "ask"] {
             assert!(
                 DEFAULT_SYSTEM_PROMPT.contains(tool),
                 "persona should mention {tool}"
@@ -166,6 +173,16 @@ mod tests {
         // persona has to say when it is worth the round-trip.
         assert!(DEFAULT_SYSTEM_PROMPT.contains("delegate"));
         assert!(DEFAULT_SYSTEM_PROMPT.contains("iteration budget"));
+    }
+
+    #[test]
+    fn the_default_prompt_explains_when_to_ask() {
+        // An ask tool with no guidance either never fires (the model guesses)
+        // or nags (the model asks about everything). The persona has to draw
+        // the line — and the decline path, or a no-answer dead-ends the turn.
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("ask tool"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("genuinely the user's"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("declined"));
     }
 
     #[test]

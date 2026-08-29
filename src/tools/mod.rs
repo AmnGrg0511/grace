@@ -19,7 +19,7 @@ pub mod session;
 pub mod r#trait;
 
 pub use builtins::{
-    register_builtins, BashTool, EditTool, ReadTool, WriteTool,
+    register_builtins, AskTool, BashTool, EditTool, ReadTool, WriteTool,
 };
 pub use delegate::DelegateTool;
 pub use plugin::{PluginTool, PluginToolStore};
@@ -47,11 +47,12 @@ mod tests {
             Box::new(ReadTool),
             Box::new(WriteTool),
             Box::new(EditTool),
+            Box::new(AskTool),
         ];
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert_eq!(
             names,
-            vec!["bash", "read", "write", "edit"]
+            vec!["bash", "read", "write", "edit", "ask"]
         );
     }
 

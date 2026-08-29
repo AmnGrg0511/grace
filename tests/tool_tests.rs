@@ -33,12 +33,7 @@ fn registry() -> ToolRegistry {
 fn the_builtin_set_is_exactly_what_is_documented() {
     assert_eq!(
         registry().names(),
-        vec![
-            "bash",
-            "edit",
-            "read",
-            "write"
-        ]
+        vec!["ask", "bash", "edit", "read", "write"]
     );
 }
 

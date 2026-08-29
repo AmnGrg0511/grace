@@ -92,7 +92,7 @@ impl Drop for PromptSlotGuard {
     }
 }
 
-    /// Ask the user through whatever prompter the current turn installed.
+/// Ask the user through whatever prompter the current turn installed.
 /// Without one this is [`PromptResult::Unavailable`] — the channel is a
 /// capability the turn grants, never a tool's assumption.
 pub fn prompt(req: &UserPrompt) -> PromptResult {

@@ -7,10 +7,12 @@
 //
 //! Matches Pi's minimal set: read, write, edit, bash (4 tools).
 
+pub mod ask;
 pub mod file;
 pub mod patch;
 pub mod terminal;
 
+pub use ask::AskTool;
 pub use file::{ReadTool, WriteTool};
 pub use patch::EditTool;
 pub use terminal::BashTool;
@@ -28,6 +30,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(Box::new(ReadTool));
     registry.register(Box::new(WriteTool));
     registry.register(Box::new(EditTool));
+    registry.register(Box::new(AskTool));
 }
 
 #[cfg(test)]
@@ -38,7 +41,7 @@ mod tests {
     fn builtins_register_the_documented_baseline_set() {
         let mut reg = ToolRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.names(), vec!["bash", "edit", "read", "write"]);
+        assert_eq!(reg.names(), vec!["ask", "bash", "edit", "read", "write"]);
     }
 
     #[test]

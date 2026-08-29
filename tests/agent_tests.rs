@@ -519,3 +519,94 @@ fn delegation_events_report_the_budget_and_what_was_actually_spent() {
     let recorded = recorded.into_inner();
     assert_eq!(recorded, vec!["start subtask 25", "end 2 true"]);
 }
+
+// ---- mid-turn interaction (ask) ---------------------------------------------
+
+#[test]
+fn an_ask_tool_result_never_kills_the_turn() {
+    // Whatever the ask comes back as — an answer, a decline marker, or the
+    // no-channel error (the unit tests pin which is which) — it is a tool
+    // result in the transcript, and the turn carries on to the model's next
+    // step instead of failing.
+    let transport = ScriptedTransport::new(vec![
+        call_tool("c1", "ask", r#"{"question": "ship it?"}"#),
+        answer("Proceeded, Sir."),
+    ]);
+    let mut messages = vec![Message::user("ship it")];
+    let out = run_turn(&transport, &builtin_registry(), &mut messages, 8).unwrap();
+    assert_eq!(out, "Proceeded, Sir.");
+    assert!(
+        messages.iter().filter(|m| m.role == Role::Tool).count() == 1,
+        "the ask must leave exactly one tool result in the transcript: {messages:?}"
+    );
+}
+
+#[test]
+fn an_interrupt_latched_after_an_ask_call_unwinds_the_turn() {
+    // The interrupt window right after a tool call: the ask has already
+    // delivered its result, the latch trips, and the turn unwinds — keeping
+    // the tool result the way every other completed work does.
+    let transport = ScriptedTransport::new(vec![call_tool(
+        "c",
+        "ask",
+        r#"{"question": "q?"}"#,
+    )]);
+    let interrupted = std::sync::atomic::AtomicBool::new(false);
+    let flag_ref = &interrupted;
+    let mut sink = |e: AgentEvent<'_>| {
+        if matches!(e, AgentEvent::ToolCallEnd { .. }) {
+            flag_ref.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+    let mut messages = vec![Message::user("go")];
+    let err = run_turn_with_options(
+        &transport,
+        &builtin_registry(),
+        &mut messages,
+        16,
+        TurnOptions::new()
+            .with_events(&mut sink)
+            .with_interrupt(&interrupted),
+    )
+    .unwrap_err();
+    assert!(matches!(err, AgentError::Interrupted));
+    assert!(
+        messages.iter().any(|m| m.role == Role::Tool),
+        "the ask's tool result must be kept after the interrupt"
+    );
+}
+
+#[test]
+fn a_sub_agent_registry_includes_ask() {
+    // Sub-agents run nested under the parent's displayed turn, so they
+    // inherit the mid-turn channel — the registry the delegation factory
+    // builds for a child must carry the ask tool, or a sub-agent that wants
+    // to ask would hit an unknown tool.
+    let dir = std::env::temp_dir().join(format!(
+        "grace_ask_subagent_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let options = grace::config::RegistryOptions {
+        skills_root: dir.join("skills"),
+        tools_root: dir.join("tools"),
+        sessions: None,
+        transport: Some(std::rc::Rc::new(ScriptedTransport::new(vec![answer("ok")]))),
+        compression: ContextCompressionConfig::default(),
+        read_only: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let sub =
+        grace::config::Config::build_registry_full(&options, DelegationDepth::ROOT.child());
+    assert!(
+        sub.names().contains(&"ask"),
+        "the sub-agent registry must carry ask: {:?}",
+        sub.names()
+    );
+    assert!(
+        sub.names().contains(&"delegate"),
+        "the child can still delegate: {:?}",
+        sub.names()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
