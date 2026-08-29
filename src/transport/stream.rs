@@ -191,12 +191,14 @@ pub fn parse_sse_stream(
     // accumulator here would read a dead stream back as a normal — often
     // empty or partial — answer, so the turn must fail with a reason.
     if !done {
-        return Err(AgentError::Transport(
-            "stream ended before the [DONE] marker — the response was cut off".into(),
-        ));
+        return Err(AgentError::Transport(CUT_OFF_ERROR.into()));
     }
     Ok(acc.finish())
 }
+
+/// The error an EOF without the `[DONE]` marker produces — a dead stream,
+/// not a (possibly empty) partial answer.
+const CUT_OFF_ERROR: &str = "stream ended before the [DONE] marker — the response was cut off";
 
 /// A `Read` adapter that lets an interrupt flag abort a blocked socket read.
 ///
@@ -288,6 +290,12 @@ impl Read for InterruptibleRead<'_> {
     }
 }
 
+/// Total attempts for one streaming request: the first plus two retries at
+/// 500ms/1s backoff — the same budget as the non-streaming
+/// `send_with_retry`, so chat mode and one-shot mode absorb flaky endpoints
+/// the same way.
+const MAX_ATTEMPTS: u32 = 3;
+
 /// Perform a streaming completion against an OpenAI-compatible endpoint.
 /// POSTs with `"stream": true`, parses SSE as it arrives, and calls
 /// `on_fragment` per content fragment for live printing.
@@ -295,6 +303,12 @@ impl Read for InterruptibleRead<'_> {
 /// `interrupted` is polled while the socket read is silent (see
 /// [`InterruptibleRead`]); when set, the turn aborts with
 /// `AgentError::Interrupted` instead of waiting for the next token.
+///
+/// Transport-level stream deaths — 429/5xx responses, an unsent request, a
+/// connection dropped mid-body, an EOF before `[DONE]` — are retried up to
+/// [`MAX_ATTEMPTS`], but **only while no content fragment has been emitted**:
+/// once text is on screen, re-issuing the request would print the same
+/// answer a second time, which the append-only rendering path forbids.
 #[allow(clippy::too_many_arguments)]
 pub fn stream_complete(
     base_url: &str,
@@ -319,30 +333,112 @@ pub fn stream_complete(
         .connect_timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| AgentError::Transport(format!("HTTP client error: {e}")))?;
-    let mut req = client.post(&url).json(&body);
-    if !api_key.is_empty() {
-        req = req.bearer_auth(api_key);
-    }
-    let resp = req.send()?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        return Err(AgentError::Transport(format!("HTTP {status}: {text}")));
-    }
-    // `Response` implements io::Read, so this reads the body incrementally
-    // and each fragment is delivered as it arrives — `resp.bytes()` would
-    // buffer the whole generation and fire everything in one burst at the end.
-    // The interruptible wrapper is what makes Ctrl-C land during the
-    // pre-first-token silence, not just between tokens.
-    let outcome = parse_sse_stream(InterruptibleRead::new(resp, interrupted), on_fragment);
-    // An early-EOF driven by the interrupt flag is a cancellation, not a
-    // cut-off stream: it must surface as `AgentError::Interrupted` so the turn
-    // unwinds to the prompt (and never as a silent no-answer).
-    match outcome {
-        Err(AgentError::Transport(_)) if interrupted.is_some_and(|f| f.load(Ordering::SeqCst)) => {
-            Err(AgentError::Interrupted)
+
+    let started = std::time::Instant::now();
+    let mut backoff = Duration::from_millis(500);
+    // Latched the first time a content fragment reaches the caller; from
+    // that point the request is no longer safely re-issuable.
+    let mut emitted = false;
+    // `mut` so the per-attempt `forward` wrapper below can borrow it
+    // mutably and forward each fragment.
+    let mut on_fragment = on_fragment;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        // Ctrl-C during the backoff sleep: stop now, don't fire another
+        // request the user has already cancelled.
+        if attempt > 1 && interrupted.is_some_and(|f| f.load(Ordering::SeqCst)) {
+            return Err(AgentError::Interrupted);
         }
-        other => other,
+        let mut req = client.post(&url).json(&body);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+
+        // Set at each failure site: a 4xx (auth, bad model) is permanent and
+        // a provider error frame is an answer-level failure owned by the
+        // agent-layer retry — only transport-level stream deaths retry here.
+        let mut retryable = true;
+        let outcome = match req.send() {
+            Ok(resp) => {
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().unwrap_or_default();
+                    retryable = status.as_u16() == 429 || status.is_server_error();
+                    Err(AgentError::Transport(format!("HTTP {status}: {text}")))
+                } else {
+                    // `Response` implements io::Read, so this reads the body
+                    // incrementally and each fragment is delivered as it
+                    // arrives — `resp.bytes()` would buffer the whole
+                    // generation and fire everything in one burst at the end.
+                    // The interruptible wrapper is what makes Ctrl-C land
+                    // during the pre-first-token silence, not just between
+                    // tokens.
+                    let mut forward = |frag: &str| -> Result<()> {
+                        emitted = true;
+                        on_fragment(frag)
+                    };
+                    let parsed =
+                        parse_sse_stream(InterruptibleRead::new(resp, interrupted), &mut forward);
+                    if matches!(parsed, Err(AgentError::Response(_))) {
+                        retryable = false;
+                    }
+                    parsed
+                }
+            }
+            Err(e) => Err(AgentError::from(e)),
+        };
+
+        match outcome {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                // An early-EOF driven by the interrupt flag is a
+                // cancellation, not a cut-off stream: it must surface as
+                // `AgentError::Interrupted` so the turn unwinds to the prompt
+                // (and never as a silent no-answer), and must never burn a
+                // retry.
+                if interrupted.is_some_and(|f| f.load(Ordering::SeqCst)) {
+                    return Err(AgentError::Interrupted);
+                }
+                if retryable && !emitted && attempt < MAX_ATTEMPTS {
+                    std::thread::sleep(backoff);
+                    backoff *= 2;
+                    continue;
+                }
+                return Err(terminal_stream_error(e, attempt, emitted, started.elapsed()));
+            }
+        }
+    }
+    unreachable!("the loop returns on every path")
+}
+
+/// Wrap a failed streaming request in a message that says what happened,
+/// embedding the original error so the underlying cause (e.g. "error
+/// decoding response body") stays visible. Already-self-explanatory failures
+/// (auth 4xx, provider error frames) pass through untouched.
+fn terminal_stream_error(
+    e: AgentError,
+    attempt: u32,
+    emitted: bool,
+    elapsed: Duration,
+) -> AgentError {
+    let is_stream_death = matches!(&e, AgentError::Io(_))
+        || matches!(&e, AgentError::Transport(s) if s == CUT_OFF_ERROR);
+    if !is_stream_death {
+        return e;
+    }
+    if emitted {
+        AgentError::Transport(format!(
+            "the response was cut off mid-stream after partial output — the answer \
+             is incomplete and the request was not retried (a retry would duplicate \
+             it on screen): {e}"
+        ))
+    } else if attempt >= MAX_ATTEMPTS {
+        AgentError::Transport(format!(
+            "the response was cut off mid-stream after {:.1}s across {attempt} attempts: {e}",
+            elapsed.as_secs_f64()
+        ))
+    } else {
+        e
     }
 }
 
@@ -580,5 +676,156 @@ mod tests {
             start.elapsed()
         );
         drop(tx);
+    }
+
+    // ---- retry behavior against a real (loopback) socket ----
+    //
+    // Deterministic by construction: the server hands out a fixed sequence
+    // of canned responses, one per connection, so no timing is involved —
+    // only how many times `stream_complete` dials in.
+
+    /// Serve `replies` on `127.0.0.1`, one canned response per connection
+    /// (in order), then close the connection. `seen` counts connections so
+    /// a test can assert exactly how many attempts were made. Loopback and
+    /// small payloads: by the time the client blocks for the response the
+    /// request is fully on the wire, so draining to the header terminator
+    /// (plus a read timeout as a backstop) is enough.
+    fn mock_server(replies: Vec<Vec<u8>>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = seen.clone();
+        std::thread::spawn(move || {
+            let mut i = 0usize;
+            for conn in listener.incoming() {
+                let Ok(mut stream) = conn else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut got = Vec::new();
+                while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let mut buf = [0u8; 4096];
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            got.extend_from_slice(&buf[..n]);
+                            if got.len() > 64 * 1024 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(reply) = replies.get(i) {
+                    use std::io::Write as _;
+                    let _ = stream.write_all(reply);
+                    let _ = stream.flush();
+                }
+                i += 1;
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                if i >= replies.len() {
+                    break;
+                }
+            }
+        });
+        (format!("http://{addr}/v1"), seen)
+    }
+
+    /// A 200 whose SSE body simply ends without `[DONE]` — the server
+    /// closes the connection mid-response.
+    fn sse_200(body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+        )
+        .into_bytes()
+    }
+
+    /// A 200 with `transfer-encoding: chunked` that promises 8 chunk bytes
+    /// and closes after 6 — the body decoder fails mid-stream, the io
+    /// error class a production drop produces ("error decoding response
+    /// body" / "request or response body error" depending on hyper build).
+    fn chunked_cut_off() -> Vec<u8> {
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+           transfer-encoding: chunked\r\nconnection: close\r\n\r\n\
+           8\r\ndata: "
+            .to_vec()
+    }
+
+    fn hello_done() -> Vec<u8> {
+        sse_200(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":\"stop\"}]}\n\n\
+             data: [DONE]\n\n",
+        )
+    }
+
+    fn stream_once(base_url: &str) -> Result<ModelResponse> {
+        stream_complete(
+            base_url,
+            "",
+            "m",
+            &[Message::user("hi")],
+            &[],
+            None,
+            None,
+            |_| Ok(()),
+        )
+    }
+
+    #[test]
+    fn a_stream_dropped_mid_body_is_retried_until_it_completes() {
+        let (base_url, seen) = mock_server(vec![chunked_cut_off(), hello_done()]);
+        let resp = stream_once(&base_url).expect("the second attempt completes the turn");
+        assert_eq!(resp.content, "Hello");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "one cut-off attempt, then one success"
+        );
+    }
+
+    #[test]
+    fn a_cut_off_stream_exhausts_its_attempts_with_an_actionable_error() {
+        let (base_url, seen) =
+            mock_server(vec![chunked_cut_off(), chunked_cut_off(), chunked_cut_off()]);
+        let err = stream_once(&base_url).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off mid-stream"), "{msg}");
+        assert!(msg.contains("3 attempts"), "{msg}");
+        // The original failure stays visible inside the wrapped message —
+        // a body-stream failure, however this hyper build spells it.
+        assert!(
+            msg.contains("stream ended before the [DONE] marker")
+                || msg.contains("error decoding response body")
+                || msg.contains("body error"),
+            "{msg}"
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_stream_that_already_emitted_output_is_not_retried() {
+        // The fragment is real on-screen output: re-issuing the request
+        // would print "partial" a second time, so the failure must stand.
+        let (base_url, seen) = mock_server(vec![
+            sse_200("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"),
+        ]);
+        let err = stream_once(&base_url).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("partial output"), "{msg}");
+        assert!(msg.contains("not retried"), "{msg}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "emitted output must not be re-streamed");
+    }
+
+    #[test]
+    fn a_429_is_retried_but_a_later_4xx_is_not() {
+        let (base_url, seen) = mock_server(vec![
+            b"HTTP/1.1 429 Too Many Requests\r\ncontent-type: text/plain\r\n\
+               connection: close\r\n\r\nslow down"
+                .to_vec(),
+            b"HTTP/1.1 401 Unauthorized\r\ncontent-type: text/plain\r\n\
+               connection: close\r\n\r\nbad key"
+                .to_vec(),
+        ]);
+        let err = stream_once(&base_url).unwrap_err();
+        assert!(err.to_string().contains("401"), "{err}");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "429 retried once, then the 401 stands");
     }
 }
