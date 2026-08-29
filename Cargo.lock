@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "grace"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anstyle",
  "anstyle-query",

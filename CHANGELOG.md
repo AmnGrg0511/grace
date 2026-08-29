@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.3.8
+
+**Added**
+- The `ask` tool: the model can question the user mid-task and wait for
+  the answer — fixed choices (with optional free text) or free text. The
+  answer comes back as the tool result; a decline (Esc / Ctrl-C / Ctrl-D /
+  empty) comes back as a literal decline marker — a *result*, not an
+  error — so the model proceeds with its best judgment and says what it
+  assumed. With no terminal (one-shot mode) the call fails with a readable
+  error instead.
+- A mid-turn user-interaction channel: any tool can reach the human while
+  a turn is in flight. It is installed per displayed chat turn (the
+  spinner pauses, the answer lands as a dim outcome line) and sub-agent
+  turns inherit it.
+- Plugin tools can ask the user mid-run through a file mailbox: every
+  invocation gets `GRACE_PROMPT_DIR`; write `request.json` (`question`,
+  optional `choices` / `allow_custom`) and wait for `response.json`
+  (`answer` / `declined` / `unavailable` / `error`).
+- One picker pattern for every "pick one of these" moment: the command
+  palette, `/skin`, `/session`, `/jump`, `/provider`, and an ambiguous
+  `/model <query>` all share the same picker with consistent
+  "pick a <noun>" titles, and the current provider endpoint is shown as a
+  disabled `current` row.
+
+**Fixed**
+- Streaming turns retry transient failures (429/5xx, a mid-body connection
+  drop, EOF before `[DONE]`) up to 3 times — but only while no content has
+  reached the screen, since re-issuing the request would duplicate output
+  and the append-only stream path forbids that. When the stream really is
+  dead, the error says the response was cut off mid-stream, with elapsed
+  time and attempt count.
+- A malformed-response retry no longer re-prints an answer that had
+  already been streamed to the screen.
+- A hard error mid-turn no longer erases progress: the completed
+  iterations (assistant messages, tool results) and the user's prompt stay
+  in context and on disk, so the next turn continues from real progress
+  instead of losing ten tool iterations to one transient drop. One-shot
+  mode keeps the user row on failure too.
+
 ## v0.3.7
 
 **Fixed**
