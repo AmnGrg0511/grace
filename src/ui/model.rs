@@ -4,6 +4,7 @@
 //! stays that file's single focus.
 
 use crate::config::settings::{PROVIDER_PRESETS};
+use crate::ui::picker::Pick;
 use crate::ui::status::human_tokens;
 use crate::ui::line_reader::LineReader;
 use crate::ui::skin::Skin;
@@ -201,12 +202,21 @@ pub(crate) fn handle_model_command(
                 return;
             }
             m => {
-                println!("\"{arg}\" matches more than one target:");
-                for &i in &m {
-                    println!("  {}", describe_candidate(&candidates[i]));
+                // Ambiguous: the same shared picker as /model with no
+                // argument, narrowed to the matches — never a numbered list.
+                let rows = model_candidate_rows(
+                    &candidates,
+                    &m,
+                    transport.current_model().as_deref(),
+                    transport.current_base_url().as_deref(),
+                );
+                match crate::ui::picker::pick(&rows, skin, "pick a model") {
+                    Some(id) => match id.parse::<usize>() {
+                        Ok(idx) => candidates[idx].clone(),
+                        Err(_) => return,
+                    },
+                    None => return,
                 }
-                println!("be more specific, or /model with no argument for the picker.");
-                return;
             }
         }
     };
@@ -422,22 +432,43 @@ struct EndpointPick {
     known_models: Vec<(String, Option<u32>)>,
 }
 
-/// The provider stage of both `/model` and `/provider`: one row per distinct
-/// (name, base_url) — persisted endpoints plus presets — plus an escape hatch
-/// for a custom OpenAI-compatible URL. Resolves the endpoint's key env var
-/// and known-model list from the candidates.
-fn pick_provider_endpoint(
+/// Picker rows for the ambiguous `/model <query>` case: the model id as the
+/// label, its endpoint as the dim sublabel (so typing the host filters too);
+/// the live model — same model on the same host — is shown but not
+/// selectable. Pure, so the row assembly is testable without a terminal.
+fn model_candidate_rows(
     candidates: &[ModelCandidate],
-    reader: &mut LineReader,
-    skin: &Skin,
-    title: &str,
-) -> Option<EndpointPick> {
-    use crate::ui::skin::{reset, Role};
-    use crate::ui::picker::{pick, Pick};
+    idxs: &[usize],
+    current_model: Option<&str>,
+    current_base_url: Option<&str>,
+) -> Vec<Pick> {
+    idxs
+        .iter()
+        .map(|&i| {
+            let c = &candidates[i];
+            let is_current = current_model == Some(c.model.as_str())
+                && current_base_url
+                    .is_some_and(|b| short_url(b) == short_url(&c.base_url));
+            let mut row = Pick::new(i.to_string(), c.model.clone())
+                .hint(format!("{} · {}", c.name, short_url(&c.base_url)));
+            if is_current {
+                row = row.disabled().hint("current");
+            }
+            row
+        })
+        .collect()
+}
 
-    // Accent paint shared by the endpoint/context sublabels — a skin color
-    // distinct from the dim row text, so the eye splits name from fact.
-    let accent = |t: &str| skin.paint(Role::Code, t);
+/// One picker row per distinct provider endpoint — persisted endpoints plus
+/// presets — the live endpoint shown but not selectable (marked "current"),
+/// and an escape hatch for a custom OpenAI-compatible URL. Pure, so the row
+/// assembly is testable without a terminal.
+fn provider_rows(
+    candidates: &[ModelCandidate],
+    current_base_url: Option<&str>,
+    skin: &Skin,
+) -> Vec<Pick> {
+    use crate::ui::skin::{reset, Role};
 
     // One row per distinct (name, base_url).
     let mut endpoints: Vec<(String, String)> = Vec::new();
@@ -448,18 +479,47 @@ fn pick_provider_endpoint(
     }
     // Rows show only the provider and its endpoint (accent-painted); models
     // are a separate decision so the two choices stay clean.
-    let items: Vec<Pick> = endpoints
-        .iter()
-        .map(|(name, base_url)| {
-            Pick::new(format!("{name}\u{1}{base_url}"), name.clone())
-                .hint(format!("{}{}", accent(&short_url(base_url)), reset()))
-                .verbatim_sub()
-        })
-        .chain(std::iter::once(
-            Pick::new("\u{1}custom", "Custom OpenAI-compatible endpoint").hint("type a base URL"),
-        ))
-        .collect();
-    let choice = pick(&items, skin, title)?;
+    let mut items: Vec<Pick> = Vec::with_capacity(endpoints.len() + 1);
+    for (name, base_url) in &endpoints {
+        let is_current = current_base_url
+            .is_some_and(|cur| short_url(cur) == short_url(base_url));
+        let sub = if is_current {
+            format!(
+                "{} · {}{}",
+                skin.paint(Role::Code, &short_url(base_url)),
+                skin.paint(Role::ToolDim, "current"),
+                reset()
+            )
+        } else {
+            format!("{}{}", skin.paint(Role::Code, &short_url(base_url)), reset())
+        };
+        let mut row = Pick::new(format!("{name}\u{1}{base_url}"), name.clone())
+            .hint(sub)
+            .verbatim_sub();
+        if is_current {
+            row = row.disabled();
+        }
+        items.push(row);
+    }
+    items.push(
+        Pick::new("\u{1}custom", "Custom OpenAI-compatible endpoint").hint("type a base URL"),
+    );
+    items
+}
+
+/// The provider stage of `/provider`: pick an endpoint from
+/// [`provider_rows`] (or type a custom OpenAI-compatible URL), then resolve
+/// the endpoint's key env var and known-model list from the candidates.
+fn pick_provider_endpoint(
+    candidates: &[ModelCandidate],
+    reader: &mut LineReader,
+    skin: &Skin,
+    current_base_url: Option<&str>,
+) -> Option<EndpointPick> {
+    use crate::ui::picker::pick;
+
+    let items = provider_rows(candidates, current_base_url, skin);
+    let choice = pick(&items, skin, "pick a provider")?;
 
     let (name, base_url) = if choice == "\u{1}custom" {
         let raw = reader.read_line("base URL (e.g. https://host/v1): ")?;
@@ -562,7 +622,12 @@ pub(crate) fn handle_provider_command(
     }
     let settings = crate::config::settings::Settings::load();
     let candidates = model_candidates(&settings);
-    let Some(picked) = pick_provider_endpoint(&candidates, reader, skin, "switch provider")
+    let Some(picked) = pick_provider_endpoint(
+        &candidates,
+        reader,
+        skin,
+        transport.current_base_url().as_deref(),
+    )
     else {
         return;
     };
@@ -812,6 +877,63 @@ mod model_command_tests {
         assert_eq!(friendly_endpoint_name("https://api.siemens.com/llm/v1"), "siemens");
         assert_eq!(friendly_endpoint_name("http://localhost:11434/v1"), "localhost");
         assert_eq!(friendly_endpoint_name("https://api.openai.com/v1"), "openai");
+    }
+
+    #[test]
+    fn provider_rows_mark_the_live_endpoint_disabled_and_current() {
+        let candidates = vec![
+            cand("siemens", "qwen-3.8-27b", "https://api.siemens.com/llm/v1", Some(262_144)),
+            cand("OpenAI", "gpt-4o", "https://api.openai.com/v1", Some(128_000)),
+        ];
+        let skin = crate::ui::skin::by_name(None);
+        let rows = provider_rows(&candidates, Some("https://api.siemens.com/llm/v1"), &skin);
+        // One row per endpoint plus the custom escape hatch; the live
+        // endpoint is shown but dead, the other stays selectable.
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].disabled, "the live endpoint must be disabled");
+        assert!(!rows[1].disabled);
+        assert_eq!(rows[2].label, "Custom OpenAI-compatible endpoint");
+        // The disabled row's sublabel says why it is dead.
+        let sub0 = crate::ui::markdown::strip_ansi(rows[0].sublabel.as_deref().unwrap());
+        assert!(sub0.contains("current"), "{sub0:?}");
+        let sub1 = crate::ui::markdown::strip_ansi(rows[1].sublabel.as_deref().unwrap());
+        assert!(!sub1.contains("current"), "{sub1:?}");
+        // No current endpoint: nothing is disabled.
+        let rows = provider_rows(&candidates, None, &skin);
+        assert!(!rows.iter().any(|r| r.disabled));
+    }
+
+    #[test]
+    fn provider_rows_dedup_by_name_and_url() {
+        let candidates = vec![
+            cand("OpenAI", "gpt-4o", "https://api.openai.com/v1", Some(128_000)),
+            cand("OpenAI", "gpt-4o-mini", "https://api.openai.com/v1", None),
+        ];
+        let skin = crate::ui::skin::by_name(None);
+        let rows = provider_rows(&candidates, None, &skin);
+        assert_eq!(rows.len(), 2, "one row per endpoint + the custom row");
+    }
+
+    #[test]
+    fn model_candidate_rows_label_the_model_and_hint_the_endpoint() {
+        let candidates = vec![
+            cand("OpenRouter", "openai/gpt-4o-mini", "https://openrouter.ai/api/v1", None),
+            cand("OpenAI", "gpt-4o-mini", "https://api.openai.com/v1", None),
+        ];
+        let rows = model_candidate_rows(
+            &candidates,
+            &[0, 1],
+            Some("gpt-4o-mini"),
+            Some("https://api.openai.com/v1"),
+        );
+        assert_eq!(rows[0].id, "0");
+        assert_eq!(rows[0].label, "openai/gpt-4o-mini");
+        assert_eq!(rows[0].sublabel.as_deref(), Some("OpenRouter · openrouter.ai"));
+        // The live model (same model AND same host) is disabled; the
+        // same-named model on another host is not.
+        assert!(!rows[0].disabled);
+        assert!(rows[1].disabled);
+        assert_eq!(rows[1].sublabel.as_deref(), Some("current"));
     }
 
     #[test]

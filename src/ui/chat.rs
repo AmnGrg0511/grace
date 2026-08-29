@@ -35,6 +35,21 @@ pub fn short_session_id() -> String {
 }
 
 
+/// One picker row per slash command: the `/name` label with the one-line
+/// summary as the dim sublabel in its own quieter voice — the shared row
+/// shape of the command palette and the ambiguous-abbreviation picker.
+fn slash_command_rows(
+    cmds: impl IntoIterator<Item = &'static crate::ui::commands::SlashCommand>,
+) -> Vec<crate::ui::picker::Pick> {
+    cmds.into_iter()
+        .map(|c| {
+            crate::ui::picker::Pick::new(c.name, format!("/{}", c.name))
+                .hint(c.summary)
+                .hint_role(crate::ui::skin::Role::Hint)
+        })
+        .collect()
+}
+
 /// Interactive REPL. Each line you type is appended as a user message and the
 /// conversation history (including tool calls) is preserved across turns. If
 /// a session id was given, each turn is also persisted to disk immediately.
@@ -195,16 +210,8 @@ pub fn run_chat(
         // A bare `/` opens the command palette over the single registry; the
         // chosen command is re-run as if the user had typed it.
         if text == "/" {
-            let items: Vec<crate::ui::picker::Pick> = crate::ui::commands::SLASH_COMMANDS
-                .iter()
-                .map(|c| {
-                    crate::ui::picker::Pick::new(c.name, format!("/{}", c.name))
-                        .hint(c.summary)
-                        .hint_role(crate::ui::skin::Role::Hint)
-                })
-                .collect();
-            if let Some(name) = crate::ui::picker::pick(&items, &skin, "pick a command (type to filter)")
-            {
+            let items = slash_command_rows(crate::ui::commands::SLASH_COMMANDS.iter());
+            if let Some(name) = crate::ui::picker::pick(&items, &skin, "pick a command") {
                 pending_input = Some(format!("/{name} "));
             }
             continue;
@@ -223,19 +230,8 @@ pub fn run_chat(
                     [] => {}
                     [only] => cmd_word = format!("/{}", only.name),
                     many => {
-                        let items: Vec<crate::ui::picker::Pick> = many
-                            .iter()
-                            .map(|c| {
-                                crate::ui::picker::Pick::new(c.name, format!("/{}", c.name))
-                                    .hint(c.summary)
-                                    .hint_role(crate::ui::skin::Role::Hint)
-                            })
-                            .collect();
-                        if let Some(name) = crate::ui::picker::pick(
-                            &items,
-                            &skin,
-                            &format!("\"{word}\" is ambiguous — pick a command"),
-                        ) {
+                        let items = slash_command_rows(many.iter().copied());
+                        if let Some(name) = crate::ui::picker::pick(&items, &skin, "pick a command") {
                             pending_input = Some(format!("/{name} {rest}"));
                         }
                         continue;
@@ -646,7 +642,7 @@ fn handle_skin_command(arg: &str, skin: &mut Skin) {
                 row
             })
             .collect();
-        match crate::ui::picker::pick(&items, skin, "switch to a skin") {
+        match crate::ui::picker::pick(&items, skin, "pick a skin") {
             Some(n) => n,
             None => return,
         }
@@ -826,7 +822,7 @@ fn handle_session_command(
         }
         items.push(row);
     }
-    let Some(choice) = pick(&items, skin, "switch to a session") else {
+    let Some(choice) = pick(&items, skin, "pick a session") else {
         println!("staying on current session.");
         return;
     };
@@ -1210,6 +1206,32 @@ mod failed_turn_tests {
 
 
 
+/// One row per transcript message for the `/jump` picker: the message text
+/// as the label, the speaker as the dim sublabel — the same label/sub shape
+/// every other picker row uses. The renderer wraps and applies its own row
+/// budget, so the only cap here is a generous character bound to keep absurd
+/// messages from dominating the window; overflow is marked with `…`.
+fn jump_rows(history: &[Message]) -> Vec<crate::ui::picker::Pick> {
+    history
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let role = match m.role {
+                crate::message::Role::User => "user",
+                crate::message::Role::Assistant => "assistant",
+                _ => "?",
+            };
+            let flat = m.content.trim().replace('\n', " ");
+            let snippet = if flat.chars().count() > 240 {
+                format!("{}…", flat.chars().take(240).collect::<String>())
+            } else {
+                flat
+            };
+            crate::ui::picker::Pick::new(i.to_string(), snippet).hint(format!("[{role}]"))
+        })
+        .collect()
+}
+
 /// `/jump` — context rewind, replacing the originally planned undo. A picker
 /// over the current session's user+assistant transcript; picking a message
 /// truncates the in-memory context to (and including) that message AND
@@ -1234,28 +1256,8 @@ fn handle_jump_command(
         println!("no messages yet in this session.");
         return;
     }
-    let items: Vec<crate::ui::picker::Pick> = history
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let role = match m.role {
-                crate::message::Role::User => "user",
-                crate::message::Role::Assistant => "assistant",
-                _ => "?",
-            };
-            // The renderer wraps and applies its own row budget, so the only
-            // cap here is a generous character bound to keep absurd messages
-            // from dominating the window; overflow is marked with `…`.
-            let flat = m.content.trim().replace('\n', " ");
-            let snippet = if flat.chars().count() > 240 {
-                format!("{}…", flat.chars().take(240).collect::<String>())
-            } else {
-                flat
-            };
-            crate::ui::picker::Pick::new(i.to_string(), format!("{}) [{role}] {snippet}", i + 1))
-        })
-        .collect();
-    let Some(id) = crate::ui::picker::pick(&items, skin, "jump to (keeps this message, drops everything after)") else {
+    let items = jump_rows(history);
+    let Some(id) = crate::ui::picker::pick(&items, skin, "pick a message (keeps it, drops everything after)") else {
         println!("staying put.");
         return;
     };
@@ -1398,6 +1400,44 @@ mod slash_command_agreement_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod picker_row_tests {
+    use super::*;
+
+    #[test]
+    fn slash_command_rows_pair_the_command_with_its_summary() {
+        let cmds = crate::ui::commands::resolve_prefix("m");
+        assert!(!cmds.is_empty());
+        let rows = slash_command_rows(cmds.iter().copied());
+        assert_eq!(rows.len(), cmds.len());
+        for (row, c) in rows.iter().zip(&cmds) {
+            assert_eq!(row.label, format!("/{}", c.name));
+            assert_eq!(row.sublabel.as_deref(), Some(c.summary));
+            assert!(!row.disabled);
+        }
+    }
+
+    #[test]
+    fn jump_rows_split_snippet_and_speaker() {
+        let history = vec![Message::user("  hello\nworld  "), Message::assistant("hi there")];
+        let rows = jump_rows(&history);
+        assert_eq!(rows[0].id, "0");
+        assert_eq!(rows[0].label, "hello world");
+        assert_eq!(rows[0].sublabel.as_deref(), Some("[user]"));
+        assert_eq!(rows[1].label, "hi there");
+        assert_eq!(rows[1].sublabel.as_deref(), Some("[assistant]"));
+    }
+
+    #[test]
+    fn jump_rows_cap_long_snippets_with_an_ellipsis() {
+        let long = "w ".repeat(200);
+        let history = vec![Message::user(long)];
+        let rows = jump_rows(&history);
+        assert_eq!(rows[0].label.chars().count(), 241, "240 chars + the ellipsis");
+        assert!(rows[0].label.ends_with('…'));
     }
 }
 
