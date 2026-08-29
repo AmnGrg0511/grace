@@ -57,6 +57,38 @@ impl Drop for SpinnerWriteGuard<'_> {
     }
 }
 
+/// A shareable view of one live spinner's pause/resume control — handed to
+/// UI components that run while the spinner may own its line (the mid-turn
+/// prompt) so they can park it for their duration and hand the line back.
+pub(crate) struct SpinnerHandle(std::sync::Arc<std::sync::Mutex<SpinnerCore>>);
+
+impl SpinnerHandle {
+    pub(crate) fn pause(&self) {
+        pause_core(&self.0);
+    }
+
+    pub(crate) fn resume(&self) {
+        resume_core(&self.0);
+    }
+}
+
+fn pause_core(core: &std::sync::Arc<std::sync::Mutex<SpinnerCore>>) {
+    use std::io::Write;
+    let mut core = core.lock().unwrap();
+    core.paused = true;
+    if core.visible {
+        core.visible = false;
+        let mut out = std::io::stdout().lock();
+        let _ = write!(out, "{}{}", Spinner::UP, Spinner::CLR);
+        let _ = out.flush();
+        core.at_line_start = true;
+    }
+}
+
+fn resume_core(core: &std::sync::Arc<std::sync::Mutex<SpinnerCore>>) {
+    core.lock().unwrap().paused = false;
+}
+
 impl Spinner {
     const UP: &'static str = "\x1b[F";
     const CLR: &'static str = "\x1b[2K";
@@ -131,24 +163,22 @@ impl Spinner {
         }
     }
 
+    /// A shareable pause/resume handle for components that run while the
+    /// spinner may own its line (the mid-turn prompt parks it for its
+    /// duration, then hands the line back).
+    pub(crate) fn handle(&self) -> SpinnerHandle {
+        SpinnerHandle(self.core.clone())
+    }
+
     /// Suppress the spinner and erase it now: real output is about to land.
     pub(crate) fn pause(&self) {
-        use std::io::Write;
-        let mut core = self.core.lock().unwrap();
-        core.paused = true;
-        if core.visible {
-            core.visible = false;
-            let mut out = std::io::stdout().lock();
-            let _ = write!(out, "{}{}", Self::UP, Self::CLR);
-            let _ = out.flush();
-            core.at_line_start = true;
-        }
+        pause_core(&self.core);
     }
 
     /// Allow the ticker to claim the line again (a tool result just printed;
     /// the model is about to think once more).
     pub(crate) fn resume(&self) {
-        self.core.lock().unwrap().paused = false;
+        resume_core(&self.core);
     }
 
     /// Begin an event write: erases the spinner (when visible) so the event

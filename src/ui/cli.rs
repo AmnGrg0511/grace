@@ -447,6 +447,9 @@ fn run_one_shot(
         false,
         &interrupted,
         &config.context_compression,
+        // One-shot is non-interactive: a mid-turn prompt is Unavailable, and
+        // the tool fails with a readable error instead.
+        false,
     );
     let outcome = match turn {
         Ok(outcome) => outcome,

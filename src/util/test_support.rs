@@ -14,6 +14,12 @@
 /// what real single-process usage always was anyway.
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serializes every test that installs a prompter on the process-global
+/// mid-turn channel slot (`tools::interaction`) — the same shared-mutable
+/// state hazard `ENV_LOCK` covers for environment variables: parallel test
+/// threads must not observe each other's prompters.
+pub static PROMPT_SLOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Acquire the env lock, recovering from a poisoned mutex.
 ///
 /// A panicking test poisons the lock; without recovery, one genuine failure
@@ -21,6 +27,11 @@ pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// reason, which buries the actual signal.
 pub fn env_guard() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Acquire the prompt-slot lock (same poison recovery as [`env_guard`]).
+pub fn prompt_slot_guard() -> std::sync::MutexGuard<'static, ()> {
+    PROMPT_SLOT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Set an environment variable for the lifetime of the returned guard,

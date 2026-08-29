@@ -254,8 +254,18 @@ pub fn run_turn_displayed(
     stream: bool,
     interrupted: &std::sync::atomic::AtomicBool,
     compression: &crate::core::context::ContextCompressionConfig,
+    interactive: bool,
 ) -> crate::util::Result<crate::core::TurnOutcome> {
     let mut spinner = crate::ui::spinner::Spinner::start(skin);
+    // The mid-turn user-interaction channel lives only for a displayed,
+    // interactive turn: one-shot runs install nothing, and the guard puts
+    // the slot back even when the turn fails or is interrupted.
+    let _prompt_guard = interactive.then(|| {
+        crate::tools::interaction::install(std::sync::Arc::new(crate::ui::interaction::TurnPrompter::new(
+            *skin,
+            spinner.handle(),
+        )))
+    });
     let mut stream_state = StreamState::default();
     let outcome = {
         let mut sink = |event: crate::core::lifecycle::AgentEvent<'_>| {

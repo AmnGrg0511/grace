@@ -22,6 +22,7 @@ pub mod chat;
 pub mod cli;
 pub mod commands;
 pub mod completer;
+pub mod interaction;
 pub mod line_reader;
 pub mod markdown;
 pub mod model;

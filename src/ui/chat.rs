@@ -930,6 +930,8 @@ pub fn run_one_chat_turn(
         transport.supports_streaming(),
         interrupted,
         compression_config,
+        // Chat is where a tool may ask the user something mid-turn.
+        true,
     );
     match outcome {
         Ok(crate::core::TurnOutcome {
@@ -1158,6 +1160,9 @@ mod failed_turn_tests {
         let sessions = SessionStore::open(&path).unwrap();
         let sid = "s-failturn";
 
+        // This turn installs the mid-turn prompt slot (chat is interactive);
+        // hold the slot lock so the slot-asserting tests can't race it.
+        let _slot_lock = crate::util::test_support::prompt_slot_guard();
         let mut tools = crate::tools::ToolRegistry::new();
         tools.register(Box::new(NoopTool));
 

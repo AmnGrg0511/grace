@@ -104,13 +104,13 @@ src/
     stream.rs      SSE accumulation
   tools/         the tool system
     trait.rs, registry.rs, builtins/{terminal,file,patch}.rs
-    delegate.rs, session.rs, plugin.rs
+    delegate.rs, session.rs, plugin.rs, interaction.rs (mid-turn ask/answer)
   memory/        durable facts (store.rs + prompt.rs)
   session/       chat history (store.rs, lock.rs, title.rs)
   skill/         skills (store.rs, load.rs, defaults.rs)
   recall/        pre-flight context injection
   config/        args.rs, settings.rs, soul.rs, env.rs (the ~/.grace/.env key store)
-  ui/            chat REPL, cli, markdown, skins, wizard, picker, commands
+  ui/            chat REPL, cli, markdown, skins, wizard, picker, interaction, commands
   util/          error.rs, tokens.rs, diff.rs
 ```
 

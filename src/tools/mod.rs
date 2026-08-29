@@ -7,10 +7,12 @@
 //! delegate.rs   `delegate`: run a bounded sub-agent as a tool call
 //! session.rs    `session_search`: FTS over past conversations
 //! plugin.rs     executable tools discovered from a directory
+//! interaction.rs the mid-turn user-interaction channel (ask/answer slot)
 //! ```
 
 pub mod builtins;
 pub mod delegate;
+pub mod interaction;
 pub mod plugin;
 pub mod registry;
 pub mod session;
