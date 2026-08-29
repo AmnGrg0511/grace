@@ -325,10 +325,12 @@ fn emit_content(
 
 /// Call the transport, retrying up to two extra times within the same
 /// iteration (not counted against the budget) if the provider returns a
-/// malformed response. Transport errors propagate immediately — only a bad
-/// response *shape* is treated as transiently recoverable, since retrying a
-/// genuine auth or network failure just triples the latency before the same
-/// error.
+/// malformed response — and only while no content has been surfaced to the
+/// screen, since a retry would otherwise stream the same answer a second
+/// time. Transport errors propagate immediately: the streaming transport
+/// owns those retries (see `stream::stream_complete`), so retrying a
+/// genuine auth or network failure here would just multiply latency before
+/// the same error.
 fn complete_with_retry(
     transport: &(dyn ProviderTransport + '_),
     messages: &[Message],
@@ -339,6 +341,9 @@ fn complete_with_retry(
 ) -> Result<ModelResponse> {
     const MAX_RETRIES: u32 = 2;
     let mut last_err = None;
+    // Latched the first time a fragment actually reached a live sink.
+    // With no sink nothing is visible, so the retry stays safe.
+    let mut surfaced = false;
     for _ in 0..=MAX_RETRIES {
         // Stream whenever the transport can, even when the caller asked for a
         // blocking one-shot: the fragment callback then polls the interrupt
@@ -353,6 +358,7 @@ fn complete_with_retry(
                 if stream {
                     if let Some(cb) = sink.as_deref_mut() {
                         cb(AgentEvent::ContentFragment(frag));
+                        surfaced = true;
                     }
                 }
                 Ok(())
@@ -363,7 +369,7 @@ fn complete_with_retry(
         };
         match attempt {
             Ok(resp) => return Ok(resp),
-            Err(e @ AgentError::Response(_)) => last_err = Some(e),
+            Err(e @ AgentError::Response(_)) if !surfaced => last_err = Some(e),
             Err(e) => return Err(e),
         }
     }
