@@ -202,7 +202,18 @@ impl HttpTransport {
                 }
             }
             if attempt < MAX_ATTEMPTS {
-                std::thread::sleep(backoff);
+                // Don't sleep away a backoff the user has already cancelled.
+                if crate::util::interrupt::poll() {
+                    return Err(AgentError::Interrupted);
+                }
+                let reason = last_err
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "previous attempt failed".to_string());
+                crate::util::announce_retry(attempt, MAX_ATTEMPTS, &reason);
+                if crate::util::interrupt::sleep_interruptibly(backoff) {
+                    return Err(AgentError::Interrupted);
+                }
                 backoff *= 2;
             }
         }

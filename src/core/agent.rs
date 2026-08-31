@@ -374,7 +374,7 @@ fn complete_with_retry(
     // Latched the first time a fragment actually reached a live sink.
     // With no sink nothing is visible, so the retry stays safe.
     let mut surfaced = false;
-    for _ in 0..=MAX_RETRIES {
+    for attempt_no in 0..=MAX_RETRIES {
         // Stream whenever the transport can, even when the caller asked for a
         // blocking one-shot: the fragment callback then polls the interrupt
         // flag on every token, so a Ctrl-C lands mid-generation instead of
@@ -399,6 +399,12 @@ fn complete_with_retry(
         };
         match attempt {
             Ok(resp) => return Ok(resp),
+            Err(e @ AgentError::Response(_)) if !surfaced && attempt_no < MAX_RETRIES => {
+                // Announce only when a retry actually follows — the loop ends
+                // again after the last attempt, so "retry 3/3" would be a lie.
+                crate::util::announce_retry(attempt_no + 1, MAX_RETRIES + 1, &e.to_string());
+                last_err = Some(e);
+            }
             Err(e @ AgentError::Response(_)) if !surfaced => last_err = Some(e),
             Err(e) => return Err(e),
         }

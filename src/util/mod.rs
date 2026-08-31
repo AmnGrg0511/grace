@@ -5,6 +5,7 @@
 
 pub mod diff;
 pub mod error;
+pub mod interrupt;
 pub mod log;
 pub mod tokens;
 
@@ -67,6 +68,18 @@ pub fn base64_encode(data: &[u8]) -> String {
         out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
     }
     out
+}
+
+/// Announce to stderr that a provider call is being retried, so a flaky
+/// endpoint (or a mid-turn malformed response) is visible instead of silent.
+/// `attempt` is the failed attempt number (1-based), `max` the attempt cap;
+/// `reason` is a short human-readable cause, truncated to keep the line one
+/// screen-wide.
+pub fn announce_retry(attempt: u32, max: u32, reason: &str) {
+    eprintln!(
+        "[grace] retry {attempt}/{max} — {reason}",
+        reason = truncate_utf8_display(reason, 80)
+    );
 }
 
 #[cfg(test)]

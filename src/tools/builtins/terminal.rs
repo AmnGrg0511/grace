@@ -73,24 +73,17 @@ fn read_bounded<R: std::io::Read + Send + 'static>(r: R, deadline: Option<std::t
 // (same shape as the bg-job registry) avoids threading the flag through the
 // `Tool` trait and every construction site.
 
-static TURN_INTERRUPT: OnceLock<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>> = OnceLock::new();
+// The turn-interrupt flag lives in `util::interrupt` (the bottom layer) so
+// the transport retry loops can poll it too without depending on `tools`.
 
 /// Publish the flag Ctrl-C latches, so long-running tool work can watch it.
 /// Called once at startup; later callers replace the previous flag.
 pub fn set_turn_interrupt(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    *TURN_INTERRUPT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap() = Some(flag);
+    crate::util::interrupt::set_flag(flag);
 }
 
 fn turn_interrupted() -> bool {
-    TURN_INTERRUPT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+    crate::util::interrupt::poll()
 }
 
 // ---- background job registry -----------------------------------------------

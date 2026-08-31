@@ -427,7 +427,10 @@ pub fn stream_complete(
                     return Err(AgentError::Interrupted);
                 }
                 if retryable && !emitted && attempt < MAX_ATTEMPTS {
-                    std::thread::sleep(backoff);
+                    crate::util::announce_retry(attempt, MAX_ATTEMPTS, &e.to_string());
+                    if crate::util::interrupt::sleep_interruptibly(backoff) {
+                        return Err(AgentError::Interrupted);
+                    }
                     backoff *= 2;
                     continue;
                 }
