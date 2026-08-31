@@ -416,10 +416,16 @@ fn run_one_shot(
     skin: &Skin,
 ) -> Result<ExitCode, BoxedError> {
     let user_text = args.prompt.clone().unwrap_or_default();
-    messages.push(Message::user(user_text.clone()));
-    if let Some(sid) = session_id {
-        let _ = sessions.append(sid, &Message::user(user_text));
-    }
+    let user_msg = Message::user(user_text.clone());
+    messages.push(user_msg.clone());
+    // Persist the user row (as sent) and remember its id: a Ctrl-C unwinds
+    // from this row, dropping the prompt together with any partial tool
+    // traffic the turn already recorded, rather than leaving it dangling.
+    // A `0` (the row was skipped — e.g. an empty prompt) becomes `None` so a
+    // later `truncate_from_row_id` can never be handed `0` and wipe the session.
+    let user_row_id: Option<i64> = session_id
+        .and_then(|sid| sessions.append(sid, &user_msg).ok())
+        .filter(|&id| id > 0);
 
     // Same Ctrl-C semantics as chat mode: the handler (installed once) sets
     // the flag the agent loop polls; the loop unwinds with `Interrupted`
@@ -435,6 +441,13 @@ fn run_one_shot(
     }
     // One-shot turns run tools too — same kill-the-command contract.
     crate::tools::builtins::terminal::set_turn_interrupt(interrupted.clone());
+    // Persist every transcript message the turn creates the moment it is
+    // created — the faithful-transcript hook (a no-op with no session).
+    let mut persist_message = |msg: &Message| {
+        if let Some(sid) = session_id {
+            let _ = sessions.append(sid, msg);
+        }
+    };
     let turn = crate::ui::stream::run_turn_displayed(
         transport,
         tools,
@@ -450,31 +463,31 @@ fn run_one_shot(
         // One-shot is non-interactive: a mid-turn prompt is Unavailable, and
         // the tool fails with a readable error instead.
         false,
+        Some(&mut persist_message),
     );
     let outcome = match turn {
         Ok(outcome) => outcome,
         // Ctrl-C: not an error report — the same "stop, I'm going" as a
-        // shell would give. Rewind the user row (one-shot never persists
-        // the partial tool traffic a chat turn would keep) and exit with
-        // the conventional SIGINT status.
+        // shell would give. Unwind the whole attempt — the user row and any
+        // tool traffic the turn already recorded — and exit with the
+        // conventional SIGINT status.
         Err(crate::util::AgentError::Interrupted) => {
-            if let Some(sid) = session_id {
-                let _ = sessions.delete_last_user_row(sid);
+            if let (Some(sid), Some(row_id)) = (session_id, user_row_id) {
+                let _ = sessions.truncate_from_row_id(sid, row_id);
             }
             eprintln!("interrupted");
             return Ok(ExitCode::from(130));
         }
         Err(e) => {
-            // The user row stays: a failed one-shot should look the same as
-            // an interrupted chat turn when the session is resumed — the
-            // prompt is there, ready to retry with its progress intact.
+            // The user row and any completed tool traffic stay: a failed
+            // one-shot should look the same as an interrupted chat turn when
+            // the session is resumed — the prompt is there, ready to retry
+            // with its progress intact.
             return Err(e.into());
         }
     };
 
-    if let Some(sid) = session_id {
-        let _ = sessions.append(sid, &Message::assistant(outcome.answer.clone()));
-    }
+    // The answer row was already persisted by the `persist_message` hook.
     if outcome.streamed {
         // The answer already appeared live as it was produced; printing the
         // rendered copy underneath would duplicate the whole thing.

@@ -255,6 +255,7 @@ pub fn run_turn_displayed(
     interrupted: &std::sync::atomic::AtomicBool,
     compression: &crate::core::context::ContextCompressionConfig,
     interactive: bool,
+    on_message: Option<&mut dyn FnMut(&crate::message::Message)>,
 ) -> crate::util::Result<crate::core::TurnOutcome> {
     let mut spinner = crate::ui::spinner::Spinner::start(skin);
     // The mid-turn user-interaction channel lives only for a displayed,
@@ -286,16 +287,21 @@ pub fn run_turn_displayed(
                 spinner.resume();
             }
         };
+        let mut options = crate::core::TurnOptions::new()
+            .with_events(&mut sink)
+            .with_interrupt(interrupted)
+            .with_compression(compression)
+            .streaming(stream);
+        // The caller's per-message persistence hook (faithful transcript).
+        if let Some(cb) = on_message {
+            options = options.with_on_message(cb);
+        }
         crate::core::run_turn_with_options(
             transport,
             tools,
             messages,
             max_iterations,
-            crate::core::TurnOptions::new()
-                .with_events(&mut sink)
-                .with_interrupt(interrupted)
-                .with_compression(compression)
-                .streaming(stream),
+            options,
         )
     };
     // The agent emits no terminal event after its last ContentFragment, so a

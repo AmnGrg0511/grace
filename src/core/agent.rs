@@ -35,6 +35,12 @@ pub struct TurnOptions<'a> {
     pub compression: Option<&'a ContextCompressionConfig>,
     /// Stream assistant content as it arrives, when the transport supports it.
     pub stream: bool,
+    /// Called for every message the loop appends to the transcript — assistant
+    /// replies (including the final answer), tool results, and the synthesized
+    /// close-outs an interrupt leaves behind. Persisting here, at the moment a
+    /// message is created, is what keeps a session's on-disk transcript faithful
+    /// even when compression later rewrites the in-memory vec.
+    pub on_message: Option<&'a mut dyn FnMut(&Message)>,
 }
 
 impl<'a> TurnOptions<'a> {
@@ -63,6 +69,12 @@ impl<'a> TurnOptions<'a> {
     #[must_use]
     pub fn streaming(mut self, on: bool) -> Self {
         self.stream = on;
+        self
+    }
+
+    #[must_use]
+    pub fn with_on_message(mut self, cb: &'a mut dyn FnMut(&Message)) -> Self {
+        self.on_message = Some(cb);
         self
     }
 }
@@ -182,6 +194,7 @@ pub fn run_turn_with_options(
             tool_calls: resp.tool_calls.clone(),
             ..Default::default()
         });
+        notify_message(messages, &mut options.on_message);
 
         match resp.finish_reason {
             FinishReason::Stop => {
@@ -218,6 +231,7 @@ pub fn run_turn_with_options(
                     &resp.tool_calls,
                     &mut options.on_event,
                     options.interrupted,
+                    &mut options.on_message,
                 )?;
             }
         }
@@ -233,6 +247,7 @@ fn run_tool_calls(
     tool_calls: &[ToolCall],
     on_event: &mut Option<&mut dyn FnMut(AgentEvent)>,
     interrupted: Option<&AtomicBool>,
+    on_message: &mut Option<&mut dyn FnMut(&Message)>,
 ) -> Result<()> {
     let is_interrupted = || interrupted.is_some_and(|f| f.load(Ordering::SeqCst));
     for (i, call) in tool_calls.iter().enumerate() {
@@ -242,7 +257,7 @@ fn run_tool_calls(
             // An interrupt mid-loop would leave the remaining calls open,
             // corrupting the next request — so close them out with a
             // synthesized result before unwinding the turn.
-            close_out_pending(messages, &tool_calls[i..]);
+            close_out_pending(messages, &tool_calls[i..], on_message);
             return Err(AgentError::Interrupted);
         }
         emit(
@@ -271,7 +286,7 @@ fn run_tool_calls(
             // child and returns whatever it had). Treat the result as void:
             // close out every open call so the next request isn't corrupted,
             // then unwind.
-            close_out_pending(messages, &tool_calls[i..]);
+            close_out_pending(messages, &tool_calls[i..], on_message);
             return Err(AgentError::Interrupted);
         }
         let elapsed = started.elapsed();
@@ -288,19 +303,34 @@ fn run_tool_calls(
             call.name().to_string(),
             result,
         ));
+        notify_message(messages, on_message);
     }
     Ok(())
 }
 
 /// Give every unanswered call a synthesized result so an interrupted turn
 /// leaves a transcript the provider will accept on the next request.
-fn close_out_pending(messages: &mut Vec<Message>, pending: &[ToolCall]) {
+fn close_out_pending(
+    messages: &mut Vec<Message>,
+    pending: &[ToolCall],
+    on_message: &mut Option<&mut dyn FnMut(&Message)>,
+) {
     for call in pending {
         messages.push(Message::tool(
             call.id.clone(),
             call.name().to_string(),
             "[interrupted — no result]",
         ));
+        notify_message(messages, on_message);
+    }
+}
+
+/// Fire the per-message persistence hook for the message just pushed, if the
+/// caller installed one. Reads off the tail so the hook sees the exact stored
+/// value without an extra clone.
+fn notify_message(messages: &[Message], on_message: &mut Option<&mut dyn FnMut(&Message)>) {
+    if let (Some(cb), Some(last)) = (on_message.as_mut(), messages.last()) {
+        cb(last);
     }
 }
 

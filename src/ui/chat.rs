@@ -897,26 +897,37 @@ pub fn run_one_chat_turn(
     compression_config: &ContextCompressionConfig,
     verbose: bool,
 ) -> Option<crate::transport::TokenUsage> {
-    // Snapshot turn count BEFORE appending — drives auto-(re)titling below.
-    // History alternates user/assistant, so history_len/2 is the 0-based
-    // index of the turn about to happen.
+    // Snapshot the turn count BEFORE appending — drives auto-(re)titling
+    // below. Counted as user rows (not total rows, which now also include
+    // tool traffic): each real turn contributes exactly one, so this is the
+    // 0-based index of the turn about to happen.
     let turn_index = session_id
-        .and_then(|sid| sessions.load(sid).ok())
-        .map(|h| h.len() / 2)
+        .and_then(|sid| sessions.count_user_rows(sid).ok())
         .unwrap_or(0);
-    messages.push(Message::user(match recall_hint {
+    // The user row is persisted exactly as sent — recall hint included — so
+    // the on-disk prefix is byte-identical to the request the model actually
+    // saw. A resumed session replays it verbatim (recall is only re-derived
+    // for fresh input, never for loaded history), keeping the provider's
+    // prompt-cache prefix warm.
+    let user_msg = Message::user(match recall_hint {
         Some(hint) => format!("{text}\n{hint}"),
         None => text.to_string(),
-    }));
+    });
+    messages.push(user_msg.clone());
     if let Some(sid) = session_id {
-        // Persist the clean user text (no recall noise) — recall is
-        // re-derived fresh on replay/resume, so baking it into disk history
-        // would only duplicate and stale-date it.
-        let _ = sessions.append(sid, &Message::user(text.to_string()));
+        let _ = sessions.append(sid, &user_msg);
     }
     // Clear any interrupt latched from a previous turn before starting a new
     // one — otherwise a stale Ctrl-C would abort every turn from here on.
     interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Persist every transcript message the turn creates (assistant replies,
+    // tool results, interrupt close-outs) the moment it is created — the
+    // faithful-transcript hook. A no-op when no session is open.
+    let mut persist_message = |msg: &Message| {
+        if let Some(sid) = session_id {
+            let _ = sessions.append(sid, msg);
+        }
+    };
     let outcome = crate::ui::stream::run_turn_displayed(
         transport,
         tools,
@@ -932,6 +943,7 @@ pub fn run_one_chat_turn(
         compression_config,
         // Chat is where a tool may ask the user something mid-turn.
         true,
+        Some(&mut persist_message),
     );
     match outcome {
         Ok(crate::core::TurnOutcome {
@@ -955,7 +967,9 @@ pub fn run_one_chat_turn(
                 );
             }
             if let Some(sid) = session_id {
-                let _ = sessions.append(sid, &Message::assistant(answer.clone()));
+                // The final answer row was already persisted by the
+                // `persist_message` hook when the loop pushed it — persisting
+                // it again here would duplicate the row.
                 // Per-turn token record for /info. Uses the whole turn's
                 // summed usage (a tool-using turn makes several provider
                 // calls); providers that omit usage record a zero row so the
@@ -985,13 +999,20 @@ pub fn run_one_chat_turn(
                 if should_retitle {
                     if let Some(model) = transport.current_model() {
                         // Summarize the whole conversation so far, not just
-                        // this turn — the picker title should reflect what
-                        // the *session* is about, not just its latest message.
+                        // this turn — the picker title should reflect what the
+                        // *session* is about, not just its latest message.
+                        // User + assistant text only: tool results are noise
+                        // for naming a session and would dominate the transcript.
                         let transcript = sessions
                             .load(sid)
                             .unwrap_or_default()
                             .iter()
-                            .filter(|m| !m.content.is_empty())
+                            .filter(|m| {
+                                matches!(
+                                    m.role,
+                                    crate::message::Role::User | crate::message::Role::Assistant
+                                ) && !m.content.is_empty()
+                            })
                             .map(|m| format!("{:?}: {}", m.role, m.content))
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -1195,12 +1216,109 @@ mod failed_turn_tests {
             "a failed turn must keep its progress in context"
         );
 
-        // And the user's prompt stays on disk, so a resume can still see
-        // what was asked (the old behavior deleted it).
+        // And the turn's traffic — the user's prompt, the assistant's tool
+        // call, and the tool result — all stay on disk, so a resume sees the
+        // work already done instead of re-issuing the call (the old behavior
+        // persisted only the prompt).
         let loaded = sessions.load(sid).unwrap();
-        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded.len(),
+            3,
+            "user + assistant tool-call + tool result: {loaded:?}"
+        );
         assert_eq!(loaded[0].role, Role::User);
         assert_eq!(loaded[0].content, "figure out the cyclic valid scenario");
+        assert_eq!(loaded[1].role, Role::Assistant);
+        assert_eq!(loaded[1].tool_calls.len(), 1);
+        assert_eq!(loaded[1].tool_calls[0].id, "call_1");
+        assert_eq!(loaded[2].role, Role::Tool);
+        assert_eq!(loaded[2].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(loaded[2].content, "ok");
+
+        drop(sessions);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A turn that succeeds after a tool round must persist the full faithful
+    /// transcript — user, the assistant's tool call, the tool result, and the
+    /// final answer — so a resume continues from real progress.
+    #[test]
+    fn a_completed_tool_turn_persists_the_full_transcript() {
+        let path = std::env::temp_dir().join(format!(
+            "grace_completed_tool_turn_test_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let sessions = SessionStore::open(&path).unwrap();
+        let sid = "s-toolturn";
+
+        let _slot_lock = crate::util::test_support::prompt_slot_guard();
+        let mut tools = crate::tools::ToolRegistry::new();
+        tools.register(Box::new(NoopTool));
+
+        let mut messages = vec![Message::system("you are grace")];
+        let interrupted = std::sync::Arc::new(AtomicBool::new(false));
+        // First call: a tool call. Second call: the final answer.
+        struct TwoRound {
+            calls: Cell<u32>,
+        }
+        impl crate::transport::r#trait::ProviderTransport for TwoRound {
+            fn name(&self) -> &str {
+                "two-round"
+            }
+            fn complete(
+                &self,
+                _m: &[Message],
+                _t: &[crate::transport::r#trait::ToolSpec],
+                _model: &str,
+            ) -> crate::util::Result<crate::transport::r#trait::ModelResponse> {
+                let n = self.calls.get();
+                self.calls.set(n + 1);
+                if n == 0 {
+                    Ok(crate::transport::r#trait::ModelResponse {
+                        content: String::new(),
+                        tool_calls: vec![crate::message::ToolCall::new("c1", "noop", "{}")],
+                        finish_reason: crate::transport::r#trait::FinishReason::ToolCalls,
+                        usage: None,
+                    })
+                } else {
+                    Ok(crate::transport::r#trait::ModelResponse {
+                        content: "All done.".into(),
+                        tool_calls: vec![],
+                        finish_reason: crate::transport::r#trait::FinishReason::Stop,
+                        usage: None,
+                    })
+                }
+            }
+        }
+        let transport = TwoRound {
+            calls: Cell::new(0),
+        };
+
+        run_one_chat_turn(
+            &transport,
+            &tools,
+            &mut messages,
+            8,
+            &sessions,
+            Some(sid),
+            "run the noop tool",
+            None,
+            &crate::ui::skin::SOLARIS,
+            &interrupted,
+            &ContextCompressionConfig::default(),
+            false,
+        );
+
+        let loaded = sessions.load(sid).unwrap();
+        let roles: Vec<Role> = loaded.iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![Role::User, Role::Assistant, Role::Tool, Role::Assistant],
+            "user, tool-call, tool result, final answer: {loaded:?}"
+        );
+        assert_eq!(loaded[3].content, "All done.");
+        assert_eq!(loaded[2].tool_call_id.as_deref(), Some("c1"));
 
         drop(sessions);
         let _ = std::fs::remove_file(&path);
