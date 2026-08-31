@@ -137,6 +137,33 @@ impl Message {
             ..Default::default()
         }
     }
+
+    /// A faithful one-line rendering for human diagnostics — `/dump` and the
+    /// `GRACE_LOG` request log both use it so nothing the model saw is dropped.
+    /// A bare `[role] content` form hides the tool traffic: an assistant turn
+    /// that only requested calls shows its `→ name(args) #id` lines (keeping
+    /// prose if it led with any), and a tool result shows which call it
+    /// answers (`[tool · name #id]`).
+    pub fn render(&self) -> String {
+        match self.role {
+            Role::Assistant if !self.tool_calls.is_empty() => {
+                let mut s = String::new();
+                if !self.content.trim().is_empty() {
+                    s.push_str(&format!("[assistant] {}\n", self.content));
+                }
+                for c in &self.tool_calls {
+                    s.push_str(&format!("  → {}({}) #{}\n", c.name(), c.arguments(), c.id));
+                }
+                s.trim_end().to_string()
+            }
+            Role::Tool => {
+                let name = self.name.as_deref().unwrap_or("?");
+                let cid = self.tool_call_id.as_deref().unwrap_or("?");
+                format!("[tool · {name} #{cid}] {}", self.content)
+            }
+            _ => format!("[{}] {}", self.role.as_str(), self.content),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -168,5 +195,25 @@ mod tests {
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["tool_calls"][0]["type"], "function");
         assert_eq!(json["tool_calls"][0]["id"], "call_1");
+    }
+
+    #[test]
+    fn render_is_faithful_across_roles_and_tool_traffic() {
+        // A user prompt, an assistant that only requested a call (tool traffic
+        // a bare `[role] content` form would drop), the tool result with its
+        // linkage, and a plain final answer.
+        assert_eq!(Message::user("hey").render(), "[user] hey");
+        assert_eq!(Message::system("sys").render(), "[system] sys");
+        let calling = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![ToolCall::new("call_1", "read", "{\"path\":\"/a\"}")],
+            tool_call_id: None,
+            name: None,
+        };
+        assert_eq!(calling.render(), "  → read({\"path\":\"/a\"}) #call_1");
+        let tool = Message::tool("call_1", "read", "file contents");
+        assert_eq!(tool.render(), "[tool · read #call_1] file contents");
+        assert_eq!(Message::assistant("done").render(), "[assistant] done");
     }
 }

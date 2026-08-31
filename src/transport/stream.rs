@@ -327,6 +327,19 @@ pub fn stream_complete(
     // `stream` flag and the `include_usage` request.
     let body = stream_request_body(model, messages, tools, reasoning);
 
+    if crate::util::log::enabled() {
+        let mut msgs = String::new();
+        for m in messages {
+            msgs.push_str(&m.render());
+            msgs.push('\n');
+        }
+        crate::util::log::line(&format!(
+            "request model={model} stream=true messages={}\n{}",
+            messages.len(),
+            msgs.trim_end()
+        ));
+    }
+
     // Connect timeout only — a global `.timeout()` would also cap the body
     // read and kill legitimately long generations mid-stream.
     let client = reqwest::blocking::Client::builder()
@@ -389,7 +402,21 @@ pub fn stream_complete(
         };
 
         match outcome {
-            Ok(resp) => return Ok(resp),
+            Ok(resp) => {
+                if crate::util::log::enabled() {
+                    crate::util::log::line(&format!(
+                        "response finish={:?} tool_calls={} content_chars={} usage={:?}",
+                        resp.finish_reason,
+                        resp.tool_calls.len(),
+                        resp.content.chars().count(),
+                        resp.usage.map(|u| format!(
+                            "{} in / {} out",
+                            u.prompt_tokens, u.completion_tokens
+                        ))
+                    ));
+                }
+                return Ok(resp);
+            }
             Err(e) => {
                 // An early-EOF driven by the interrupt flag is a
                 // cancellation, not a cut-off stream: it must surface as

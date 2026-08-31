@@ -233,6 +233,19 @@ impl ProviderTransport for HttpTransport {
         let body =
             chat_request_body(model, messages, tools, self.reasoning_effort.borrow().as_deref());
 
+        if crate::util::log::enabled() {
+            let mut msgs = String::new();
+            for m in messages {
+                msgs.push_str(&m.render());
+                msgs.push('\n');
+            }
+            crate::util::log::line(&format!(
+                "request model={model} messages={}\n{}",
+                messages.len(),
+                msgs.trim_end()
+            ));
+        }
+
         let parsed = self.send_with_retry(&body)?;
 
         // Surface the upstream error object if the provider returned one
@@ -265,6 +278,18 @@ impl ProviderTransport for HttpTransport {
         // what the provider reported (some send "stop" with tool calls).
         if !resp.tool_calls.is_empty() {
             resp.finish_reason = FinishReason::ToolCalls;
+        }
+        if crate::util::log::enabled() {
+            crate::util::log::line(&format!(
+                "response finish={:?} tool_calls={} content_chars={} usage={:?}",
+                resp.finish_reason,
+                resp.tool_calls.len(),
+                resp.content.chars().count(),
+                resp.usage.map(|u| format!(
+                    "{} in / {} out",
+                    u.prompt_tokens, u.completion_tokens
+                ))
+            ));
         }
         Ok(resp)
     }

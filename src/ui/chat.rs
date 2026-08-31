@@ -1526,13 +1526,8 @@ fn handle_dump_command(messages: &[Message], arg: &str) {
     }
     let mut text = String::new();
     for m in messages {
-        let role = match m.role {
-            crate::message::Role::User => "user",
-            crate::message::Role::Assistant => "assistant",
-            crate::message::Role::Tool => "tool",
-            crate::message::Role::System => "system",
-        };
-        text.push_str(&format!("[{role}] {}\n\n", m.content));
+        text.push_str(&m.render());
+        text.push_str("\n\n");
     }
     if let Some(path) = arg.split_whitespace().next() {
         match std::fs::write(path, &text) {
@@ -1676,6 +1671,45 @@ mod picker_row_tests {
             empty_answer_note(&skin, "I did the thing.").is_empty(),
             "a real answer gets no extra note"
         );
+    }
+
+    #[test]
+    fn dump_writes_the_faithful_transcript_including_tool_traffic() {
+        // `/dump FILE` must be a complete picture of what the model saw (commit
+        // 1's faithful persistence), not a bare `[role] content` that drops the
+        // tool calls and their result linkage.
+        let messages = vec![
+            Message::system("sys prompt"),
+            Message::user("read the file"),
+            Message {
+                role: crate::message::Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![crate::message::ToolCall::new(
+                    "call_1",
+                    "read",
+                    "{\"path\":\"/tmp/a.txt\"}",
+                )],
+                tool_call_id: None,
+                name: None,
+            },
+            Message::tool("call_1", "read", "file text"),
+            Message::assistant("here it is"),
+        ];
+        let path = std::env::temp_dir().join(format!("grace_dump_test_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        handle_dump_command(&messages, path.to_str().unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[user] read the file"), "user row: {text}");
+        assert!(
+            text.contains("→ read({\"path\":\"/tmp/a.txt\"}) #call_1"),
+            "the tool call must appear (faithful): {text}"
+        );
+        assert!(
+            text.contains("[tool · read #call_1] file text"),
+            "the tool result must keep its linkage: {text}"
+        );
+        assert!(text.contains("[assistant] here it is"), "final answer: {text}");
+        let _ = std::fs::remove_file(&path);
     }
 }
 

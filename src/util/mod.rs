@@ -5,6 +5,7 @@
 
 pub mod diff;
 pub mod error;
+pub mod log;
 pub mod tokens;
 
 #[cfg(test)]
