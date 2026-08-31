@@ -8,6 +8,10 @@
 //! window of at most [`WINDOW`] rows centered on the selection, so any number
 //! of items works on any terminal.
 //!
+//! Row grammar is uniform: a `label` painted in the row style, then an
+//! optional `sublabel` painted as a padded golden chip in the skin's [`Role::Code`]
+//! voice — every picker row reads the same.
+//!
 //! This primitive redraws its own bounded region (cursor-up + re-print) — it
 //! is NOT part of the answer stream path, whose append-only invariant forbids
 //! cursor movement; the picker runs between turns, when the stream is idle.
@@ -90,8 +94,8 @@ pub fn wrap_words(text: &str, budget: usize) -> Vec<String> {
 
 /// One selectable row (owned strings — callers build labels at runtime).
 /// `id` is returned on selection (stable, not display text); `label` is what
-/// the user sees; `sublabel` is an optional dimmed second hint (a path, a
-/// timestamp, a count).
+/// the user sees; `sublabel` is an optional padded hint chip (host, blurb,
+/// recency) painted uniformly in the skin's hint role.
 #[derive(Debug, Clone)]
 pub struct Pick {
     pub id: String,
@@ -101,18 +105,9 @@ pub struct Pick {
     /// current model, the session that's open right now). Navigation skips
     /// over it and Enter on it does nothing.
     pub disabled: bool,
-    /// The sublabel carries its own ANSI accent colors (e.g. a timestamp
-    /// painted differently from the title) — written verbatim instead of
-    /// being repainted with the row style. Verbatim sublabels render on one
-    /// line; keep them short.
-    pub sub_verbatim: bool,
     /// Pre-rendered lines under the row (skin color snapshots). Written
     /// verbatim and excluded from type-to-filter.
     pub extra_lines: Vec<String>,
-    /// The color role a plain sublabel paints with, instead of the row's
-    /// uniform style — command summaries in the palette read better in their
-    /// own quieter voice than the label's. `None` keeps the old behavior.
-    pub sub_role: Option<crate::ui::skin::Role>,
 }
 
 impl Pick {
@@ -123,19 +118,11 @@ impl Pick {
             label: label.into(),
             sublabel: None,
             disabled: false,
-            sub_verbatim: false,
             extra_lines: Vec::new(),
-            sub_role: None,
         }
     }
 
-    /// Paint the plain sublabel in `role` (no-op for verbatim sublabels).
-    pub fn hint_role(mut self, role: crate::ui::skin::Role) -> Self {
-        self.sub_role = Some(role);
-        self
-    }
-
-    /// Attach a hint shown after the label.
+    /// Attach a hint shown after the label (rendered as a padded chip).
     pub fn hint(mut self, sub: impl Into<String>) -> Self {
         self.sublabel = Some(sub.into());
         self
@@ -144,12 +131,6 @@ impl Pick {
     /// Mark the row as the already-active choice.
     pub fn disabled(mut self) -> Self {
         self.disabled = true;
-        self
-    }
-
-    /// Let the sublabel carry its own paint (accent colors).
-    pub fn verbatim_sub(mut self) -> Self {
-        self.sub_verbatim = true;
         self
     }
 
@@ -360,39 +341,27 @@ fn render_frame(
             ("  ".to_string(), Role::ToolDim)
         };
 
-        // One entry assembles from plain-text parts — label lines, an
-        // optional verbatim accent tail, optional sublabel lines (the first
-        // of which may be glued onto the final label line when both fit) —
-        // so widths and the budget never measure ANSI bytes; painting
-        // happens at emit time and can give the sublabel its own role.
+        // One entry assembles from plain-text parts — label lines, optional
+        // sublabel lines — so widths and the budget never measure ANSI bytes;
+        // painting happens at emit time and gives the sublabel a uniform
+        // padded chip in the skin's hint role.
         let mut label_rows: Vec<(String, Option<String>)> =
             wrap_words(&it.label, label_budget).into_iter().map(|l| (l, None)).collect();
-        let mut raw_tail: Option<String> = None;
         let mut sub_rows: Vec<String> = Vec::new();
         if let Some(sub) = it.sublabel.as_deref() {
-            if it.sub_verbatim {
-                if visible_width(sub) <= sub_budget {
-                    raw_tail = Some(sub.to_string());
-                } else {
-                    // Pathologically wide accent text degrades to plain
-                    // wrapped text rather than risking an overflowing row.
-                    sub_rows = wrap_words(&crate::ui::markdown::strip_ansi(sub), sub_budget);
-                    raw_tail = None;
+            let mut sub_lines = wrap_words(sub, sub_budget.saturating_sub(2));
+            let fits_inline = label_rows.last().is_some_and(|(l, _)| {
+                // +2 for the padding spaces inside the hint chip paint.
+                visible_width(l) + 2 + visible_width(&sub_lines[0]) + 2 <= label_budget
+            });
+            if fits_inline {
+                // Glue the first subline onto the label row but remember
+                // it separately so the two paints stay independent.
+                if let Some((_, glued)) = label_rows.last_mut() {
+                    *glued = sub_lines.remove(0).into();
                 }
-            } else {
-                let mut sub_lines = wrap_words(sub, sub_budget);
-                let fits_inline = label_rows.last().is_some_and(|(l, _)| {
-                    visible_width(l) + 2 + visible_width(&sub_lines[0]) <= label_budget
-                });
-                if fits_inline {
-                    // Glue the first subline onto the label row but remember
-                    // it separately so the two paints stay independent.
-                    if let Some((_, glued)) = label_rows.last_mut() {
-                        *glued = sub_lines.remove(0).into();
-                    }
-                }
-                sub_rows = sub_lines;
             }
+            sub_rows = sub_lines;
         }
 
         // Per-entry row budget: the identity text is the label, so sublabel
@@ -428,7 +397,6 @@ fn render_frame(
             }
         }
 
-        let sub_paint = it.sub_role.unwrap_or(row_style);
         for (n, (text, inline_sub)) in rows.iter().enumerate() {
             let prefix = if n == 0 {
                 format!("{bullet} ")
@@ -437,19 +405,13 @@ fn render_frame(
             };
             match inline_sub.as_ref() {
                 // Inline-glued subline: label keeps the row style, the tail
-                // repaints in the sublabel role.
+                // paints as a padded golden chip.
                 Some(sub) => lines.push(format!(
                     "{prefix}{}  {}",
                     skin.paint(row_style, text),
-                    skin.paint(sub_paint, sub)
+                    skin.paint_padded(Role::Code, sub)
                 )),
-                None => match raw_tail.as_ref().filter(|_| n + 1 == rows.len()) {
-                    Some(tail) => lines.push(format!(
-                        "{prefix}{}  {tail}",
-                        skin.paint(row_style, text)
-                    )),
-                    None => lines.push(skin.paint(row_style, &format!("{prefix}{text}"))),
-                },
+                None => lines.push(skin.paint(row_style, &format!("{prefix}{text}"))),
             }
         }
         // Pre-rendered snapshot lines (verbatim paint), two-space indented.
@@ -595,8 +557,7 @@ fn pick_plain(items: &[Pick], hint: &str) -> Option<String> {
         let marker = if it.disabled { " (current)" } else { "" };
         let mut line = format!("  {}) {}{marker}", i + 1, it.label);
         if let Some(sub) = it.sublabel.as_deref() {
-            let plain = crate::ui::markdown::strip_ansi(sub);
-            line.push_str(&format!("  {}", crate::util::truncate_utf8_display(&plain, 60)));
+            line.push_str(&format!("  {}", crate::util::truncate_utf8_display(sub, 60)));
         }
         println!("{line}");
     }
@@ -756,49 +717,28 @@ mod tests {
     }
 
     #[test]
-    fn a_verbatim_sublabel_keeps_accent_text_on_the_row() {
-        let accent = "\x1b[38;2;255;0;0m14:32\x1b[0m";
-        let items = vec![Pick::new("s1", "debug session").hint(accent).verbatim_sub()];
-        let visible = filter_items(&items, "");
-        let state = PickState::default();
-        let mut out: Vec<u8> = Vec::new();
-        render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
-        let raw = String::from_utf8(out).unwrap();
-        assert!(raw.contains("14:32"), "accent text present: {raw:?}");
-        let row = raw.lines().nth(1).unwrap();
-        assert!(
-            !strip_frames_ansi(row).contains('\x1b'),
-            "row must carry no torn escapes after stripping: {row:?}"
-        );
-    }
-
-    #[test]
-    fn a_hint_role_paints_the_sublabel_without_breaking_the_row() {
+    fn the_sublabel_renders_as_a_padded_golden_chip() {
         // CLICOLOR_FORCE makes paint() emit escapes even though tests run
         // without a TTY; the env guard restores the process env after.
         let _lock = crate::util::test_support::env_guard();
         std::env::set_var("CLICOLOR_FORCE", "1");
-        let items = vec![Pick::new("exit", "/exit")
-            .hint("Exit the chat")
-            .hint_role(crate::ui::skin::Role::Hint)];
+        let items = vec![Pick::new("exit", "/exit").hint("Exit the chat")];
         let visible = filter_items(&items, "");
         let state = PickState::default();
         let mut out: Vec<u8> = Vec::new();
         render_frame(&mut out, &items, &visible, &state, &crate::ui::skin::SOLARIS, "hint");
         let raw = String::from_utf8(out).unwrap();
-        // Derive the expected escapes from the live skin's style() (not
-        // hardcoded RGB) so a palette re-tune can't silently break this: the
-        // summary wears the hint role — now foreground *and* its *_bg tint —
-        // and the lone selected row's label wears the answer color.
+        // The sublabel must be a padded golden chip: `{code} Exit the chat {reset}`
+        // — a space inside the paint on both sides, so a code-colored accent
+        // reads as a soft chip with breathing room.
         use crate::ui::skin::{Role, SOLARIS};
-        // paint() is `style.render()` directly followed by the text (no gap).
-        // Derive it from the live skin so a palette re-tune can't silently
-        // break this: the summary wears the hint role — foreground *and* its
-        // *_bg tint — and the lone selected row's label wears the answer
-        // color (not tool_dim).
-        let hint_esc = format!("{}{}", SOLARIS.style(Role::Hint).render(), "Exit the chat");
+        let code_esc = format!(
+            "{} Exit the chat {}",
+            SOLARIS.style(Role::Code).render(),
+            crate::ui::skin::reset()
+        );
         let ans_esc = format!("{}{}", SOLARIS.style(Role::Answer).render(), "/exit");
-        assert!(raw.contains(&hint_esc), "{raw:?}");
+        assert!(raw.contains(&code_esc), "padded golden chip absent: {raw:?}");
         assert!(raw.contains(&ans_esc), "{raw:?}");
         // Filtering still matches the plain sublabel text.
         assert_eq!(filter_items(&items, "chat"), vec![0]);

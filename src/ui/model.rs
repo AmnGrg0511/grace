@@ -449,53 +449,63 @@ fn model_candidate_rows(
             let is_current = current_model == Some(c.model.as_str())
                 && current_base_url
                     .is_some_and(|b| short_url(b) == short_url(&c.base_url));
-            let mut row = Pick::new(i.to_string(), c.model.clone())
-                .hint(format!("{} · {}", c.name, short_url(&c.base_url)));
+            let hint = if is_current {
+                format!("{} · {} · current", c.name, short_url(&c.base_url))
+            } else {
+                format!("{} · {}", c.name, short_url(&c.base_url))
+            };
+            let mut row = Pick::new(i.to_string(), c.model.clone()).hint(hint);
             if is_current {
-                row = row.disabled().hint("current");
+                row = row.disabled();
             }
             row
         })
         .collect()
 }
 
+/// The canonical display name for a base URL: the preset's label when the host
+/// matches a known preset (OpenRouter, OpenAI, GitHub Copilot), else the given
+/// fallback (the persisted/friendly name).
+fn display_name_for(base_url: &str, fallback: &str) -> String {
+    crate::config::settings::PROVIDER_PRESETS
+        .iter()
+        .find(|p| !p.base_url.is_empty() && short_url(p.base_url) == short_url(base_url))
+        .map(|p| p.label.to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 /// One picker row per distinct provider endpoint — persisted endpoints plus
 /// presets — the live endpoint shown but not selectable (marked "current"),
 /// and an escape hatch for a custom OpenAI-compatible URL. Pure, so the row
 /// assembly is testable without a terminal.
+///
+/// Rows are keyed by the endpoint's host, not its name: a persisted "openrouter"
+/// and the "OpenRouter" preset share one host and collapse into a single row,
+/// labeled with the preset's canonical name.
 fn provider_rows(
     candidates: &[ModelCandidate],
     current_base_url: Option<&str>,
-    skin: &Skin,
+    _skin: &Skin,
 ) -> Vec<Pick> {
-    use crate::ui::skin::{reset, Role};
-
-    // One row per distinct (name, base_url).
-    let mut endpoints: Vec<(String, String)> = Vec::new();
+    // One row per distinct host.
+    let mut items: Vec<Pick> = Vec::with_capacity(candidates.len() + 1);
     for c in candidates {
-        if !endpoints.iter().any(|(n, u)| *n == c.name && *u == c.base_url) {
-            endpoints.push((c.name.clone(), c.base_url.clone()));
+        let host = short_url(&c.base_url);
+        if items.iter().any(|r: &Pick| {
+            r.id.split('\u{1}').nth(1).is_some_and(|u| short_url(u) == host)
+        }) {
+            continue;
         }
-    }
-    // Rows show only the provider and its endpoint (accent-painted); models
-    // are a separate decision so the two choices stay clean.
-    let mut items: Vec<Pick> = Vec::with_capacity(endpoints.len() + 1);
-    for (name, base_url) in &endpoints {
-        let is_current = current_base_url
-            .is_some_and(|cur| short_url(cur) == short_url(base_url));
+        let name = display_name_for(&c.base_url, &c.name);
+        let is_current =
+            current_base_url.is_some_and(|cur| short_url(cur) == host);
         let sub = if is_current {
-            format!(
-                "{} · {}{}",
-                skin.paint(Role::Code, &short_url(base_url)),
-                skin.paint(Role::ToolDim, "current"),
-                reset()
-            )
+            format!("{host} · current")
         } else {
-            format!("{}{}", skin.paint(Role::Code, &short_url(base_url)), reset())
+            host.clone()
         };
-        let mut row = Pick::new(format!("{name}\u{1}{base_url}"), name.clone())
-            .hint(sub)
-            .verbatim_sub();
+        let id = format!("{name}\u{1}{}", c.base_url);
+        let mut row = Pick::new(id, name).hint(sub);
         if is_current {
             row = row.disabled();
         }
@@ -541,7 +551,8 @@ fn pick_provider_endpoint(
 
 /// Resolve the key env var + known-model list for a `(name, base_url)` among
 /// the candidates, falling back to the standard env-var naming for the URL
-/// when no candidate carries an explicit key var.
+/// when no candidate carries an explicit key var. Rows are matched by host
+/// only — the displayed `name` is a label, not an identity.
 fn endpoint_pick(
     candidates: &[ModelCandidate],
     name: &str,
@@ -549,7 +560,7 @@ fn endpoint_pick(
 ) -> EndpointPick {
     let (key_env, known): (String, Vec<(String, Option<u32>)>) = candidates
         .iter()
-        .filter(|c| c.name == name && short_url(&c.base_url) == short_url(base_url))
+        .filter(|c| short_url(&c.base_url) == short_url(base_url))
         .fold(
         (String::new(), Vec::new()),
         |(mut ke, mut known), c| {
@@ -589,9 +600,16 @@ fn pick_reasoning_level(current: Option<String>, skin: &Skin) -> Option<String> 
     let items: Vec<Pick> = options
         .iter()
         .map(|(id, blurb)| {
-            let mut row = Pick::new(*id, *id).hint(*blurb);
-            if current.as_deref() == Some(id) || (*id == "none" && current.is_none()) {
-                row = row.disabled().hint("current");
+            let is_current =
+                current.as_deref() == Some(id) || (*id == "none" && current.is_none());
+            let hint = if is_current {
+                format!("{blurb} · current")
+            } else {
+                blurb.to_string()
+            };
+            let mut row = Pick::new(*id, *id).hint(hint);
+            if is_current {
+                row = row.disabled();
             }
             row
         })
@@ -747,7 +765,6 @@ pub(crate) fn pick_model_for_endpoint(
     skin: &Skin,
     current_model: Option<&str>,
 ) -> Option<(String, Option<u32>)> {
-    use crate::ui::skin::{reset, Role};
     use crate::ui::picker::{pick, Pick};
 
     let mut models: Vec<(String, Option<u32>)> = Vec::new();
@@ -765,24 +782,23 @@ pub(crate) fn pick_model_for_endpoint(
         return if id.is_empty() { None } else { Some((id, None)) };
     }
 
-    // Context window in the same skin accent as stage 1's endpoint; the
-    // model this session already runs stays visible but unselectable.
+    // Context window as the padded hint; the model this session already runs
+    // stays visible but unselectable.
     let items: Vec<Pick> = models
         .iter()
         .enumerate()
         .map(|(i, (id, ctx))| {
             let mut row = Pick::new(format!("m{i}"), id.clone());
             if let Some(w) = ctx {
-                row = row
-                    .hint(format!(
-                        "{}{}",
-                        skin.paint(Role::Code, &format!("{w}k")),
-                        reset()
-                    ))
-                    .verbatim_sub();
+                let hint = if current_model == Some(id.as_str()) {
+                    format!("{w}k · current")
+                } else {
+                    format!("{w}k")
+                };
+                row = row.hint(hint);
             }
             if current_model == Some(id.as_str()) {
-                row = row.disabled().hint("current");
+                row = row.disabled();
             }
             row
         })
@@ -893,18 +909,35 @@ mod model_command_tests {
         assert!(rows[0].disabled, "the live endpoint must be disabled");
         assert!(!rows[1].disabled);
         assert_eq!(rows[2].label, "Custom OpenAI-compatible endpoint");
-        // The disabled row's sublabel says why it is dead.
-        let sub0 = crate::ui::markdown::strip_ansi(rows[0].sublabel.as_deref().unwrap());
-        assert!(sub0.contains("current"), "{sub0:?}");
-        let sub1 = crate::ui::markdown::strip_ansi(rows[1].sublabel.as_deref().unwrap());
-        assert!(!sub1.contains("current"), "{sub1:?}");
+        // The disabled row keeps its endpoint and says why it is dead; the
+        // other row shows just its endpoint host.
+        assert_eq!(rows[0].sublabel.as_deref(), Some("api.siemens.com · current"));
+        assert_eq!(rows[1].sublabel.as_deref(), Some("api.openai.com"));
         // No current endpoint: nothing is disabled.
         let rows = provider_rows(&candidates, None, &skin);
         assert!(!rows.iter().any(|r| r.disabled));
     }
 
     #[test]
-    fn provider_rows_dedup_by_name_and_url() {
+    fn provider_rows_dedup_by_host_and_prefer_the_preset_name() {
+        // The user's persisted "openrouter" (friendly name from a custom-URL
+        // entry) and the "OpenRouter" preset share a host — they must collapse
+        // into ONE row, labeled with the canonical preset name. This is the
+        // regression for "openrouter shows up twice in /provider".
+        let candidates = vec![
+            cand("openrouter", "z-ai/glm-5.2:free", "https://openrouter.ai/api/v1", Some(200_000)),
+            cand("OpenRouter", "openai/gpt-4o-mini", "https://openrouter.ai/api/v1", None),
+        ];
+        let skin = crate::ui::skin::by_name(None);
+        let rows = provider_rows(&candidates, None, &skin);
+        assert_eq!(rows.len(), 2, "one row per host + the custom row");
+        assert_eq!(rows[0].label, "OpenRouter", "known preset host uses its canonical name");
+        assert_eq!(rows[0].sublabel.as_deref(), Some("openrouter.ai"));
+    }
+
+    #[test]
+    fn provider_rows_dedup_same_host_different_models() {
+        // Two models on one host are one provider row, not two.
         let candidates = vec![
             cand("OpenAI", "gpt-4o", "https://api.openai.com/v1", Some(128_000)),
             cand("OpenAI", "gpt-4o-mini", "https://api.openai.com/v1", None),
@@ -912,6 +945,7 @@ mod model_command_tests {
         let skin = crate::ui::skin::by_name(None);
         let rows = provider_rows(&candidates, None, &skin);
         assert_eq!(rows.len(), 2, "one row per endpoint + the custom row");
+        assert_eq!(rows[0].label, "OpenAI");
     }
 
     #[test]
@@ -929,11 +963,12 @@ mod model_command_tests {
         assert_eq!(rows[0].id, "0");
         assert_eq!(rows[0].label, "openai/gpt-4o-mini");
         assert_eq!(rows[0].sublabel.as_deref(), Some("OpenRouter · openrouter.ai"));
-        // The live model (same model AND same host) is disabled; the
-        // same-named model on another host is not.
+        // The live model (same model AND same host) is disabled but keeps its
+        // endpoint hint, marked "current"; the same-named model on another
+        // host is not.
         assert!(!rows[0].disabled);
         assert!(rows[1].disabled);
-        assert_eq!(rows[1].sublabel.as_deref(), Some("current"));
+        assert_eq!(rows[1].sublabel.as_deref(), Some("OpenAI · api.openai.com · current"));
     }
 
     #[test]

@@ -58,15 +58,13 @@ fn read_hidden(prompt: &str) -> Option<String> {
 /// *this* invocation.
 pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::error::Error>> {
     use crate::ui::picker::{pick, Pick};
-    use crate::ui::skin::{reset, Role};
 
     println!(
         "\ngrace needs a model provider — this only runs once, choices are saved to ~/.grace/\n"
     );
     let skin = crate::ui::skin::by_name(None);
-    let accent = |t: &str| skin.paint(Role::Code, t);
 
-    // Stage 1: provider — name plus its endpoint in the accent color.
+    // Stage 1: provider — name plus its endpoint as the padded hint chip.
     let items: Vec<Pick> = PROVIDER_PRESETS
         .iter()
         .map(|p| {
@@ -74,8 +72,7 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
                 Pick::new(p.label, p.label).hint("type the base URL next")
             } else {
                 Pick::new(p.label, p.label)
-                    .hint(format!("{}{}", accent(&crate::ui::model::short_url(p.base_url)), reset()))
-                    .verbatim_sub()
+                    .hint(crate::ui::model::short_url(p.base_url))
             }
         })
         .collect();

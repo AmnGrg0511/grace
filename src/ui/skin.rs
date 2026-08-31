@@ -167,6 +167,18 @@ impl Skin {
         let style = self.style(role);
         format!("{} {icon} {text} {}", style.render(), anstyle::Reset.render())
     }
+
+    /// Render text as a padded chip — ` ␣{text} ␣ ` — over a role's
+    /// background tint. Like [`Self::paint_badge`] without the leading icon:
+    /// every picker sublabel uses this so secondary text has consistent
+    /// padding around the background wash.
+    pub fn paint_padded(&self, role: Role, text: &str) -> String {
+        if no_color() {
+            return text.to_string();
+        }
+        let style = self.style(role);
+        format!("{} {text} {}", style.render(), anstyle::Reset.render())
+    }
 }
 
 /// Color roles used throughout the CLI.

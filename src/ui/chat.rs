@@ -36,17 +36,13 @@ pub fn short_session_id() -> String {
 
 
 /// One picker row per slash command: the `/name` label with the one-line
-/// summary as the dim sublabel in its own quieter voice — the shared row
-/// shape of the command palette and the ambiguous-abbreviation picker.
+/// summary as a sublabel — the shared row shape of the command palette and
+/// the ambiguous-abbreviation picker.
 fn slash_command_rows(
     cmds: impl IntoIterator<Item = &'static crate::ui::commands::SlashCommand>,
 ) -> Vec<crate::ui::picker::Pick> {
     cmds.into_iter()
-        .map(|c| {
-            crate::ui::picker::Pick::new(c.name, format!("/{}", c.name))
-                .hint(c.summary)
-                .hint_role(crate::ui::skin::Role::Hint)
-        })
+        .map(|c| crate::ui::picker::Pick::new(c.name, format!("/{}", c.name)).hint(c.summary))
         .collect()
 }
 
@@ -644,7 +640,7 @@ fn handle_skin_command(arg: &str, skin: &mut Skin) {
                     crate::ui::picker::Pick::new(n.clone(), n.clone())
                         .extra_lines(skin_preview_lines(&crate::ui::skin::by_name(Some(n))));
                 if skin.name == n.as_str() {
-                    row = row.disabled().hint("already active");
+                    row = row.disabled().hint("current");
                 }
                 row
             })
@@ -816,25 +812,23 @@ fn handle_session_command(
             label.clone()
         };
         let is_current = current_session.as_deref() == Some(sid.as_str());
-        // Recency in a skin accent, visually distinct from the dim title —
-        // "current" for the live session, else how long ago it was active.
-        // No brackets; the color alone separates title from timestamp.
-        let accent = skin.paint(Role::Code, &if is_current {
+        // Recency as the sublabel hint — "current" for the live session,
+        // else how long ago it was active.
+        let recency = if is_current {
             "current".to_string()
         } else {
             match recency.get(sid) {
                 Some(&ts) => recency_label(ts, now),
                 None => "—".to_string(),
             }
-        });
+        };
         let lock_marker = if crate::session::SessionLock::is_held(sid) {
-            format!("  {}", skin.paint(Role::ToolDim, "· open in another terminal"))
+            " · open in another terminal"
         } else {
-            String::new()
+            ""
         };
         let mut row = Pick::new(sid.clone(), disambiguated)
-            .hint(format!("{accent}{lock_marker}"))
-            .verbatim_sub();
+            .hint(format!("{recency}{lock_marker}"));
         if is_current {
             row = row.disabled();
         }
