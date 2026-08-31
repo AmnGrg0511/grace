@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.3.9
+
+**Added**
+- `GRACE_LOG=1` makes the transports print each request (model + every
+  message) and a response summary (finish reason, tool_calls, content size,
+  usage) to stderr — a looping or empty turn can finally be inspected at the
+  wire level. Off by default, zero overhead when unset.
+- A `compression` block in `~/.grace/config.toml` tunes context compression
+  (`enabled`, `trigger_fraction`, `target_fraction`, `min_recent_messages`).
+  The built-in default now compresses deeper (trigger 0.75 → target 0.10) so a
+  pass buys a lot of headroom and keeps the provider's prompt-cache prefix
+  warm.
+- Retries are visible and Ctrl-C-able: a transient-failure retry announces
+  itself, and the backoff sleep is interrupted by Ctrl-C instead of burning
+  the full wait before giving up.
+- `/jump` re-sends a picked prompt instead of a bare rewind: the picker lists
+  only the user's prompts with each one's own words; picking one drops it and
+  everything after it from both the on-disk session and the in-memory context,
+  then preloads the prompt into the editor to re-send verbatim or tweak.
+
+**Fixed**
+- A hard error mid-turn no longer erases progress: each message is persisted
+  the instant it is created, so completed iterations (assistant messages,
+  tool results) and the user's prompt stay in context and on disk, and the
+  next turn continues from real progress instead of losing ten tool
+  iterations to one transient drop. One-shot mode keeps the user row on
+  failure too.
+- Resumed sessions now see tool calls and their results, not just user and
+  assistant text — a turn that ended without a final answer (an interrupt, a
+  dropped stream) no longer makes the model re-issue work it already did.
+- A turn the model ends with no text prints a dim "no output — the model
+  returned nothing; try rephrasing" hint instead of a blank answer block, in
+  both interactive and one-shot modes.
+- Session auto-retitling now requires meaningful content, so a greeting no
+  longer becomes the session title.
+- One hint voice for every picker: the command palette, `/skin`, `/session`,
+  `/jump`, `/provider`, an ambiguous `/model <query>`, and the onboarding
+  wizard all render their secondary line as a padded golden chip, and the
+  live row keeps its full hint with a `· current` marker appended instead of
+  the hint being replaced by a bare "current".
+- `/provider` rows are keyed by endpoint host rather than `(name, url)`, so a
+  persisted lowercase name and its preset collapse into a single row labeled
+  with the preset's canonical name — `openrouter` no longer shows up twice.
+- `/dump` now renders every message faithfully (assistant `tool_calls` and
+  their result linkage), so a dump is a complete picture of what the model
+  saw.
+
 ## v0.3.8
 
 **Added**
@@ -33,11 +80,6 @@
   time and attempt count.
 - A malformed-response retry no longer re-prints an answer that had
   already been streamed to the screen.
-- A hard error mid-turn no longer erases progress: the completed
-  iterations (assistant messages, tool results) and the user's prompt stay
-  in context and on disk, so the next turn continues from real progress
-  instead of losing ten tool iterations to one transient drop. One-shot
-  mode keeps the user row on failure too.
 
 ## v0.3.7
 
