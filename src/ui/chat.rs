@@ -1063,8 +1063,14 @@ pub fn run_one_chat_turn(
                         // matters more than the opener by the time we're
                         // retitling at turn 15+.
                         let transcript: String = transcript.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
-                        if let Some(title) = crate::session::generate_title(transport, &model, &transcript) {
-                            let _ = sessions.set_title(sid, &title);
+                        // Gate the call on actual content: a session that so
+                        // far is only a greeting ("hi") has no topic to name,
+                        // so we skip the round-trip and keep the previous
+                        // title until something substantive arrives.
+                        if crate::session::is_meaningful_title_input(&transcript) {
+                            if let Some(title) = crate::session::generate_title(transport, &model, &transcript) {
+                                let _ = sessions.set_title(sid, &title);
+                            }
                         }
                     }
                 }

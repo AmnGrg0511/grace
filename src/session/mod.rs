@@ -16,7 +16,7 @@ pub mod title;
 
 pub use lock::{pick_default_session, validate_session_id, SessionLock};
 pub use store::SessionStore;
-pub use title::generate_title;
+pub use title::{generate_title, is_meaningful_title_input};
 
 #[cfg(test)]
 mod tests {

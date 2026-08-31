@@ -48,6 +48,49 @@ pub fn generate_title(
     }
 }
 
+/// Whether a transcript is worth spending a model round-trip to name.
+///
+/// The chat REPL passes this the same joined "Role: content" lines it hands to
+/// [`generate_title`]. A bare greeting ("hi", "hello") has no topic to name —
+/// titling it wastes a call and freezes the picker on a meaningless title — so
+/// the retitle schedule skips [`generate_title`] until some line actually
+/// carries content. Returns `true` as soon as any single line is substantive.
+pub fn is_meaningful_title_input(transcript: &str) -> bool {
+    transcript.lines().any(|line| {
+        // Strip the "Role: " prefix the REPL prepends; the first colon can
+        // also be mid-content (a user's "topic: subtitle"), so only peel one.
+        let content = line.split_once(':').map(|(_, r)| r).unwrap_or(line).trim();
+        let words: Vec<&str> = content.split_whitespace().collect();
+        let substantive = words.len() >= 3 || content.chars().count() >= 12;
+        substantive && !is_bare_greeting(&words.join(" "))
+    })
+}
+
+/// A short opening line that carries no topic — "hi", "hello there", "yo".
+fn is_bare_greeting(s: &str) -> bool {
+    let g: String = s
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic() || *c == ' ')
+        .collect();
+    let w: Vec<&str> = g.split_whitespace().collect();
+    matches!(
+        w.as_slice(),
+        [] | ["hi"]
+            | ["hello"]
+            | ["hey"]
+            | ["yo"]
+            | ["hiya"]
+            | ["howdy"]
+            | ["sup"]
+            | ["hallo"]
+            | ["hola"]
+            | ["hi", "there"]
+            | ["hello", "there"]
+            | ["yo", "yo"]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +166,34 @@ mod tests {
         let long: &'static str = Box::leak("x".repeat(500).into_boxed_str());
         let t = generate_title(&Fixed(long), "m", "...").unwrap();
         assert!(t.chars().count() <= 60, "got {} chars", t.chars().count());
+    }
+
+    #[test]
+    fn empty_or_whitespace_transcript_is_not_meaningful() {
+        assert!(!is_meaningful_title_input(""));
+        assert!(!is_meaningful_title_input("   "));
+        assert!(!is_meaningful_title_input("User:  \nAssistant: \n"));
+    }
+
+    #[test]
+    fn a_bare_greeting_is_not_worth_titling() {
+        assert!(!is_meaningful_title_input("User: hi"));
+        assert!(!is_meaningful_title_input("User: hello there"));
+        assert!(!is_meaningful_title_input("Assistant: Hey!"));
+    }
+
+    #[test]
+    fn a_real_topic_is_meaningful() {
+        assert!(is_meaningful_title_input(
+            "User: hi\nAssistant: how can I help?\nUser: can we debug the stdin race?"
+        ));
+        // A single substantive message (>=3 words or long enough) counts even
+        // without a greeting first.
+        assert!(is_meaningful_title_input("User: debug the stdin race bug"));
+    }
+
+    #[test]
+    fn a_colon_in_the_content_is_not_mistaken_for_the_role_separator() {
+        assert!(is_meaningful_title_input("User: The topic is a: deep dive"));
     }
 }
