@@ -899,6 +899,22 @@ fn handle_session_command(
     }
 }
 
+/// The visible "why" for a turn whose model answer has no text: an empty turn
+/// must still say so, or the user is left staring at a silent no-output — the
+/// worst failure mode. Shared by the interactive and one-shot paths, both of
+/// which print this after their (empty) answer. An answer with any text gets
+/// an empty string (nothing printed).
+pub(crate) fn empty_answer_note(skin: &Skin, answer: &str) -> String {
+    if answer.trim().is_empty() {
+        skin.paint_badge(
+            Role::Hint,
+            "(no output — the model returned nothing; try rephrasing)",
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// One user turn: append the user message, run it, print/persist the
 /// answer. Shared by both the rustyline and plain-stdin chat loops so the
 /// turn logic isn't duplicated.
@@ -985,6 +1001,10 @@ pub fn run_one_chat_turn(
                     glyph,
                     crate::ui::markdown::render_terminal(&answer, skin)
                 );
+            }
+            let note = empty_answer_note(skin, &answer);
+            if !note.is_empty() {
+                println!("{note}");
             }
             if let Some(sid) = session_id {
                 // The final answer row was already persisted by the
@@ -1632,6 +1652,30 @@ mod picker_row_tests {
         let rows = jump_rows(&[(1, long)]);
         assert_eq!(rows[0].label.chars().count(), 241, "240 chars + the ellipsis");
         assert!(rows[0].label.ends_with('…'));
+    }
+
+    #[test]
+    fn empty_answer_note_is_visible_only_for_a_blank_answer() {
+        // The invariant: a turn that produced no text must not be silent. An
+        // answer with any content prints nothing extra; a blank or
+        // whitespace-only answer gets a visible "why".
+        let _lock = crate::util::test_support::env_guard();
+        let skin = crate::ui::skin::SOLARIS;
+        let plain = |s: String| crate::ui::markdown::strip_ansi(&s).trim().to_string();
+
+        let note = empty_answer_note(&skin, "");
+        assert!(
+            plain(note).contains("no output"),
+            "a blank answer must say so, not be silent"
+        );
+        assert!(
+            !plain(empty_answer_note(&skin, "   \n\t ")).is_empty(),
+            "whitespace-only still counts as no output"
+        );
+        assert!(
+            empty_answer_note(&skin, "I did the thing.").is_empty(),
+            "a real answer gets no extra note"
+        );
     }
 }
 

@@ -498,6 +498,10 @@ fn run_one_shot(
             crate::ui::markdown::render_terminal(&outcome.answer, skin)
         );
     }
+    let note = crate::ui::chat::empty_answer_note(skin, &outcome.answer);
+    if !note.is_empty() {
+        println!("{note}");
+    }
     Ok(ExitCode::SUCCESS)
 }
 
