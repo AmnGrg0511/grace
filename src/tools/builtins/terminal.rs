@@ -565,6 +565,7 @@ mod tools_hardening_tests {
     #[test]
     fn bash_allow_dir_jails_cwd() {
         let _g = ENV_GUARD_FN();
+        let _ig = crate::util::interrupt::test_lock();
         let dir = std::env::temp_dir().join(format!("grace_terminal_jail_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("GRACE_TERMINAL_ALLOW_DIR", dir.to_str().unwrap());
@@ -585,6 +586,7 @@ mod tools_hardening_tests {
         // whole agent turn. Use a short override so the test itself stays
         // fast.
         let _g = ENV_GUARD_FN();
+        let _ig = crate::util::interrupt::test_lock();
         std::env::set_var("GRACE_TERMINAL_TIMEOUT", "1");
         let tool = BashTool;
         let start = std::time::Instant::now();
@@ -609,6 +611,7 @@ mod tools_hardening_tests {
         // Fix: spawn `sh` as its own process-group leader and SIGKILL the
         // group (not just the child) on timeout.
         let _g = ENV_GUARD_FN();
+        let _ig = crate::util::interrupt::test_lock();
         std::env::set_var("GRACE_TERMINAL_TIMEOUT", "1");
         let tool = BashTool;
         let start = std::time::Instant::now();
@@ -656,6 +659,7 @@ mod tools_hardening_tests {
         // for the command's duration — it hands back a job id right away,
         // and bash(job_id="...") is what later observes output + exit status.
         let _g = ENV_GUARD_FN();
+        let _ig = crate::util::interrupt::test_lock();
         std::env::set_var("GRACE_TERMINAL_TIMEOUT", "30");
         let tool = BashTool;
         let start = std::time::Instant::now();
@@ -737,6 +741,7 @@ mod tools_hardening_tests {
         // A separator *inside* quotes is data, not chaining — `echo "a;b"`
         // must stay allowed when `echo` is.
         let _g = ENV_GUARD_FN();
+        let _ig = crate::util::interrupt::test_lock();
         std::env::set_var("GRACE_TERMINAL_ALLOW", "echo");
         let tool = BashTool;
         let out = tool.run(&json!({"command": "echo \"a;b\""})).unwrap();
@@ -750,6 +755,9 @@ mod tools_hardening_tests {
         // observed between tool calls, so a long command kept running to its
         // own end (or the timeout) after the user asked it to stop.
         let _g = ENV_GUARD_FN();
+        // This test latches the global flag (and its command polls it) —
+        // serialize against every other flag reader/writer.
+        let _ig = crate::util::interrupt::test_lock();
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         super::set_turn_interrupt(std::sync::Arc::clone(&flag));
         // Latch the flag shortly after the spawn, from another thread.
@@ -780,6 +788,7 @@ mod tools_hardening_tests {
         // schedule. With a tight foreground timeout set, a backgrounded
         // longer sleep must still complete — bg timeout is its own knob.
         let _g = ENV_GUARD_FN();
+        let _ig = crate::util::interrupt::test_lock();
         std::env::set_var("GRACE_TERMINAL_TIMEOUT", "1");
         std::env::remove_var("GRACE_TERMINAL_BG_TIMEOUT");
         let tool = BashTool;

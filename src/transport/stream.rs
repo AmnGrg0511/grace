@@ -801,6 +801,9 @@ mod tests {
 
     #[test]
     fn a_stream_dropped_mid_body_is_retried_until_it_completes() {
+        // The backoff sleep polls the process-wide interrupt flag; serialize
+        // against every test that can latch it.
+        let _ig = crate::util::interrupt::test_lock();
         let (base_url, seen) = mock_server(vec![chunked_cut_off(), hello_done()]);
         let resp = stream_once(&base_url).expect("the second attempt completes the turn");
         assert_eq!(resp.content, "Hello");
@@ -813,6 +816,9 @@ mod tests {
 
     #[test]
     fn a_cut_off_stream_exhausts_its_attempts_with_an_actionable_error() {
+        // The backoff sleeps poll the process-wide interrupt flag; serialize
+        // against every test that can latch it.
+        let _ig = crate::util::interrupt::test_lock();
         let (base_url, seen) =
             mock_server(vec![chunked_cut_off(), chunked_cut_off(), chunked_cut_off()]);
         let err = stream_once(&base_url).unwrap_err();

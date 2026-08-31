@@ -48,18 +48,31 @@ pub fn sleep_interruptibly(d: Duration) -> bool {
     poll()
 }
 
+/// Test-only, crate-wide lock for every test that reads or writes the
+/// process-wide flag: this module's own tests (which latch it), the
+/// transport retry tests (whose backoff sleeps poll it), and the terminal
+/// tests (whose commands run under a wait loop that polls it, and whose
+/// ctrl-c test latches it). A latched flag must never be visible to another
+/// test's production path mid-run — a stream-retry test once observed the
+/// latch test's `true` during its backoff sleep and returned `Interrupted`
+/// instead of retrying. Acquiring the lock always resets to a known
+/// unlatched flag, so a stale latch (even one left by a panicking test)
+/// can't leak into the next acquirer.
+#[cfg(test)]
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    set_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    guard
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The FLAG global is shared process-wide (chat/cli and the transport
-    // layers all read the same one), so its tests must not interleave; a
-    // dedicated test lock serializes them.
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn no_flag_never_interrupts() {
-        let _g = LOCK.lock().unwrap();
+        let _g = test_lock();
         set_flag(Arc::new(AtomicBool::new(false)));
         assert!(!poll());
         assert!(!sleep_interruptibly(Duration::from_millis(1)));
@@ -67,7 +80,7 @@ mod tests {
 
     #[test]
     fn latched_flag_interrupts_immediately() {
-        let _g = LOCK.lock().unwrap();
+        let _g = test_lock();
         set_flag(Arc::new(AtomicBool::new(true)));
         assert!(poll());
         assert!(sleep_interruptibly(Duration::from_millis(1_000)));
@@ -75,7 +88,7 @@ mod tests {
 
     #[test]
     fn cleared_flag_polls_false() {
-        let _g = LOCK.lock().unwrap();
+        let _g = test_lock();
         set_flag(Arc::new(AtomicBool::new(false)));
         assert!(!poll());
     }
