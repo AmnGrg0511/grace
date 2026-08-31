@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::core::context::ContextCompressionConfig;
+
 /// Optional overrides loaded from `~/.grace/config.toml`, then overridden by
 /// explicit CLI flags at the call site.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -39,6 +41,13 @@ pub struct Settings {
     /// "high"). `None` sends no `reasoning_effort` parameter at all.
     #[serde(default)]
     pub default_reasoning: Option<String>,
+    /// Context-compression override. `None` uses the built-in defaults (which
+    /// already compress rarely: trigger 0.75 → target 0.10, so a pass buys
+    /// lots of headroom and keeps the provider's prompt-cache prefix warm).
+    /// Set this to tune `enabled`, `trigger_fraction`, `target_fraction`, or
+    /// `min_recent_messages` in `~/.grace/config.toml`.
+    #[serde(default)]
+    pub compression: Option<ContextCompressionConfig>,
 }
 
 /// A named model endpoint — where `/model` can re-point the transport.
@@ -298,6 +307,29 @@ request_timeout_secs = 30
         assert_eq!(settings.tools_dir.as_deref(), Some("mytools"));
         assert_eq!(settings.max_iterations, Some(42));
         assert_eq!(settings.request_timeout_secs, Some(30));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compression_block_parses_and_absent_block_defaults_to_none() {
+        let dir = std::env::temp_dir().join(format!("grace_settings_comp_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        // A partial compression block overrides only what it names.
+        let with_block = dir.join("with.toml");
+        std::fs::write(&with_block, "compression = { target_fraction = 0.2 }\n").unwrap();
+        let settings = Settings::load_from(&with_block);
+        let c = settings.compression.expect("compression present");
+        assert_eq!(c.target_fraction, 0.2);
+        assert_eq!(c.trigger_fraction, 0.75, "unmentioned field keeps default");
+        assert!(c.enabled);
+
+        // No compression key => None, and the built-in default still applies.
+        let without_block = dir.join("without.toml");
+        std::fs::write(&without_block, "max_iterations = 7\n").unwrap();
+        let settings = Settings::load_from(&without_block);
+        assert!(settings.compression.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

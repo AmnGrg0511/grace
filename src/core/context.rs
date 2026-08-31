@@ -25,9 +25,15 @@ use crate::message::{Message, Role};
 use crate::transport::ProviderTransport;
 use crate::util::tokens::{HeuristicCounter, TokenCounter};
 use crate::util::{truncate_utf8, Result};
+use serde::{Deserialize, Serialize};
 
 /// Context compression configuration.
-#[derive(Debug, Clone)]
+///
+/// `#[serde(default)]` lets a partial `compression = { ... }` block in
+/// `~/.grace/config.toml` override just the fields it names, falling back to
+/// [`Default`] for the rest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContextCompressionConfig {
     /// Enable automatic context compression when the trigger is reached.
     pub enabled: bool,
@@ -47,7 +53,12 @@ impl Default for ContextCompressionConfig {
         Self {
             enabled: true,
             trigger_fraction: 0.75,
-            target_fraction: 0.5,
+            // Compressing all the way down to 10% (rather than re-firing at
+            // 75%→50%) buys far more headroom before the next pass. Frequent
+            // rewrites were busting the provider's prompt-cache prefix on
+            // every turn past the trigger; a deep pass leaves the prefix warm
+            // for many more turns.
+            target_fraction: 0.10,
             min_recent_messages: 4,
         }
     }
@@ -974,5 +985,28 @@ mod tests {
             final_dropped,
             "the final summary must describe every dropped message and no more"
         );
+    }
+
+    #[test]
+    fn default_config_compresses_deep_to_keep_the_prefix_warm() {
+        // The whole point of the default: compress rarely (deep target) so a
+        // pass doesn't re-fire every handful of turns and bust the provider's
+        // prompt-cache prefix.
+        let d = ContextCompressionConfig::default();
+        assert!(d.enabled);
+        assert_eq!(d.trigger_fraction, 0.75);
+        assert_eq!(d.target_fraction, 0.10);
+        assert!(d.target_fraction < d.trigger_fraction);
+    }
+
+    #[test]
+    fn a_partial_serde_config_defaults_the_unmentioned_fields() {
+        // `~/.grace/config.toml` with `compression = { target_fraction = 0.2 }`
+        // must not error on the missing fields; they fall back to Default.
+        let partial: ContextCompressionConfig =
+            serde_json::from_str(r#"{"target_fraction": 0.2}"#).unwrap();
+        assert_eq!(partial.target_fraction, 0.2);
+        assert_eq!(partial.trigger_fraction, 0.75);
+        assert!(partial.enabled);
     }
 }
