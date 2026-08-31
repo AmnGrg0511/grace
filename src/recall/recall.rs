@@ -167,11 +167,34 @@ pub fn recall(
 /// Each snippet is capped (char-safe) and fenced as *quoted past data* — the
 /// model must never confuse a recalled line with instructions it should
 /// follow, and an oversized transcript must not eat the context window.
+/// The stable phrase that opens the recall block [`as_prompt_block`] appends
+/// to a user turn. Named (not inlined) so [`strip_recall_block`] can find it:
+/// a stored user row is persisted exactly as sent (block included, for a
+/// byte-stable resume prefix), and any surface that shows the *user's own
+/// words* — `/jump`, session labels — cuts at this marker to drop the block.
+pub const RECALL_BLOCK_MARKER: &str =
+    "Possibly relevant, recalled automatically before this turn";
+
+/// Cut an as-sent user message back to the user's own words: drop the
+/// auto-recalled context block [`as_prompt_block`] appended, if present.
+/// `/jump` preloads a stored (as-sent) prompt for editing, and re-sending it
+/// verbatim would stack the stale block under the fresh one the new turn
+/// derives; session labels must not show the block at all. A message with no
+/// block (or a fresh, never-persisted prompt) is returned unchanged.
+pub fn strip_recall_block(as_sent: &str) -> String {
+    match as_sent.find(RECALL_BLOCK_MARKER) {
+        Some(pos) => as_sent[..pos].trim_end().to_string(),
+        None => as_sent.to_string(),
+    }
+}
+
 pub fn as_prompt_block(hits: &[RecallHit]) -> Option<String> {
     if hits.is_empty() {
         return None;
     }
-    let mut s = String::from("\n\nPossibly relevant, recalled automatically before this turn (verify before relying on it):\n");
+    let mut s = String::from(&format!(
+        "\n\n{RECALL_BLOCK_MARKER} (verify before relying on it):\n"
+    ));
     for h in hits {
         let snippet = crate::util::truncate_utf8(&h.snippet, SNIPPET_MAX_CHARS);
         s.push_str(&format!(

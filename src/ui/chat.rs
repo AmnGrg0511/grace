@@ -258,7 +258,14 @@ pub fn run_chat(
                 continue;
             }
             Some("jump") => {
-                handle_jump_command(sessions, messages, &current_session, &skin);
+                // A jump returns the re-sent prompt; queue it so the next
+                // iteration runs it as a fresh turn (the session was already
+                // rewound by the command).
+                if let Some(queued) =
+                    handle_jump_command(sessions, messages, &current_session, &mut reader, &skin)
+                {
+                    pending_input = Some(queued);
+                }
                 continue;
             }
             Some("compact") => {
@@ -700,13 +707,23 @@ pub(crate) fn session_label(sessions: &SessionStore, sid: &str) -> String {
     if let Some(t) = sessions.get_title(sid).ok().flatten() {
         return t;
     }
-    sessions
+    // The first stored row is persisted as sent (auto-recalled block included
+    // for a stable resume prefix) — a label shows the user's words, not the block.
+    let first = sessions
         .load(sid)
         .ok()
-        .and_then(|m| m.first().map(|m| m.content.clone()))
-        .filter(|s| !s.is_empty())
-        .map(|s| s.chars().take(50).collect())
-        .unwrap_or_else(|| sid.to_string())
+        .and_then(|m| m.first().map(|m| m.content.clone()));
+    match first {
+        Some(content) => {
+            let words = crate::recall::strip_recall_block(&content).trim().to_string();
+            if words.is_empty() {
+                sid.to_string()
+            } else {
+                words.chars().take(50).collect()
+            }
+        }
+        None => sid.to_string(),
+    }
 }
 
 /// `/session` — interactive session picker.
@@ -773,7 +790,8 @@ fn handle_session_command(
                     .load(sid)
                     .ok()
                     .and_then(|m| m.first().map(|m| m.content.clone()))
-                    .filter(|s| !s.is_empty())
+                    .map(|s| crate::recall::strip_recall_block(&s))
+                    .filter(|s| !s.trim().is_empty())
                     .map(|s| s.chars().take(50).collect())
                     .unwrap_or_else(|| "(untitled)".to_string())
             })
@@ -857,12 +875,14 @@ fn handle_session_command(
     }
     match sessions.load(sid) {
         Ok(loaded) => {
+            // The recall query is the session's first prompt — the user's
+            // words, not the auto-recalled block that was appended when it was sent.
             let query = loaded
                 .iter()
                 .find(|m| m.role == crate::message::Role::User)
-                .map(|m| m.content.as_str());
+                .map(|m| crate::recall::strip_recall_block(&m.content));
             messages.clear();
-            messages.push(fresh_system(query));
+            messages.push(fresh_system(query.as_deref()));
             messages.extend(loaded);
             *current_session = Some(sid.clone());
             *session_lock = crate::session::SessionLock::acquire(sid).ok();
@@ -1329,75 +1349,109 @@ mod failed_turn_tests {
 
 
 
-/// One row per transcript message for the `/jump` picker: the message text
-/// as the label, the speaker as the dim sublabel — the same label/sub shape
-/// every other picker row uses. The renderer wraps and applies its own row
-/// budget, so the only cap here is a generous character bound to keep absurd
-/// messages from dominating the window; overflow is marked with `…`.
-fn jump_rows(history: &[Message]) -> Vec<crate::ui::picker::Pick> {
-    history
+/// One row per user prompt for the `/jump` picker: the prompt's own words
+/// (the auto-recalled block stripped) as the label, its position as the dim
+/// sublabel. Tool traffic never appears — "re-send this prompt" is about the
+/// user's asks, not the model's tool calls. The renderer wraps and applies
+/// its own row budget, so the only cap here is a generous character bound to
+/// keep absurd prompts from dominating the window; overflow is marked with `…`.
+fn jump_rows(user_rows: &[(i64, String)]) -> Vec<crate::ui::picker::Pick> {
+    user_rows
         .iter()
         .enumerate()
-        .map(|(i, m)| {
-            let role = match m.role {
-                crate::message::Role::User => "user",
-                crate::message::Role::Assistant => "assistant",
-                _ => "?",
-            };
-            let flat = m.content.trim().replace('\n', " ");
+        .map(|(i, (_row_id, content))| {
+            let words = crate::recall::strip_recall_block(content);
+            let flat = words.trim().replace('\n', " ");
             let snippet = if flat.chars().count() > 240 {
                 format!("{}…", flat.chars().take(240).collect::<String>())
             } else {
                 flat
             };
-            crate::ui::picker::Pick::new(i.to_string(), snippet).hint(format!("[{role}]"))
+            crate::ui::picker::Pick::new(i.to_string(), snippet).hint(format!("prompt {}", i + 1))
         })
         .collect()
 }
 
-/// `/jump` — context rewind, replacing the originally planned undo. A picker
-/// over the current session's user+assistant transcript; picking a message
-/// truncates the in-memory context to (and including) that message AND
-/// deletes the newer rows from the session store (B3's `AFTER DELETE`
-/// trigger keeps the FTS index in sync). Context rewind only — no file
-/// reverting, keeping the feature simple.
+/// `/jump` — go back to an earlier prompt and re-send it. A picker over the
+/// current session's user prompts (tool traffic excluded); picking one drops
+/// that prompt and everything after it — from both the on-disk session and
+/// the in-memory context — then preloads the prompt's own words into the
+/// editor so you can re-send it verbatim or tweak it first. The re-sent line
+/// is returned for the caller to queue as the next turn (`None` = the user
+/// picked nothing, or hit EOF at the edit prompt: the session is untouched).
 ///
-/// `messages[0]` is always the system prompt, so history starts at index 1
-/// and lines up 1:1 with the session store's oldest-first rows.
+/// `messages[0]` is the system prompt; after a jump the in-memory context is
+/// rebuilt from the (now-truncated) on-disk transcript so the two agree, the
+/// same way a `/session` switch re-derives context from the store.
 fn handle_jump_command(
     sessions: &SessionStore,
     messages: &mut Vec<Message>,
     current_session: &Option<String>,
+    reader: &mut LineReader,
     skin: &Skin,
-) {
+) -> Option<String> {
     let Some(sid) = current_session else {
         println!("no session in use — nothing to jump within.");
-        return;
+        return None;
     };
-    let history = &messages[1..];
-    if history.is_empty() {
+    let user_rows = match sessions.list_user_rows(sid) {
+        Ok(rows) => rows,
+        Err(e) => {
+            println!("error listing the session: {e}");
+            return None;
+        }
+    };
+    if user_rows.is_empty() {
         println!("no messages yet in this session.");
-        return;
+        return None;
     }
-    let items = jump_rows(history);
-    let Some(id) = crate::ui::picker::pick(&items, skin, "pick a message (keeps it, drops everything after)") else {
+    let items = jump_rows(&user_rows);
+    let Some(id) = crate::ui::picker::pick(
+        &items,
+        skin,
+        "pick a prompt to re-send (drops it and everything after)",
+    ) else {
         println!("staying put.");
-        return;
+        return None;
     };
     let Ok(picked) = id.parse::<usize>() else {
-        return;
+        return None;
     };
-    if picked == history.len() - 1 {
-        println!("already the last message — nothing to drop.");
-        return;
+    let (row_id, stored) = user_rows[picked].clone();
+    // Preload the prompt's own words (the recalled block stripped) so an
+    // unedited re-send is one keystroke and an edit starts from clean text.
+    // Re-sending verbatim would otherwise stack the stale block under the
+    // fresh one the new turn derives.
+    let words = crate::recall::strip_recall_block(&stored);
+    let Some(edited) = reader.read_line_default("re-send: ", &words) else {
+        return None; // EOF (Ctrl-D) — leave the session exactly as it was
+    };
+    let edited = edited.trim().to_string();
+    if edited.is_empty() {
+        // `read_line_default` keeps the prefill on an empty submit, so this
+        // only fires if the prefill itself was empty — nothing to re-send.
+        println!("staying put.");
+        return None;
     }
-    let keep = picked + 1;
-    match sessions.truncate_session_after(sid, keep) {
+    // Drop the picked prompt and everything after it. The on-disk delete
+    // happens first; the in-memory context is then rebuilt from what remains
+    // so both agree (the system prompt is kept in place).
+    match sessions.truncate_from_row_id(sid, row_id) {
         Ok(removed) => {
-            messages.truncate(1 + keep);
-            println!("jumped back {removed} message(s) — context now ends there.");
+            let system = messages.first().cloned();
+            let remaining = sessions.load(sid).unwrap_or_default();
+            messages.clear();
+            if let Some(sys) = system {
+                messages.push(sys);
+            }
+            messages.extend(remaining);
+            println!("dropped {removed} message(s) — re-sending from the picked prompt.");
+            Some(edited)
         }
-        Err(e) => println!("error rewinding the session: {e}"),
+        Err(e) => {
+            println!("error rewinding the session: {e}");
+            None
+        }
     }
 }
 
@@ -1544,21 +1598,38 @@ mod picker_row_tests {
     }
 
     #[test]
-    fn jump_rows_split_snippet_and_speaker() {
-        let history = vec![Message::user("  hello\nworld  "), Message::assistant("hi there")];
-        let rows = jump_rows(&history);
+    fn jump_rows_show_user_prompts_only_with_position() {
+        // The picker lists the user's prompts (the stored as-sent text),
+        // flattening whitespace and labelling each by position.
+        let rows = vec![
+            (1i64, "  hello\nworld  ".to_string()),
+            (2, "second prompt".to_string()),
+        ];
+        let rows = jump_rows(&rows);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, "0");
         assert_eq!(rows[0].label, "hello world");
-        assert_eq!(rows[0].sublabel.as_deref(), Some("[user]"));
-        assert_eq!(rows[1].label, "hi there");
-        assert_eq!(rows[1].sublabel.as_deref(), Some("[assistant]"));
+        assert_eq!(rows[0].sublabel.as_deref(), Some("prompt 1"));
+        assert_eq!(rows[1].label, "second prompt");
+        assert_eq!(rows[1].sublabel.as_deref(), Some("prompt 2"));
+    }
+
+    #[test]
+    fn jump_rows_strip_the_recalled_block_from_the_label() {
+        // A stored prompt is persisted as sent (prompt + auto-recalled block);
+        // the picker must show only the user's words, not the block.
+        let as_sent = format!(
+            "fix the parser\n\n{marker} (verify before relying on it):\n- [fact] acme: \"x\"\n",
+            marker = crate::recall::RECALL_BLOCK_MARKER
+        );
+        let rows = jump_rows(&[(1, as_sent)]);
+        assert_eq!(rows[0].label, "fix the parser");
     }
 
     #[test]
     fn jump_rows_cap_long_snippets_with_an_ellipsis() {
         let long = "w ".repeat(200);
-        let history = vec![Message::user(long)];
-        let rows = jump_rows(&history);
+        let rows = jump_rows(&[(1, long)]);
         assert_eq!(rows[0].label.chars().count(), 241, "240 chars + the ellipsis");
         assert!(rows[0].label.ends_with('…'));
     }
