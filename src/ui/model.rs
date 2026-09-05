@@ -152,16 +152,24 @@ fn friendly_endpoint_name(url: &str) -> String {
 /// keyless endpoint simply yields the static list). `api_key` is the resolved
 /// key *value* to authenticate with (empty for none) — not an env-var name —
 /// so a key that was just prompted and saved to ~/.grace/.env in this session
-/// (not yet in the process env) still authenticates.
+/// (not yet in the process env) still authenticates. An *authenticated* fetch
+/// that fails is a real signal (a typed key or valid OAuth token was used),
+/// not a best-effort miss: say exactly what the endpoint reported instead of
+/// silently degrading to the static list.
 fn fetched_models(base_url: &str, api_key: &str) -> Vec<crate::transport::ModelInfo> {
     if base_url.is_empty() {
         return Vec::new();
     }
     // The factory, not a raw HttpTransport: for the Copilot endpoint a raw
     // transport would send the long-lived OAuth token as the bearer.
-    crate::transport::transport_for(base_url, api_key, "", None)
-        .list_models()
-        .unwrap_or_default()
+    match crate::transport::transport_for(base_url, api_key, "", None).list_models() {
+        Ok(m) => m,
+        Err(e) if !api_key.is_empty() => {
+            println!("(couldn't load {name}'s model list: {e})", name = short_url(base_url));
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 /// `/model` — pick an endpoint (no arg) or resolve one (`<name>`), then

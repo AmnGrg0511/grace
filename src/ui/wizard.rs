@@ -187,14 +187,21 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     // The factory builds the right transport per endpoint — for Copilot
     // that means the OAuth token is exchanged for a session token before
     // the /models call, instead of sending the OAuth token directly.
+    // An authenticated fetch that fails is a real signal — say what the
+    // endpoint reported instead of silently degrading to the static list.
     let live_models: Vec<crate::transport::ModelInfo> = if base_url.is_empty() {
         Vec::new()
     } else {
         crate::transport::transport_for(&base_url, &api_key, "", None)
             .list_models()
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                if !api_key.is_empty() {
+                    println!("(couldn't load the model list: {e})");
+                }
+                Vec::new()
+            })
     };
-    if live_models.is_empty() && !preset.models.is_empty() {
+    if live_models.is_empty() && api_key.is_empty() && !preset.models.is_empty() {
         println!("(couldn't reach {}'s /models endpoint — showing known models)", preset.label);
     }
 

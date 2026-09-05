@@ -142,6 +142,57 @@ fn poll_token(device_code: &str) -> Result<String> {
     Err(AgentError::Config("Device flow timed out".into()))
 }
 
+/// Parse Copilot's `/models` payload into [`ModelInfo`]s, tolerating the
+/// shape drift it has historically shown: `{"data": [...]}` or a bare array;
+/// per-model `name` optional (falls back to `id`); context window nested under
+/// `capabilities.context_window` or flat `context_window`. Pure (no network)
+/// so the shape contract is unit-testable. Errors carry a raw JSON snippet so
+/// a misbehaving endpoint tells the user what it actually sent.
+fn parse_copilot_models(value: &Value) -> Result<Vec<ModelInfo>> {
+    let items = if let Some(arr) = value.get("data").and_then(Value::as_array) {
+        arr
+    } else if let Some(arr) = value.as_array() {
+        arr
+    } else {
+        return Err(AgentError::Transport(format!(
+            "Copilot /models response is neither an object with \"data\" nor a bare array. Raw: {}",
+            truncate_utf8(&value.to_string(), 300)
+        )));
+    };
+
+    let mut models = Vec::new();
+    for item in items {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        // `name` was once required; when absent, the id stands in for it so a
+        // model that only reports an id is not silently dropped.
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(id)
+            .to_string();
+        let context_window = item
+            .get("capabilities")
+            .and_then(|c| c.get("context_window"))
+            .and_then(Value::as_u64)
+            .or_else(|| item.get("context_window").and_then(Value::as_u64))
+            .map(|v| v as u32);
+        models.push(ModelInfo {
+            id: id.to_string(),
+            name,
+            context_window,
+        });
+    }
+    if models.is_empty() {
+        return Err(AgentError::Transport(format!(
+            "No models found in Copilot /models response. Raw: {}",
+            truncate_utf8(&value.to_string(), 300)
+        )));
+    }
+    Ok(models)
+}
+
 /// Fetch Copilot's live model list via its `/models` endpoint. Its response
 /// shape nests context window/max-output under `capabilities`, unlike the
 /// flat shape most OpenAI-compatible providers use, so this can't share
@@ -156,32 +207,24 @@ fn fetch_models(token: &str) -> Result<Vec<ModelInfo>> {
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/json")
         .send()
-        .map_err(|e| AgentError::Transport(format!("Copilot models request failed: {e}")))?
-        .json::<Value>()
-        .map_err(|e| AgentError::Transport(format!("Failed to parse Copilot models response: {e}")))?;
-
-    let models = resp["data"]
-        .as_array()
-        .ok_or_else(|| AgentError::Transport("Invalid models response format".into()))?;
-
-    let mut result = Vec::new();
-    for model in models {
-        let (Some(id), Some(name)) = (model["id"].as_str(), model["name"].as_str()) else {
-            continue;
-        };
-        let context_window = model["capabilities"]["context_window"]
-            .as_u64()
-            .map(|v| v as u32);
-        result.push(ModelInfo {
-            id: id.to_string(),
-            name: name.to_string(),
-            context_window,
-        });
+        .map_err(|e| AgentError::Transport(format!("Copilot models request failed: {e}")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .map_err(|e| AgentError::Transport(format!("failed to read Copilot models body: {e}")))?;
+    if !status.is_success() {
+        return Err(AgentError::Transport(format!(
+            "Copilot /models returned {status}: {}",
+            truncate_utf8(&text, 300)
+        )));
     }
-    if result.is_empty() {
-        return Err(AgentError::Transport("No models found in Copilot response".into()));
-    }
-    Ok(result)
+    let value: Value = serde_json::from_str(&text).map_err(|e| {
+        AgentError::Transport(format!(
+            "invalid JSON in Copilot /models response: {e}. Raw: {}",
+            truncate_utf8(&text, 300)
+        ))
+    })?;
+    parse_copilot_models(&value)
 }
 
 /// A minted session token plus when it expires (Unix seconds), so the
@@ -487,5 +530,68 @@ mod tests {
     fn transport_name_identifies_the_provider() {
         let t = CopilotTransport::new("tok", "gpt-4o");
         assert_eq!(t.name(), "github-copilot");
+    }
+
+    #[test]
+    fn parse_models_accepts_data_arrays_and_nested_capabilities() {
+        let value: Value = serde_json::json!({
+            "data": [
+                {"id": "gpt-4o", "name": "GPT-4o", "capabilities": {"context_window": 128000}},
+                {"id": "claude", "capabilities": {"context_window": 200000}},
+                {"id": "flat-window", "context_window": 64000}
+            ]
+        });
+        let models = parse_copilot_models(&value).unwrap();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "gpt-4o");
+        assert_eq!(models[0].name, "GPT-4o");
+        assert_eq!(models[0].context_window, Some(128_000));
+        // `name` absent: falls back to `id` instead of dropping the model.
+        assert_eq!(models[1].id, "claude");
+        assert_eq!(models[1].name, "claude");
+        assert_eq!(models[1].context_window, Some(200_000));
+        // Context window accepted at the top level too, not only nested.
+        assert_eq!(models[2].context_window, Some(64_000));
+    }
+
+    #[test]
+    fn parse_models_accepts_a_bare_array() {
+        let value: Value = serde_json::json!([
+            {"id": "a"},
+            {"id": "b", "capabilities": {"context_window": 1}}
+        ]);
+        let models = parse_copilot_models(&value).unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "a");
+        assert_eq!(models[1].context_window, Some(1));
+    }
+
+    #[test]
+    fn parse_models_reports_a_human_readable_error_with_raw_json() {
+        // Not an array and no "data" key: the error must carry a raw snippet
+        // so the endpoint's real payload is visible, not a bare message.
+        let value: Value = serde_json::json!({"error": {"message": "nope"}});
+        let err = parse_copilot_models(&value).unwrap_err();
+        assert!(err.to_string().contains("neither an object"), "got: {err}");
+        assert!(err.to_string().contains("nope"), "raw JSON not in error: {err}");
+
+        // An array whose entries have no ids is also an error, with the array.
+        let empty: Value = serde_json::json!([{"name": "x"}]);
+        let err = parse_copilot_models(&empty).unwrap_err();
+        assert!(err.to_string().contains("No models found"), "got: {err}");
+        assert!(err.to_string().contains("\"name\""), "raw JSON not in error: {err}");
+    }
+
+    #[test]
+    fn parse_models_ignores_entries_without_an_id_but_keeps_good_ones() {
+        let value: Value = serde_json::json!({
+            "data": [
+                {"name": "no-id"},
+                {"id": "good", "capabilities": {"context_window": 10}}
+            ]
+        });
+        let models = parse_copilot_models(&value).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "good");
     }
 }
