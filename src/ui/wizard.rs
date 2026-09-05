@@ -1,55 +1,113 @@
 //! Interactive onboarding flow: the first-run provider/model wizard.
 
 use crate::config::settings::PROVIDER_PRESETS;
+use std::io::Write;
 
-/// Read one line from the terminal with echo suppressed — API keys must not
-/// land on screen or in scrollback. Uses `stty -echo` against `/dev/tty`
-/// (std-only, no crate); falls back to plain stdin reading when no TTY is
-/// reachable (piped input can't hide anything anyway). Returns `None` on EOF.
-fn read_hidden(prompt: &str) -> Option<String> {
-    use std::io::{BufRead, BufReader, Write};
+/// Shared raw-mode line read from a real terminal. `mask` true prints one `*`
+/// per key so a secret never lands on screen or in scrollback; false echoes
+/// the characters so the user can verify the URL they typed. Enter confirms;
+/// Esc / Ctrl-C / Ctrl-D abort (returns None). Returns `None` when no real
+/// terminal is reachable so the caller can fall back to a plain stdin read
+/// (piped input can't hide anything anyway).
+fn read_term_line(prompt: &str, mask: bool) -> Option<String> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
     print!("{prompt}");
     let _ = std::io::stdout().flush();
 
-    let stty = |arg: &str| -> bool {
-        let Ok(tty) = std::fs::File::open("/dev/tty") else {
-            return false;
-        };
-        std::process::Command::new("stty")
-            .arg(arg)
-            .stdin(std::process::Stdio::from(tty))
-            .status()
-            .is_ok_and(|s| s.success())
+    let chars = match enable_raw_mode() {
+        Err(_) => None,
+        Ok(()) => {
+            let mut chars: Vec<char> = Vec::new();
+            let answer = loop {
+                match event::read() {
+                    Err(_) => break None,
+                    Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                        if k.modifiers.contains(KeyModifiers::CONTROL) {
+                            match k.code {
+                                KeyCode::Char('c') | KeyCode::Char('d') => break None,
+                                _ => {}
+                            }
+                        }
+                        match k.code {
+                            KeyCode::Enter => break Some(chars),
+                            KeyCode::Esc => break None,
+                            KeyCode::Backspace => {
+                                if chars.pop().is_some() {
+                                    let _ = write!(
+                                        std::io::stdout(),
+                                        "{}",
+                                        if mask { "\x1b[1D\x1b[0K" } else { "\x08 \x08" }
+                                    );
+                                }
+                            }
+                            KeyCode::Char(c) if !c.is_control() => {
+                                chars.push(c);
+                                let _ = if mask {
+                                    write!(std::io::stdout(), "*")
+                                } else {
+                                    write!(std::io::stdout(), "{c}")
+                                };
+                            }
+                            _ => {}
+                        }
+                        let _ = std::io::stdout().flush();
+                    }
+                    Ok(_) => {}
+                }
+            };
+            let _ = disable_raw_mode();
+            answer
+        }
     };
-    let hidden = stty("-echo");
-    let line = (|| {
-        let tty = std::fs::File::open("/dev/tty").ok()?;
-        let mut buf = String::new();
-        BufReader::new(tty).read_line(&mut buf).ok()?;
-        Some(buf)
-    })()
-    .or_else(|| {
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf).ok()?;
-        Some(buf)
-    });
-    if hidden {
-        stty("echo");
-    }
-    // The typed Enter left the cursor mid-row; close the line invisibly.
+    // Close the line whether or not anything was typed.
     println!();
-    line.map(|l| l.trim().to_string())
+    chars.and_then(|c| {
+        let s = c.into_iter().collect::<String>();
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    })
+}
+
+/// Read one line with visible echo (the base URL must appear on screen so the
+/// user can verify what they typed). Falls back to a plain stdin read when no
+/// real terminal is reachable.
+fn read_line(prompt: &str) -> Option<String> {
+    read_term_line(prompt, false).or_else(|| {
+        print!("{prompt}");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok()?;
+        let t = line.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    })
+}
+
+/// Read one line with masked echo — each key prints a `*`, so the API key
+/// never lands on screen or in scrollback; backspace erases a star. Falls
+/// back to a plain stdin read when no real terminal is reachable (piped input
+/// can't hide anything anyway).
+fn read_masked(prompt: &str) -> Option<String> {
+    read_term_line(prompt, true).or_else(|| {
+        // Piped input: nothing to hide, read the line as-is.
+        print!("{prompt}");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok()?;
+        let t = line.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    })
 }
 
 /// Interactive first-run setup, entirely picker-based: provider -> key ->
 /// model -> reasoning level. Every provider goes through the exact same
 /// steps — the only branch is *how* the "key" step is obtained: typed with
-/// echo suppressed for a normal HTTP provider, or minted via OAuth device
-/// flow for GitHub Copilot. Once the key exists, Copilot is wired up exactly
-/// like any other provider (base_url + api_key), no separate flag or code
-/// path downstream. The model stage asks the provider's real `/models`
-/// endpoint for the live list + context windows, falling back to the
+/// masked echo (each key prints `*`) for a normal HTTP provider, or minted
+/// via OAuth device flow for GitHub Copilot. Once the key exists, Copilot is
+/// wired up exactly like any other provider (base_url + api_key), no separate
+/// flag or code path downstream. The model stage asks the provider's real
+/// `/models` endpoint for the live list + context windows, falling back to the
 /// built-in preset list only if that call fails.
 ///
 /// Persists the choice to `~/.grace/config.toml` (model/base_url/reasoning)
@@ -86,7 +144,7 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
     let base_url = if is_copilot || !preset.base_url.is_empty() {
         preset.base_url.to_string()
     } else {
-        let raw = read_hidden("base URL (OpenAI-compatible /chat/completions endpoint): ")
+        let raw = read_line("base URL (OpenAI-compatible /chat/completions endpoint): ")
             .ok_or("no base URL provided")?;
         if raw.is_empty() {
             return Err("no base URL provided".into());
@@ -108,7 +166,7 @@ pub fn run_onboarding_wizard() -> Result<(String, String, String), Box<dyn std::
             if let Some(k) = std::env::var(preset.env_var).ok().filter(|k| !k.is_empty()) {
                 break k;
             }
-            let Some(typed) = read_hidden(&format!(
+            let Some(typed) = read_masked(&format!(
                 "API key for {} (${env_var} not set): ",
                 preset.label,
                 env_var = preset.env_var
@@ -196,5 +254,13 @@ mod tests {
                 p.label
             );
         }
+    }
+
+    #[test]
+    fn the_terminal_line_read_is_unavailable_without_a_tty() {
+        // Tests run without a PTY: the raw-mode read must report None so the
+        // caller can degrade to a plain stdin read rather than hang.
+        assert!(read_term_line("prompt: ", false).is_none());
+        assert!(read_term_line("prompt: ", true).is_none());
     }
 }
