@@ -56,8 +56,11 @@ struct TokenResponse {
 /// Get a Copilot bearer token, running the OAuth device flow (browser +
 /// one-time code) if none is cached yet. This is the "key" step for
 /// Copilot — same conceptual step every other provider has, just backed by
-/// OAuth instead of manual paste. Returns the token; the caller persists it
-/// to `~/.grace/.env` exactly like a typed API key.
+/// OAuth instead of manual paste. A freshly minted token is persisted to
+/// `~/.grace/.env` right here, so *every* caller (the onboarding wizard,
+/// `/model`, `/provider`) gets a durable token with no extra bookkeeping —
+/// a token minted but never saved is the "I authorized in my browser but
+/// grace forgot" bug.
 pub fn get_or_create_token() -> Result<String> {
     if let Ok(token) = std::env::var("GITHUB_COPILOT_TOKEN") {
         if !token.is_empty() {
@@ -78,6 +81,15 @@ pub fn get_or_create_token() -> Result<String> {
 
     let token = poll_token(&device_code.device_code)?;
     println!("\n✅ Authentication successful!\n");
+    // Per-key upsert (a whole-file rewrite would wipe the other providers'
+    // keys). Best-effort: return the token regardless, so an unwritable
+    // ~/.grace/.env degrades to a warning, not a failed auth.
+    if let Err(e) = crate::config::env::upsert_env_file("GITHUB_COPILOT_TOKEN", &token) {
+        eprintln!(
+            "[grace] warning: could not save GITHUB_COPILOT_TOKEN to {}: {e}",
+            crate::config::env::env_file_path().display()
+        );
+    }
     Ok(token)
 }
 
