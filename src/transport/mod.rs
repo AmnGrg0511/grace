@@ -13,6 +13,7 @@
 //!    └── stream.rs   SSE accumulation, used by http.rs and chat mode
 //! ```
 
+mod shared;
 pub mod copilot;
 pub mod http;
 pub mod stream;
@@ -20,6 +21,7 @@ pub mod r#trait;
 pub mod wire;
 
 pub use copilot::CopilotTransport;
+pub use shared::SharedTransport;
 pub use http::HttpTransport;
 pub use r#trait::{FinishReason, ModelInfo, ModelResponse, ProviderTransport, TokenUsage, ToolSpec};
 pub use wire::{parse_openai_message, parse_usage, tools_to_json, urlencoding};

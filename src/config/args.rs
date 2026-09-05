@@ -12,7 +12,7 @@ use crate::core::context::ContextCompressionConfig;
 use crate::core::delegation::DelegationDepth;
 use crate::session::SessionStore;
 use crate::tools::{DelegateTool, SessionSearchTool, ToolRegistry};
-use crate::transport::ProviderTransport;
+use crate::transport::{ProviderTransport, SharedTransport};
 use crate::util::{AgentError, Result};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,8 +33,10 @@ pub struct RegistryOptions {
     pub tools_root: std::path::PathBuf,
     /// Session store for `session_search`. `None` omits the tool.
     pub sessions: Option<Arc<SessionStore>>,
-    /// Transport for `delegate`. `None` omits the tool.
-    pub transport: Option<Rc<dyn ProviderTransport>>,
+    /// Transport slot for `delegate`. `None` omits the tool. A slot, not a
+    /// transport, so a mid-session `/model` or `/provider` swap is what a
+    /// later delegated sub-agent sees.
+    pub transport: Option<SharedTransport>,
     /// Compression policy applied to sub-agent conversations.
     pub compression: ContextCompressionConfig,
     /// The session's read-only posture, shared with every registry this
@@ -68,7 +70,7 @@ impl RegistryOptions {
     }
 
     #[must_use]
-    pub fn with_transport(mut self, transport: Rc<dyn ProviderTransport>) -> Self {
+    pub fn with_transport(mut self, transport: SharedTransport) -> Self {
         self.transport = Some(transport);
         self
     }
@@ -183,7 +185,7 @@ impl Config {
                     Self::build_registry_full(&sub_options, child_depth)
                 });
                 reg.register(Box::new(
-                    DelegateTool::new(Rc::clone(transport), depth, factory)
+                    DelegateTool::new(transport.clone(), depth, factory)
                         .with_compression(options.compression.clone()),
                 ));
             }
@@ -237,7 +239,7 @@ mod tests {
     use super::*;
     use crate::core::delegation::MAX_DELEGATION_DEPTH;
     use crate::message::Message;
-    use crate::transport::{FinishReason, ModelResponse, ToolSpec};
+    use crate::transport::{FinishReason, ModelResponse, ProviderTransport, ToolSpec};
 
     struct Stub;
     impl ProviderTransport for Stub {
@@ -261,6 +263,10 @@ mod tests {
 
     fn options() -> RegistryOptions {
         RegistryOptions::new("/nonexistent/skills", "/nonexistent/tools")
+    }
+
+    fn options_with_stub() -> RegistryOptions {
+        options().with_transport(SharedTransport::new(Box::new(Stub)))
     }
 
     #[test]
@@ -468,7 +474,7 @@ mod tests {
     fn delegate_is_registered_centrally_not_by_the_caller() {
         // Regression: registration used to live in main.rs, so any other entry
         // point silently built a Grace that could not delegate.
-        let opts = options().with_transport(Rc::new(Stub));
+        let opts = options_with_stub();
         let reg = Config::build_registry_full(&opts, DelegationDepth::ROOT);
         assert!(reg.get("delegate").is_some());
     }
@@ -482,7 +488,7 @@ mod tests {
     #[test]
     fn delegate_is_withdrawn_at_the_depth_cap() {
         // Nesting must terminate structurally, not by asking the model nicely.
-        let opts = options().with_transport(Rc::new(Stub));
+        let opts = options_with_stub();
         let reg = Config::build_registry_full(&opts, DelegationDepth(MAX_DELEGATION_DEPTH));
         assert!(
             reg.get("delegate").is_none(),

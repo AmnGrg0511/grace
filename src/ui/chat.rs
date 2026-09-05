@@ -55,7 +55,7 @@ fn slash_command_rows(
 /// other's lines whenever a picker like `/session` was invoked).
 #[allow(clippy::too_many_arguments)]
 pub fn run_chat(
-    transport: &(dyn crate::transport::ProviderTransport + '_),
+    transport: &crate::transport::SharedTransport,
     tools: &crate::tools::ToolRegistry,
     messages: &mut Vec<Message>,
     max_iterations: u32,
@@ -113,11 +113,12 @@ pub fn run_chat(
     // visible at the very start of the session (one-shot prints it up top,
     // where there's no banner for it to sit under).
     let prior_turns = messages.len().saturating_sub(1); // exclude the system prompt
+    let banner_transport = transport.current();
     println!(
         "[grace] transport={} model={} ctx={} tools={}",
-        transport.name(),
-        transport.current_model().unwrap_or_else(|| "?".into()),
-        transport
+        banner_transport.name(),
+        banner_transport.current_model().unwrap_or_else(|| "?".into()),
+        banner_transport
             .context_window()
             .map_or_else(|| "?".to_string(), |n| n.to_string()),
         tools.len(),
@@ -179,9 +180,15 @@ pub fn run_chat(
     let mut pending_input: Option<String> = None;
 
     loop {
+        // Pin whatever transport is current at the top of this iteration. A
+        // `/model` or `/provider` swap takes effect from the *next* iteration
+        // (it is queued as an input line further down), so the whole turn —
+        // status line, `/info`, `/compact`, and the run itself — consistently
+        // observes one transport.
+        let turn_transport = transport.current();
         print_status_line(
             &skin,
-            transport,
+            turn_transport.as_ref(),
             messages,
             started_at,
             cached_context_window,
@@ -265,7 +272,7 @@ pub fn run_chat(
                 continue;
             }
             Some("compact") => {
-                handle_compact_command(messages, transport, compression_config, &skin);
+                handle_compact_command(messages, turn_transport.as_ref(), compression_config, &skin);
                 continue;
             }
             Some("dump") => {
@@ -289,7 +296,7 @@ pub fn run_chat(
                     InfoView {
                         sessions,
                         current_session: current_session.as_deref(),
-                        transport,
+                        transport: turn_transport.as_ref(),
                         context_entries: messages.len(),
                         window: cached_context_window,
                         last_usage,
@@ -369,7 +376,7 @@ pub fn run_chat(
             5,
         ));
         last_usage = run_one_chat_turn(
-            transport,
+            turn_transport.as_ref(),
             tools,
             messages,
             max_iterations,

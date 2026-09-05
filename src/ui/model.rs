@@ -177,16 +177,20 @@ fn fetched_models(base_url: &str, api_key: &str) -> Vec<crate::transport::ModelI
 /// context window) to ~/.grace/config.toml so it sticks across restarts.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_model_command(
-    transport: &(dyn crate::transport::ProviderTransport + '_),
+    transport: &crate::transport::SharedTransport,
     arg: &str,
     reader: &mut LineReader,
     skin: &Skin,
     cached_context_window: &mut Option<u32>,
 ) {
-    if transport.current_model().is_none() {
+    // Pin the current transport for the reads below; only `apply_model_switch`
+    // swaps the slot, and it does so after the picker has finished, so a single
+    // clone sees one consistent transport throughout.
+    let current = transport.current();
+    if current.current_model().is_none() {
         println!(
             "this transport ({}) has no switchable model.",
-            transport.name()
+            current.name()
         );
         return;
     }
@@ -194,7 +198,7 @@ pub(crate) fn handle_model_command(
     let candidates = model_candidates(&settings);
 
     let target = if arg.is_empty() {
-        match pick_model_interactive(&candidates, reader, skin, transport) {
+        match pick_model_interactive(&candidates, reader, skin, current.as_ref()) {
             Some(t) => t,
             None => return,
         }
@@ -215,8 +219,8 @@ pub(crate) fn handle_model_command(
                 let rows = model_candidate_rows(
                     &candidates,
                     &m,
-                    transport.current_model().as_deref(),
-                    transport.current_base_url().as_deref(),
+                    current.current_model().as_deref(),
+                    current.current_base_url().as_deref(),
                 );
                 match crate::ui::picker::pick(&rows, skin, "pick a model") {
                     Some(id) => match id.parse::<usize>() {
@@ -242,33 +246,18 @@ pub(crate) fn handle_model_command(
 /// session, which is not yet in the process env.
 #[allow(clippy::too_many_arguments)]
 fn apply_model_switch(
-    transport: &(dyn crate::transport::ProviderTransport + '_),
+    transport: &crate::transport::SharedTransport,
     target: ModelCandidate,
     reader: &mut LineReader,
     cached_context_window: &mut Option<u32>,
 ) -> Option<String> {
     let is_copilot_target = crate::transport::copilot::is_copilot_endpoint(&target.base_url);
     let same_endpoint = transport
+        .current()
         .current_base_url()
         .as_deref()
         .map(|b| short_url(b) == short_url(&target.base_url))
         .unwrap_or(false);
-
-    // A transport whose endpoint is fixed (Copilot) can swap models for its
-    // own endpoint but never re-point mid-session. Persist the choice so the
-    // *next* launch starts on the new endpoint, and say exactly that.
-    if !same_endpoint && !transport.can_repoint_endpoint() {
-        let window = target
-            .context_window
-            .or_else(|| crate::config::settings::context_window_for(&target.model));
-        persist_model_choice(&target, window);
-        println!(
-            "this session is bound to the {} endpoint and cannot re-point mid-chat — this session keeps running; your next `grace` launch starts on {name}.",
-            transport.name(),
-            name = target.name
-        );
-        return None;
-    }
 
     let mut resolved_key: Option<String> = None;
     if !same_endpoint {
@@ -315,7 +304,22 @@ fn apply_model_switch(
             }
             return None;
         };
-        transport.set_endpoint(&target.base_url, &key);
+
+        // Any endpoint change swaps in a freshly-built transport: the Copilot
+        // host needs Copilot's token refresh (a plain HTTP bearer 404s once
+        // the OAuth token expires), plain endpoints need a plain HttpTransport,
+        // and a swap covers leaving Copilot mid-session too. The request
+        // timeout and the active reasoning hint ride across the swap; the
+        // model is set just below.
+        let current = transport.current();
+        let reasoning = current.current_reasoning();
+        let timeout = crate::config::settings::Settings::load().request_timeout_secs;
+        let next =
+            crate::transport::transport_for(&target.base_url, &key, &target.model, timeout);
+        if let Some(level) = reasoning {
+            next.set_reasoning(Some(&level));
+        }
+        transport.swap(next);
         if !is_copilot_target {
             // Per-key upsert: a whole-file rewrite would wipe the other
             // providers' keys every time `/model` switched providers.
@@ -331,11 +335,11 @@ fn apply_model_switch(
         }
     }
 
-    transport.set_model(&target.model);
+    transport.current().set_model(&target.model);
     // Re-resolve the window now that model/endpoint changed (the swap
     // invalidated the transport's cache). The static-list value, if any,
     // avoids a network probe the picker already answered.
-    let resolved = target.context_window.or(transport.context_window());
+    let resolved = target.context_window.or(transport.current().context_window());
     if let (Some(old_w), Some(new_w)) = (*cached_context_window, resolved) {
         if old_w != new_w {
             println!(
@@ -376,16 +380,6 @@ fn commit_model_choice(
             key_env: target.key_env.clone(),
         },
     );
-}
-
-/// Persist-for-next-launch variant used when the running transport can't
-/// re-point: the change lands on the next startup, not this session.
-fn persist_model_choice(target: &ModelCandidate, context_window: Option<u32>) {
-    let mut settings = crate::config::settings::Settings::load();
-    commit_model_choice(&mut settings, target, context_window);
-    if let Err(e) = settings.save() {
-        eprintln!("[grace] warning: could not save ~/.grace/config.toml: {e}");
-    }
 }
 
 /// `/model` (no arg) — the model list for the endpoint this session is
@@ -633,16 +627,17 @@ fn pick_reasoning_level(current: Option<String>, skin: &Skin) -> Option<String> 
 /// doesn't have it, the shared stage-2 picker opens so the session lands on
 /// something that actually exists there.
 pub(crate) fn handle_provider_command(
-    transport: &(dyn crate::transport::ProviderTransport + '_),
+    transport: &crate::transport::SharedTransport,
     reader: &mut LineReader,
     skin: &Skin,
     cached_context_window: &mut Option<u32>,
 ) {
     use crate::ui::skin::Role;
-    if transport.current_model().is_none() {
+    let current = transport.current();
+    if current.current_model().is_none() {
         println!(
             "this transport ({}) has no switchable model — /model sets one first.",
-            transport.name()
+            current.name()
         );
         return;
     }
@@ -652,12 +647,12 @@ pub(crate) fn handle_provider_command(
         &candidates,
         reader,
         skin,
-        transport.current_base_url().as_deref(),
+        current.current_base_url().as_deref(),
     )
     else {
         return;
     };
-    let same = transport
+    let same = current
         .current_base_url()
         .as_deref()
         .map(|b| short_url(b) == short_url(&picked.base_url))
@@ -670,7 +665,7 @@ pub(crate) fn handle_provider_command(
     // Carry the model over untouched — that is the whole point of
     // decoupling provider from model. If it turns out not to exist on the
     // new endpoint, the check below catches it against the live list.
-    let model = transport.current_model().unwrap_or_default();
+    let model = current.current_model().unwrap_or_default();
     let target = ModelCandidate {
         name: picked.name.clone(),
         model: model.clone(),
@@ -725,13 +720,13 @@ pub(crate) fn handle_provider_command(
 /// own, no model switch attached. No argument opens the picker. The choice
 /// is per-request transport state plus a persisted default.
 pub(crate) fn handle_effort_command(
-    transport: &(dyn crate::transport::ProviderTransport + '_),
+    transport: &crate::transport::SharedTransport,
     arg: &str,
     skin: &Skin,
 ) {
     use crate::ui::skin::Role;
     let apply = |level: Option<&str>| {
-        transport.set_reasoning(level);
+        transport.current().set_reasoning(level);
         let mut settings = crate::config::settings::Settings::load();
         settings.default_reasoning = level.map(str::to_string);
         if let Err(e) = settings.save() {
@@ -750,7 +745,7 @@ pub(crate) fn handle_effort_command(
         }
     };
     if arg.is_empty() {
-        let Some(level) = pick_reasoning_level(transport.current_reasoning(), skin) else {
+        let Some(level) = pick_reasoning_level(transport.current().current_reasoning(), skin) else {
             return;
         };
         apply(if level.is_empty() { None } else { Some(level.as_str()) });

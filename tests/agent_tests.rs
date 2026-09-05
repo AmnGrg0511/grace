@@ -592,7 +592,7 @@ fn a_sub_agent_registry_includes_ask() {
         skills_root: dir.join("skills"),
         tools_root: dir.join("tools"),
         sessions: None,
-        transport: Some(std::rc::Rc::new(ScriptedTransport::new(vec![answer("ok")]))),
+        transport: Some(grace::transport::SharedTransport::new(Box::new(ScriptedTransport::new(vec![answer("ok")])))),
         compression: ContextCompressionConfig::default(),
         read_only: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };

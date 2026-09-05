@@ -21,7 +21,6 @@ use crate::message::Message;
 use crate::session::{SessionLock, SessionStore};
 use crate::ui::skin::Skin;
 use std::process::ExitCode;
-use std::rc::Rc;
 use std::sync::Arc;
 
 /// Everything the CLI accepts, after parsing.
@@ -260,11 +259,11 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
     if let Some(compression) = settings.compression {
         config.context_compression = compression;
     }
-    let transport: Rc<dyn crate::transport::ProviderTransport> = Rc::from(config.build_transport());
+    let transport = crate::transport::SharedTransport::new(config.build_transport());
     // The persisted reasoning-effort hint rides along at startup, same as the
     // model and endpoint themselves.
     if let Some(level) = settings.default_reasoning.clone() {
-        transport.set_reasoning(Some(&level));
+        transport.current().set_reasoning(Some(&level));
     }
 
     // Seed the default skills into ~/.grace/skills on first run.
@@ -283,7 +282,7 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
     // registration used to be duplicated here in main.rs.
     let registry_options = RegistryOptions::new(&skills_root, &tools_root)
         .with_sessions(Arc::clone(&sessions))
-        .with_transport(Rc::clone(&transport))
+        .with_transport(transport.clone())
         .with_compression(config.context_compression.clone());
     let tools = Config::build_registry_full(&registry_options, DelegationDepth::ROOT);
 
@@ -300,11 +299,12 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
     // In chat mode these run up top under the wordmark (see `run_chat`), so
     // they only print here for one-shot runs, which have no banner.
     if !chat {
+        let current = transport.current();
         println!(
             "[grace] transport={} model={} ctx={} tools={}",
-            transport.name(),
+            current.name(),
             config.model(),
-            transport
+            current
                 .context_window()
                 .map_or_else(|| "?".to_string(), |n| n.to_string()),
             tools.len()
@@ -322,7 +322,7 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
 
     if chat {
         crate::ui::chat::run_chat(
-            transport.as_ref(),
+            &transport,
             &tools,
             &mut messages,
             config.max_iterations,
@@ -337,10 +337,11 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    let current = transport.current();
     run_one_shot(
         &args,
         &config,
-        transport.as_ref(),
+        current.as_ref(),
         &tools,
         &mut messages,
         &sessions,

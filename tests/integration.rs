@@ -13,12 +13,11 @@ use grace::core::{
 };
 use grace::message::{Message, Role, ToolCall};
 use grace::session::SessionStore;
-use grace::transport::{FinishReason, ModelResponse, ProviderTransport, ToolSpec};
+use grace::transport::{FinishReason, ModelResponse, ProviderTransport, SharedTransport, ToolSpec};
 use grace::ui::cli::{Action, CliArgs};
 use grace::util::Result;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::Arc;
 
 // ---- test double ------------------------------------------------------------
@@ -168,7 +167,7 @@ fn the_full_registry_contains_builtins_skills_sessions_and_delegation() {
 
     let opts = RegistryOptions::new(dir.join("skills"), dir.join("tools"))
         .with_sessions(Arc::clone(&sessions))
-        .with_transport(Rc::new(Scripted::new(vec![stop("ok")])));
+        .with_transport(SharedTransport::new(Box::new(Scripted::new(vec![stop("ok")]))));
     let reg = Config::build_registry_full(&opts, DelegationDepth::ROOT);
 
     for expected in [
@@ -190,7 +189,7 @@ fn the_full_registry_contains_builtins_skills_sessions_and_delegation() {
 fn every_tool_in_the_full_registry_advertises_a_provider_valid_schema() {
     let dir = scratch("schemas");
     let opts = RegistryOptions::new(dir.join("skills"), dir.join("tools"))
-        .with_transport(Rc::new(Scripted::new(vec![stop("ok")])));
+        .with_transport(SharedTransport::new(Box::new(Scripted::new(vec![stop("ok")]))));
     let reg = Config::build_registry_full(&opts, DelegationDepth::ROOT);
 
     for spec in reg.specs() {
@@ -239,7 +238,7 @@ fn delegation_works_end_to_end_through_the_tool_registry() {
     // The parent calls `delegate`; a sub-agent runs a fresh loop against the
     // same transport and its answer comes back as the tool result.
     let dir = scratch("delegate");
-    let transport = Rc::new(Scripted::new(vec![
+    let transport = SharedTransport::new(Box::new(Scripted::new(vec![
         // Parent asks to delegate.
         tool_call(
             "c1",
@@ -250,15 +249,15 @@ fn delegation_works_end_to_end_through_the_tool_registry() {
         stop("one two three"),
         // Parent's final answer.
         stop("the sub-agent counted: one two three"),
-    ]));
+    ])));
 
     let opts = RegistryOptions::new(dir.join("skills"), dir.join("tools"))
-        .with_transport(Rc::clone(&transport) as Rc<dyn ProviderTransport>);
+        .with_transport(transport.clone());
     let reg = Config::build_registry_full(&opts, DelegationDepth::ROOT);
 
     let mut messages = vec![Message::user("delegate a counting task")];
     let outcome = run_turn_with_options(
-        transport.as_ref(),
+        transport.current().as_ref(),
         &reg,
         &mut messages,
         8,
@@ -282,7 +281,7 @@ fn a_sub_agent_is_not_handed_the_delegate_tool_past_the_depth_cap() {
     // so recursion cannot continue even if the model keeps asking.
     let dir = scratch("depthcap");
     let opts = RegistryOptions::new(dir.join("skills"), dir.join("tools"))
-        .with_transport(Rc::new(Scripted::new(vec![stop("ok")])));
+        .with_transport(SharedTransport::new(Box::new(Scripted::new(vec![stop("ok")]))));
 
     let root = Config::build_registry_full(&opts, DelegationDepth::ROOT);
     assert!(root.get("delegate").is_some());

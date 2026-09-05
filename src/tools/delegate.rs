@@ -15,7 +15,7 @@ use crate::core::delegation::{
 use crate::core::lifecycle::AgentEvent;
 use crate::tools::r#trait::{arg_str, str_prop, Tool};
 use crate::tools::ToolRegistry;
-use crate::transport::ProviderTransport;
+use crate::transport::SharedTransport;
 use crate::util::Result;
 use serde_json::{json, Value};
 use std::rc::Rc;
@@ -29,21 +29,26 @@ use std::sync::atomic::AtomicBool;
 pub type SubRegistryFactory = Rc<dyn Fn(DelegationDepth) -> ToolRegistry>;
 
 /// A tool named `delegate`: runs a bounded sub-agent and returns its answer.
+///
+/// Holds the session's [`SharedTransport`] slot, not a transport, and
+/// re-acquires `current()` per delegation: the parent may swap providers or
+/// models between turns, and a delegated subtask must run against whatever is
+/// current when it starts — not what the parent started on.
 pub struct DelegateTool {
-    transport: Rc<dyn ProviderTransport>,
+    transport: SharedTransport,
     depth: DelegationDepth,
     make_registry: SubRegistryFactory,
     compression: Option<crate::core::context::ContextCompressionConfig>,
 }
 
 impl DelegateTool {
-    /// Build a delegate tool for `transport`.
+    /// Build a delegate tool over the session's transport slot.
     ///
     /// `make_registry` is called per delegation with the *child's* depth, so
     /// it can decide whether to include `delegate` in the sub-agent's own tool
     /// set.
     pub fn new(
-        transport: Rc<dyn ProviderTransport>,
+        transport: SharedTransport,
         depth: DelegationDepth,
         make_registry: SubRegistryFactory,
     ) -> Self {
@@ -152,7 +157,11 @@ impl Tool for DelegateTool {
         let child_depth = self.depth.child();
         let sub_tools = (self.make_registry)(child_depth);
 
-        let mut delegation = Delegation::new(self.transport.as_ref()).at_depth(self.depth);
+        // A clone of whatever transport is current right now. The subtask may
+        // outlive this turn's transport if the user swaps mid-turn, so the
+        // subtask pins the transport it started against.
+        let current = self.transport.current();
+        let mut delegation = Delegation::new(current.as_ref()).at_depth(self.depth);
         if let Some(cfg) = &self.compression {
             delegation = delegation.with_compression(cfg.clone());
         }
@@ -174,7 +183,7 @@ mod tests {
     use crate::core::delegation::MAX_DELEGATION_DEPTH;
     use crate::message::Message;
     use crate::tools::builtins::register_builtins;
-    use crate::transport::{FinishReason, ModelResponse, ToolSpec};
+    use crate::transport::{FinishReason, ModelResponse, ProviderTransport, ToolSpec};
 
     struct OneShot(&'static str);
     impl ProviderTransport for OneShot {
@@ -206,7 +215,7 @@ mod tests {
 
     fn tool() -> DelegateTool {
         DelegateTool::new(
-            Rc::new(OneShot("subtask complete")),
+            SharedTransport::new(Box::new(OneShot("subtask complete"))),
             DelegationDepth::ROOT,
             factory(),
         )
@@ -306,7 +315,7 @@ mod tests {
         let seen = Rc::new(Cell::new(u32::MAX));
         let seen2 = Rc::clone(&seen);
         let t = DelegateTool::new(
-            Rc::new(OneShot("ok")),
+            SharedTransport::new(Box::new(OneShot("ok"))),
             DelegationDepth(1),
             Rc::new(move |depth: DelegationDepth| {
                 seen2.set(depth.0);
@@ -320,7 +329,7 @@ mod tests {
     #[test]
     fn delegating_at_the_depth_cap_is_refused() {
         let t = DelegateTool::new(
-            Rc::new(OneShot("ok")),
+            SharedTransport::new(Box::new(OneShot("ok"))),
             DelegationDepth(MAX_DELEGATION_DEPTH),
             factory(),
         );
