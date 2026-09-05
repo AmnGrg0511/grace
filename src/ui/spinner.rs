@@ -1,8 +1,9 @@
 //! The thinking spinner — one transient `{frame} thinking {m:ss}` line that
 //! ticks on a background thread in the silent gaps of a turn (from turn start
 //! until the first event, and after each tool result until the model answers
-//! again). Piped (non-TTY) output never sees it: everything stays append-only
-//! there.
+//! again). The `{m:ss}` clock restarts from zero on every resume, so each
+//! thinking episode shows its own elapsed time, never a cumulative one.
+//! Piped (non-TTY) output never sees it: everything stays append-only there.
 
 use crate::ui::skin::{no_color, reset, Role, Skin};
 
@@ -86,7 +87,12 @@ fn pause_core(core: &std::sync::Arc<std::sync::Mutex<SpinnerCore>>) {
 }
 
 fn resume_core(core: &std::sync::Arc<std::sync::Mutex<SpinnerCore>>) {
-    core.lock().unwrap().paused = false;
+    let mut core = core.lock().unwrap();
+    // The model is about to think again (a tool result just printed, or the
+    // mid-turn prompt just answered), so the timer restarts from zero: each
+    // thinking episode shows its own elapsed time, not a cumulative one.
+    core.started = std::time::Instant::now();
+    core.paused = false;
 }
 
 impl Spinner {
@@ -176,7 +182,8 @@ impl Spinner {
     }
 
     /// Allow the ticker to claim the line again (a tool result just printed;
-    /// the model is about to think once more).
+    /// the model is about to think once more). Restarts the thinking clock
+    /// from zero for this new episode.
     pub(crate) fn resume(&self) {
         resume_core(&self.core);
     }
@@ -260,5 +267,32 @@ mod spinner_tests {
             line.starts_with("⠸ thinking 0:00"),
             "unexpected line: {line}"
         );
+    }
+
+    #[test]
+    fn a_resume_restarts_the_thinking_clock() {
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(SpinnerCore {
+            stop: false,
+            paused: false,
+            visible: false,
+            at_line_start: true,
+            frame: 0,
+            // Started long ago so that if resume did NOT reset the clock, the
+            // elapsed time would be clearly non-zero.
+            started: std::time::Instant::now() - std::time::Duration::from_secs(90),
+            dim: String::new(),
+        }));
+        // Park it (as the mid-turn prompt or a tool result does), then resume:
+        // the ticker must show ~0:00 for the new episode, not 1:30.
+        pause_core(&shared);
+        resume_core(&shared);
+        let core = shared.lock().unwrap();
+        assert!(
+            core.started.elapsed() < std::time::Duration::from_secs(1),
+            "resume did not restart the thinking clock"
+        );
+        let line = Spinner::render(&core);
+        assert!(line.starts_with('⠋'), "expected first frame, got {line}");
+        assert!(line.contains("thinking 0:00"), "unexpected line: {line}");
     }
 }
