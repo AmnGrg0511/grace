@@ -156,6 +156,11 @@ pub fn run_chat(
         .as_deref()
         .and_then(|sid| sessions.load_usage(sid).ok().flatten());
 
+    // The environment block bound into the system prompt. Rebuilt after a
+    // `/model` or `/provider` swap (below) so the model the agent reports in
+    // its own context stays truthful.
+    let mut env = chat_system_env(transport, cached_context_window);
+
     let history_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".grace")
@@ -249,6 +254,7 @@ pub fn run_chat(
             }
             Some("model") => {
                 handle_model_command(transport, rest, &mut reader, &skin, &mut cached_context_window);
+                refetch_system_prompt(transport, &mut env, system_override, memory, skills, sessions, messages, cached_context_window);
                 continue;
             }
             Some("skin") => {
@@ -257,7 +263,7 @@ pub fn run_chat(
                 continue;
             }
             Some("session") => {
-                handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills, &mut last_usage, &skin);
+                handle_session_command(sessions, messages, &mut current_session, &mut reader, memory, &mut session_lock, system_override, skills, &mut last_usage, &skin, &env);
                 continue;
             }
             Some("jump") => {
@@ -285,10 +291,12 @@ pub fn run_chat(
             }
             Some("provider") => {
                 handle_provider_command(transport, &mut reader, &skin, &mut cached_context_window);
+                refetch_system_prompt(transport, &mut env, system_override, memory, skills, sessions, messages, cached_context_window);
                 continue;
             }
             Some("effort") => {
                 handle_effort_command(transport, rest, &skin);
+                refetch_system_prompt(transport, &mut env, system_override, memory, skills, sessions, messages, cached_context_window);
                 continue;
             }
             Some("info") => {
@@ -729,6 +737,55 @@ pub(crate) fn session_label(sessions: &SessionStore, sid: &str) -> String {
     }
 }
 
+/// Probe the environment block for the system prompt from the live transport
+/// slot. Model/window/reasoning and the machine/facts are re-fetched each time
+/// this is called, so a post-`/model` rebuild reflects the new transport.
+/// `cached_context_window` is the in-memory, non-probing window the session
+/// already budgets against.
+fn chat_system_env(
+    transport: &crate::transport::SharedTransport,
+    cached_context_window: Option<u32>,
+) -> crate::config::SystemEnv {
+    let current = transport.current();
+    let mut env = crate::config::SystemEnv::probe();
+    env.model = current.current_model().filter(|m| !m.is_empty());
+    env.context_window = cached_context_window;
+    env.reasoning = current.current_reasoning().filter(|r| !r.is_empty());
+    env
+}
+
+/// Rebuild `messages[0]` (the system prompt) and `env` after a `/model` or
+/// `/provider` swap so the agent's own environment block reflects the model it
+/// is actually running under. Same assembly path as startup and `/session`,
+/// so all three agree. Best-effort: a failure leaves the old prompt in place
+/// and reports it rather than swallowing the answer silently.
+#[allow(clippy::too_many_arguments)]
+fn refetch_system_prompt(
+    transport: &crate::transport::SharedTransport,
+    env: &mut crate::config::SystemEnv,
+    system_override: Option<&str>,
+    memory: &crate::memory::Memory,
+    skills: &crate::skill::SkillStore,
+    sessions: &SessionStore,
+    messages: &mut [Message],
+    cached_context_window: Option<u32>,
+) {
+    *env = chat_system_env(transport, cached_context_window);
+    if let Some(first) = messages.first_mut() {
+        match crate::config::build_system_prompt(
+            system_override,
+            memory,
+            skills,
+            sessions,
+            None,
+            Some(env),
+        ) {
+            Ok(sp) => first.content = sp,
+            Err(e) => println!("error rebuilding the system prompt: {e} — keeping the previous one"),
+        }
+    }
+}
+
 /// `/session` — interactive session picker.
 /// The picker lists saved sessions, lets you switch to one, or start a fresh session.
 /// No explicit subcommands: the interactive picker covers everything.
@@ -744,6 +801,7 @@ fn handle_session_command(
     skills: &crate::skill::SkillStore,
     last_usage: &mut Option<crate::transport::TokenUsage>,
     skin: &Skin,
+    env: &crate::config::SystemEnv,
 ) {
     use crate::ui::picker::{pick, Pick};
 
@@ -754,7 +812,7 @@ fn handle_session_command(
     // recall — at startup the interactive path can't know what you'll type,
     // but a switch targets a session whose opener is already on record.
     let fresh_system = |query: Option<&str>| {
-        match crate::config::build_system_prompt(system_override, memory, skills, sessions, query) {
+        match crate::config::build_system_prompt(system_override, memory, skills, sessions, query, Some(env)) {
             Ok(sp) => Message::system(sp),
             Err(e) => {
                 println!("error building the system prompt: {e} — using the bare soul");

@@ -71,6 +71,148 @@ pub fn load_soul_from(path: &std::path::Path) -> String {
     DEFAULT_SYSTEM_PROMPT.to_string()
 }
 
+/// Environment facts the agent should know, appended as a block to the
+/// system prompt so it can reason about the machine it runs on (paths to
+/// edit, what OS it is on, what model it is). Derived once at prompt-build
+/// time; a model/provider switch re-probes via the same struct.
+#[derive(Default)]
+pub struct SystemEnv {
+    /// The process's current working directory.
+    pub cwd: Option<String>,
+    /// Target OS triple (e.g. "Linux").
+    pub os: Option<String>,
+    /// CPU architecture (e.g. "x86_64").
+    pub arch: Option<String>,
+    /// The OS username, if determinable.
+    pub user: Option<String>,
+    /// The user's home directory, if determinable.
+    pub home: Option<String>,
+    /// The git branch of the repository under `cwd`, when one is present.
+    pub git_branch: Option<String>,
+    /// The model id the session is running under (or the reason effort
+    /// belongs to).
+    pub model: Option<String>,
+    /// The model's context window in tokens, when known. Always the cached
+    /// or static-table value — the prompt must never trigger a network probe
+    /// to report this.
+    pub context_window: Option<u32>,
+    /// The effective reasoning-effort hint, when active.
+    pub reasoning: Option<String>,
+}
+
+impl SystemEnv {
+    /// Probe the machine and repo for the fields that don't depend on the
+    /// active transport: `cwd`, `os`, `arch`, `user`, `home`, and — when
+    /// `cwd` is a git worktree — `git_branch`. Model-dependent fields
+    /// (`model`, `reasoning`) are filled in by the caller.
+    pub fn probe() -> Self {
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
+        Self {
+            cwd,
+            os: Some(std::env::consts::OS.to_string()),
+            arch: Some(std::env::consts::ARCH.to_string()),
+            user: std::env::var("USER").ok().filter(|s| !s.is_empty()),
+            home,
+            git_branch: git_branch(),
+            ..Default::default()
+        }
+    }
+
+    /// Render as a prompt block, or `None` when every interesting field is
+    /// empty (nothing worth telling the model). Model/window/reasoning are
+    /// only shown when set — "unknown" noise is worse than silence.
+    pub fn as_prompt_block(&self) -> Option<String> {
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(cwd) = &self.cwd {
+            lines.push(format!("- cwd: `{cwd}`"));
+        }
+        if let (Some(os), Some(arch)) = (&self.os, &self.arch) {
+            lines.push(format!("- machine: {os} / {arch}"));
+        } else if let Some(os) = &self.os {
+            lines.push(format!("- machine: {os}"));
+        }
+        if let Some(user) = &self.user {
+            lines.push(format!("- user: `{user}`"));
+        }
+        if let Some(home) = &self.home {
+            lines.push(format!("- home: `{home}`"));
+        }
+        if let Some(branch) = &self.git_branch {
+            lines.push(format!("- git branch: `{branch}`"));
+        }
+        if let Some(model) = &self.model {
+            lines.push(format!("- model: {model}"));
+        }
+        if let Some(window) = self.context_window {
+            lines.push(format!(
+                "- context window: ~{} tokens",
+                crate::ui::status::human_tokens(window as u64)
+            ));
+        }
+        if let Some(reasoning) = &self.reasoning {
+            lines.push(format!("- reasoning effort: {reasoning}"));
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        let mut out = String::from("\n\nEnvironment (read-only context for this session):\n");
+        out.push_str(&lines.join("\n"));
+        out.push('\n');
+        Some(out)
+    }
+}
+
+/// Current UTC date as `YYYY-MM-DD`, computed with std-only civil-date math
+/// (no `time` crate). Folded into the persona so the agent can reason about
+/// "today" without a separate clock tool.
+fn utc_date() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    civil_date_utc(secs)
+}
+
+/// `YYYY-MM-DD` for `secs` since the Unix epoch, via Howard Hinnant's
+/// days-from-civil algorithm. Pure, so the civil math is testable against
+/// fixed epoch anchors without the clock interfering.
+fn civil_date_utc(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// The branch of the git repository containing `cwd`, if any. Runs
+/// `git rev-parse --abbrev-ref HEAD` and returns the name; a non-repo dir,
+/// a detached head, or a missing `git` all yield `None` quietly.
+fn git_branch() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
 /// Assemble the full system prompt — the single assembly path shared by
 /// first launch, `/session` switches, and one-shot `--prompt` runs.
 ///
@@ -78,7 +220,8 @@ pub fn load_soul_from(path: &std::path::Path) -> String {
 /// file entirely; without it, the soul file is the persona. Durable memory
 /// facts are always appended after, and `query`, when given, triggers the
 /// pre-flight recall against it (facts/skills/sessions overlapping its
-/// keywords).
+/// keywords). `env`, when given, appends an environment context block so the
+/// agent knows where it is and what it is running as.
 ///
 /// Errors are returned, never swallowed: a caller that silently drops them
 /// would build a prompt that quietly loses the user's remembered facts.
@@ -88,8 +231,11 @@ pub fn build_system_prompt(
     skills: &crate::skill::SkillStore,
     sessions: &crate::session::SessionStore,
     query: Option<&str>,
+    env: Option<&SystemEnv>,
 ) -> crate::util::Result<String> {
     let mut sp = override_prompt.map(str::to_string).unwrap_or_else(load_soul);
+
+    sp.push_str(&format!("\n\nToday is {} (UTC).", utc_date()));
 
     if let Some(block) = memory.as_prompt_block()? {
         sp.push_str(&block);
@@ -98,6 +244,12 @@ pub fn build_system_prompt(
     if let Some(query) = query {
         let hits = crate::recall::recall(query, memory, skills, Some(sessions), 5);
         if let Some(block) = crate::recall::as_prompt_block(&hits) {
+            sp.push_str(&block);
+        }
+    }
+
+    if let Some(env) = env {
+        if let Some(block) = env.as_prompt_block() {
             sp.push_str(&block);
         }
     }
@@ -206,7 +358,7 @@ mod tests {
 
         // The override takes the persona slot entirely …
         let sp =
-            build_system_prompt(Some("you are a test persona"), &memory, &skills, &sessions, None)
+            build_system_prompt(Some("you are a test persona"), &memory, &skills, &sessions, None, None)
                 .unwrap();
         assert!(
             sp.starts_with("you are a test persona"),
@@ -217,7 +369,7 @@ mod tests {
 
         // A query triggers pre-flight recall — what a switch into a session
         // feeds (the target session's first user message).
-        let sp = build_system_prompt(None, &memory, &skills, &sessions, Some("rust preferences"))
+        let sp = build_system_prompt(None, &memory, &skills, &sessions, Some("rust preferences"), None)
             .unwrap();
         assert!(
             sp.contains("recalled automatically"),
@@ -226,7 +378,7 @@ mod tests {
 
         // Without a query there is nothing to recall against — no empty
         // recall noise.
-        let sp = build_system_prompt(None, &memory, &skills, &sessions, None).unwrap();
+        let sp = build_system_prompt(None, &memory, &skills, &sessions, None, None).unwrap();
         assert!(!sp.contains("recalled automatically"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -246,5 +398,85 @@ mod tests {
             Ok(_) => panic!("a corrupt facts database must not open"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_env_block_renders_each_set_field_in_order() {
+        let env = SystemEnv {
+            cwd: Some("/work".into()),
+            os: Some("linux".into()),
+            arch: Some("x86_64".into()),
+            user: Some("dev".into()),
+            home: Some("/home/dev".into()),
+            git_branch: Some("main".into()),
+            model: Some("gpt-4o".into()),
+            context_window: Some(128_000),
+            reasoning: Some("medium".into()),
+        };
+        let block = env.as_prompt_block().unwrap();
+        assert!(block.contains("cwd: `/work`"), "{block}");
+        assert!(block.contains("machine: linux / x86_64"), "{block}");
+        assert!(block.contains("user: `dev`"), "{block}");
+        assert!(block.contains("home: `/home/dev`"), "{block}");
+        assert!(block.contains("git branch: `main`"), "{block}");
+        assert!(block.contains("model: gpt-4o"), "{block}");
+        assert!(block.contains("context window"), "{block}");
+        assert!(block.contains("reasoning effort: medium"), "{block}");
+    }
+
+    #[test]
+    fn an_empty_env_block_renders_nothing() {
+        let env = SystemEnv::default();
+        assert!(env.as_prompt_block().is_none());
+    }
+
+    #[test]
+    fn the_env_block_is_appended_after_memory_and_recall() {
+        let dir = scratch("env_block");
+        let memory = crate::memory::Memory::open(dir.join("memory.db")).unwrap();
+        memory.remember("the user prefers rust").unwrap();
+        let skills = crate::skill::SkillStore::new(dir.join("skills"));
+        let sessions = crate::session::SessionStore::open(dir.join("sessions.db")).unwrap();
+        let env = SystemEnv {
+            cwd: Some("/work".into()),
+            model: Some("gpt-4o".into()),
+            ..SystemEnv::default()
+        };
+
+        let sp = build_system_prompt(None, &memory, &skills, &sessions, None, Some(&env)).unwrap();
+        assert!(
+            sp.find("prefers rust").unwrap() < sp.find("cwd: `/work`").unwrap(),
+            "env must come after memory: {sp}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn civil_date_math_matches_fixed_epoch_anchors() {
+        // Known-good conversions, the strongest oracle available for
+        // hand-rolled calendar math.
+        assert_eq!(civil_date_utc(0), "1970-01-01");
+        assert_eq!(civil_date_utc(946_684_800), "2000-01-01");
+        assert_eq!(civil_date_utc(1_709_222_400), "2024-02-29"); // leap day
+        assert_eq!(civil_date_utc(1_778_198_400), "2026-05-08"); // mid-year
+        assert_eq!(civil_date_utc(86_399), "1970-01-01"); // just before midnight
+        assert_eq!(civil_date_utc(86_400), "1970-01-02");
+        // Negative (pre-epoch) dates still convert sensibly.
+        assert_eq!(civil_date_utc(-1), "1969-12-31");
+        assert_eq!(civil_date_utc(-86_400), "1969-12-31");
+    }
+
+    #[test]
+    fn utc_date_is_a_well_formed_iso_date_in_a_plausible_range() {
+        let date = utc_date();
+        assert_eq!(date.len(), 10, "got {date:?}");
+        assert_eq!(&date[4..5], "-", "got {date:?}");
+        assert_eq!(&date[7..8], "-", "got {date:?}");
+        let year: i64 = date[0..4].parse().expect("year is numeric");
+        assert!((2000..=2100).contains(&year), "got {date:?}");
+        let month: u32 = date[5..7].parse().expect("month is numeric");
+        let day: u32 = date[8..10].parse().expect("day is numeric");
+        assert!((1..=12).contains(&month), "got {date:?}");
+        assert!((1..=31).contains(&day), "got {date:?}");
     }
 }

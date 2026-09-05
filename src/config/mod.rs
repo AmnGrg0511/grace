@@ -16,7 +16,9 @@ pub mod soul;
 
 pub use args::{Config, RegistryOptions, OPENROUTER_BASE_URL};
 pub use settings::{context_window_for, KnownModel, ProviderPreset, Settings, PROVIDER_PRESETS};
-pub use soul::{build_system_prompt, load_soul, soul_path, DEFAULT_SYSTEM_PROMPT};
+pub use soul::{
+    build_system_prompt, load_soul, soul_path, SystemEnv, DEFAULT_SYSTEM_PROMPT,
+};
 
 /// Re-exported for backwards compatibility: compression config conceptually
 /// belongs to the agent engine, but callers reach for it as configuration.
@@ -56,6 +58,7 @@ mod tests {
             &crate::skill::SkillStore,
             &crate::session::SessionStore,
             Option<&str>,
+            Option<&SystemEnv>,
         ) -> crate::util::Result<String> = build_system_prompt;
         let _: fn(&str) -> Option<u32> = context_window_for;
         assert!(!PROVIDER_PRESETS.is_empty());

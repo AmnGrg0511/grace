@@ -293,6 +293,7 @@ pub fn run(mut args: CliArgs) -> Result<ExitCode, BoxedError> {
             &skills,
             &sessions,
             args.prompt.as_deref(),
+            Some(&system_env(&transport, &config)),
         )?)
     ];
 
@@ -408,6 +409,29 @@ fn run_action(action: &Action) -> Result<ExitCode, BoxedError> {
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+/// Assemble the environment context block for the system prompt from the
+/// live transport. `config` supplies the configured model/endpoint when the
+/// transport can't report one. The context window is the static-table value,
+/// never a network probe — the block must not block the conversation start
+/// on a fetch.
+fn system_env(
+    transport: &crate::transport::SharedTransport,
+    config: &Config,
+) -> crate::config::SystemEnv {
+    let current = transport.current();
+    let mut env = crate::config::SystemEnv::probe();
+    env.model = current.current_model().or_else(|| {
+        if config.model().is_empty() {
+            None
+        } else {
+            Some(config.model().to_string())
+        }
+    });
+    env.context_window = crate::config::settings::Settings::load().default_context_window;
+    env.reasoning = current.current_reasoning().filter(|r| !r.is_empty());
+    env
 }
 
 /// One-shot `--prompt` mode.
