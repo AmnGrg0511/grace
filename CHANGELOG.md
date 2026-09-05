@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.4.0
+
+**Added**
+- `/model` and `/provider` now switch the live transport mid-chat instead of
+  refusing: you can move between any OpenAI-compatible endpoints — including
+  in and out of GitHub Copilot — without restarting the session. The status
+  line, `/info`, and delegated sub-agents all follow the swap on the next
+  turn, carrying the request timeout and reasoning hint across.
+- The agent now knows its environment: the system prompt carries today's date
+  and an Environment block (working directory, OS/arch, user and home, git
+  branch, model, context window, reasoning effort). It's rebuilt after
+  `/model`, `/provider`, and `/effort` so what the model claims to run under
+  stays truthful after a mid-chat swap. The date uses std-only civil-date
+  math; the context window is the cached/static value, never a network probe.
+
+**Fixed**
+- The "thinking" indicator's timer resets when the model starts generating
+  again after a batch of tool calls, instead of running on from the original
+  turn start.
+- Onboarding wizard: the base URL is now echoed as you type (so you can verify
+  it before pressing Enter) while the API key stays masked with one `*` per
+  character — previously both were a blank line.
+- Copilot `/models` now tolerates response-shape drift (id-only entries,
+  context window nested under `capabilities` or flat, `{"data":[...]}` or a
+  bare array) and reports an authenticated fetch failure as a visible error
+  instead of silently falling back to the stale static model list.
+- A Copilot OAuth token minted via `/model`, `/provider`, or an abandoned
+  wizard is persisted to `~/.grace/.env` at mint time, so a restart no longer
+  re-runs the browser device flow for a token the session already obtained.
+
 ## v0.3.9
 
 **Added**
