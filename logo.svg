@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Grace">
+  <defs>
+    <linearGradient id="card" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0"    stop-color="#FFE07A"/>
+      <stop offset="0.45" stop-color="#FBC62B"/>
+      <stop offset="1"    stop-color="#E09A00"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0"   stop-color="#FFFFFF"/>
+      <stop offset="0.6" stop-color="#FBFBFD"/>
+      <stop offset="1"   stop-color="#E8E9EE"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"   stop-color="#E3B93F"/>
+      <stop offset="1"   stop-color="#C98600"/>
+    </linearGradient>
+    <linearGradient id="deep" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"   stop-color="#B87700"/>
+      <stop offset="1"   stop-color="#8F5A00"/>
+    </linearGradient>
+    <filter id="lift" x="-35%" y="-35%" width="170%" height="170%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#7A4E00" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- card -->
+  <rect width="128" height="128" rx="26" fill="url(#card)"/>
+  <rect x="1.5" y="1.5" width="125" height="125" rx="24.5" fill="none"
+        stroke="#FFFFFF" stroke-opacity="0.45" stroke-width="2"/>
+
+  <!-- G: deep extrusion, then edge, then white face -->
+  <g filter="url(#lift)" stroke-linecap="butt" fill="none">
+    <!-- deep back layer -->
+    <g transform="translate(0,7)">
+      <path d="M79 38 A30 30 0 1 0 90 64" stroke="url(#deep)" stroke-width="15"/>
+      <rect x="63" y="57" width="30" height="15" fill="url(#deep)" stroke="none"/>
+    </g>
+    <!-- mid edge layer -->
+    <g transform="translate(0,3.5)">
+      <path d="M79 38 A30 30 0 1 0 90 64" stroke="url(#edge)" stroke-width="15"/>
+      <rect x="63" y="57" width="30" height="15" fill="url(#edge)" stroke="none"/>
+    </g>
+    <!-- white face -->
+    <g>
+      <path d="M79 38 A30 30 0 1 0 90 64" stroke="url(#face)" stroke-width="15"/>
+      <rect x="63" y="57" width="30" height="15" fill="url(#face)" stroke="none"/>
+    </g>
+  </g>
+</svg>

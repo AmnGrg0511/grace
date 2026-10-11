@@ -1,5 +1,7 @@
 # Grace
 
+![Grace](logo.png)
+
 **A production-grade agent CLI that learns.** ~21,000 lines of Rust. No framework. No async runtime. Single binary. `#![forbid(unsafe_code)]`.
 
 ```bash
