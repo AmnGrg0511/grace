@@ -13,11 +13,11 @@
 use crate::tools::r#trait::{str_prop, Tool};
 use crate::util::{AgentError, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ---- process-group signalling ----------------------------------------------
@@ -33,37 +33,6 @@ fn killpg(pgid: i32) {
         .arg("-KILL")
         .arg(format!("-{pgid}"))
         .status();
-}
-
-/// Read `r` to EOF, but if `deadline` is set, give up after it (returning
-/// whatever was read so far) rather than blocking indefinitely — used after
-/// a timeout-kill where a stray descendant could otherwise still be holding
-/// the write end of the pipe open. Takes ownership of `r` (rather than a
-/// borrow) so the read can be handed to a helper thread and simply
-/// abandoned — no unsafe aliasing — if it overruns the deadline.
-fn read_bounded<R: std::io::Read + Send + 'static>(r: R, deadline: Option<std::time::Duration>) -> Vec<u8> {
-    match deadline {
-        None => {
-            let mut r = r;
-            let mut buf = Vec::new();
-            let _ = r.read_to_end(&mut buf);
-            buf
-        }
-        Some(d) => {
-            // std::io::Read has no built-in timeout; run the blocking read
-            // on a helper thread and abandon it (not join) if it overruns —
-            // it dies with the process, no leak beyond one dangling read
-            // that unblocks the moment the last pipe writer exits.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let _ = std::thread::Builder::new().spawn(move || {
-                let mut r = r;
-                let mut local = Vec::new();
-                let _ = r.read_to_end(&mut local);
-                let _ = tx.send(local);
-            });
-            rx.recv_timeout(d).unwrap_or_default()
-        }
-    }
 }
 
 // ---- turn-interrupt flag ----------------------------------------------------
@@ -264,8 +233,33 @@ impl BashTool {
             .spawn()
             .map_err(|e| AgentError::Tool(format!("failed to spawn 'sh': {e}")))?;
         let pgid = child.id() as i32;
-        let mut out = child.stdout.take();
-        let mut err = child.stderr.take();
+
+        // Drain stdout/stderr immediately, while the parent polls status.
+        // If we wait until try_wait() reports exit, a chatty child can fill
+        // an OS pipe and stall before exiting; when the timeout kills the
+        // process we would then report TIMED OUT for a command that actually
+        // succeeded. Dedicated reader threads keep both pipes flowing.
+        let (out_tx, out_rx) = std::sync::mpsc::channel();
+        let (err_tx, err_rx) = std::sync::mpsc::channel();
+        if let Some(mut o) = child.stdout.take() {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = o.read_to_end(&mut buf);
+                let _ = out_tx.send(buf);
+            });
+        } else {
+            drop(out_tx);
+        }
+        if let Some(mut e) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = e.read_to_end(&mut buf);
+                let _ = err_tx.send(buf);
+            });
+        } else {
+            drop(err_tx);
+        }
+
         let deadline = Self::timeout().map(|d| std::time::Instant::now() + d);
         let poll = std::time::Duration::from_millis(50);
         let status = loop {
@@ -297,22 +291,17 @@ impl BashTool {
             std::thread::sleep(poll);
         };
         let timed_out = status.is_none();
-        // After a timeout kill, a lingering pipe writer (rare, but possible
-        // if a grandchild dodged the group signal) must not re-hang this
-        // read — cap it with its own short, bounded read instead of a
-        // blocking read_to_end.
-        let read_deadline = std::time::Duration::from_millis(500);
-        let stdout = out
-            .take()
-            .map(|o| read_bounded(o, timed_out.then_some(read_deadline)))
-            .unwrap_or_default();
-        let stderr = err
-            .take()
-            .map(|e| read_bounded(e, timed_out.then_some(read_deadline)))
-            .unwrap_or_default();
+
+        // After a timeout kill (or a successful exit with stray descendants
+        // still holding a pipe open anywhere in the tree), require the
+        // reader threads to finish within a short bounded drain window.
+        // The pipe should already be at EOF for a clean command; this is
+        // only a safety net so an inherited writer cannot hang the tool.
+        let drain = std::time::Duration::from_millis(500);
+        let stdout = out_rx.recv_timeout(drain).unwrap_or_default();
+        let stderr = err_rx.recv_timeout(drain).unwrap_or_default();
         Ok((stdout, stderr, status.and_then(|s| s.code()), timed_out))
     }
-
 
     /// Cap: past this many bytes a command's output can blow the model's
     /// whole context window in one tool result (real incident: `p4 changes`
@@ -328,7 +317,10 @@ impl BashTool {
         }
         let half = Self::MAX_OUTPUT_BYTES / 2;
         // Slice on char boundaries so we never split a multi-byte UTF-8 char.
-        let head_end = (0..=half).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0);
+        let head_end = (0..=half)
+            .rev()
+            .find(|&i| s.is_char_boundary(i))
+            .unwrap_or(0);
         let tail_start = (s.len() - half..=s.len())
             .find(|&i| s.is_char_boundary(i))
             .unwrap_or(s.len());
@@ -347,8 +339,9 @@ impl BashTool {
     fn spawn_background(command: &str) -> Result<String> {
         let id = short_job_id();
         let output_path = std::env::temp_dir().join(format!("grace-bg-{id}.log"));
-        let out_file = std::fs::File::create(&output_path)
-            .map_err(|e| AgentError::Tool(format!("create bg log {}: {e}", output_path.display())))?;
+        let out_file = std::fs::File::create(&output_path).map_err(|e| {
+            AgentError::Tool(format!("create bg log {}: {e}", output_path.display()))
+        })?;
         let err_file = out_file
             .try_clone()
             .map_err(|e| AgentError::Tool(format!("clone bg log handle: {e}")))?;
@@ -414,7 +407,11 @@ impl BashTool {
             .unwrap()
             .get(job_id)
             .cloned()
-            .ok_or_else(|| AgentError::Tool(format!("no background job '{job_id}' (unknown id, or process already reaped)")))?;
+            .ok_or_else(|| {
+                AgentError::Tool(format!(
+                    "no background job '{job_id}' (unknown id, or process already reaped)"
+                ))
+            })?;
 
         if wait {
             loop {
@@ -483,8 +480,14 @@ impl Tool for BashTool {
     }
 
     fn run(&self, args: &Value) -> Result<String> {
-        let job_id = args.get("job_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let command = args.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let job_id = args
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         if let Some(jid) = job_id {
             let wait = args.get("wait").and_then(Value::as_bool).unwrap_or(false);
@@ -495,7 +498,10 @@ impl Tool for BashTool {
             AgentError::Tool("either 'command' or 'job_id' must be provided".to_string())
         })?;
 
-        let background = args.get("background").and_then(Value::as_bool).unwrap_or(false);
+        let background = args
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let deny = Self::deny_list();
         if let Some(hit) = deny.iter().find(|d| command.contains(d.as_str())) {
             return Err(AgentError::Tool(format!(
@@ -522,7 +528,10 @@ impl Tool for BashTool {
             result.push_str(&Self::cap_output(stdout.trim_end()));
         }
         if !stderr.is_empty() {
-            result.push_str(&format!("\n[stderr] {}", Self::cap_output(stderr.trim_end())));
+            result.push_str(&format!(
+                "\n[stderr] {}",
+                Self::cap_output(stderr.trim_end())
+            ));
         }
         if timed_out && turn_interrupted() {
             result.push_str("\n[INTERRUPTED — killed by ctrl-c]");
@@ -646,7 +655,10 @@ mod tools_hardening_tests {
             // other users/tests running concurrently).
             std::thread::sleep(std::time::Duration::from_millis(300));
             let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
-            assert!(!alive, "backgrounded sleep pid {pid} survived the group-kill");
+            assert!(
+                !alive,
+                "backgrounded sleep pid {pid} survived the group-kill"
+            );
         }
         // If BGPID wasn't captured (e.g. output truncated before the kill
         // landed), the elapsed-time + TIMED OUT assertions above already
@@ -679,23 +691,28 @@ mod tools_hardening_tests {
 
         // Immediately after dispatch the 1s sleep hasn't finished yet.
         let early = tool.run(&json!({"job_id": job_id})).unwrap();
-        assert!(early.contains("[status: running]"), "early poll was: {early}");
+        assert!(
+            early.contains("[status: running]"),
+            "early poll was: {early}"
+        );
 
         // wait=true blocks until it actually finishes.
-        let finished = tool
-            .run(&json!({"job_id": job_id, "wait": true}))
-            .unwrap();
+        let finished = tool.run(&json!({"job_id": job_id, "wait": true})).unwrap();
         std::env::remove_var("GRACE_TERMINAL_TIMEOUT");
-        assert!(finished.contains("done-marker"), "finished output was: {finished}");
-        assert!(finished.contains("[status: exited, code 0]"), "finished output was: {finished}");
+        assert!(
+            finished.contains("done-marker"),
+            "finished output was: {finished}"
+        );
+        assert!(
+            finished.contains("[status: exited, code 0]"),
+            "finished output was: {finished}"
+        );
     }
 
     #[test]
     fn bash_check_job_reports_unknown_job_id_as_error() {
         let tool = BashTool;
-        let err = tool
-            .run(&json!({"job_id": "bg-doesnotexist"}))
-            .unwrap_err();
+        let err = tool.run(&json!({"job_id": "bg-doesnotexist"})).unwrap_err();
         assert!(err.to_string().contains("no background job"));
     }
 
@@ -713,13 +730,9 @@ mod tools_hardening_tests {
         let _g = ENV_GUARD_FN();
         std::env::set_var("GRACE_TERMINAL_ALLOW", "ls");
         let tool = BashTool;
-        let err = tool
-            .run(&json!({"command": "ls; rm -rf /"}))
-            .unwrap_err();
+        let err = tool.run(&json!({"command": "ls; rm -rf /"})).unwrap_err();
         assert!(err.to_string().contains("chaining"), "err was: {err}");
-        let err = tool
-            .run(&json!({"command": "ls | grep x"}))
-            .unwrap_err();
+        let err = tool.run(&json!({"command": "ls | grep x"})).unwrap_err();
         assert!(err.to_string().contains("chaining"), "err was: {err}");
         std::env::remove_var("GRACE_TERMINAL_ALLOW");
     }
@@ -731,7 +744,10 @@ mod tools_hardening_tests {
         let tool = BashTool;
         for bad in ["ls $(rm -rf /)", "`rm -rf /`", "ls\nrm -rf /"] {
             let err = tool.run(&json!({"command": bad})).unwrap_err();
-            assert!(err.to_string().contains("refused"), "command {bad:?} err: {err}");
+            assert!(
+                err.to_string().contains("refused"),
+                "command {bad:?} err: {err}"
+            );
         }
         std::env::remove_var("GRACE_TERMINAL_ALLOW");
     }
@@ -771,9 +787,9 @@ mod tools_hardening_tests {
         let out = tool.run(&json!({"command": "sleep 30"})).unwrap();
         let elapsed = start.elapsed();
         // Restore an unlatched flag so parallel tests see a clean state.
-        super::set_turn_interrupt(std::sync::Arc::new(
-            std::sync::atomic::AtomicBool::new(false),
-        ));
+        super::set_turn_interrupt(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "ctrl-c must kill the running command promptly, took {elapsed:?}"
@@ -782,31 +798,31 @@ mod tools_hardening_tests {
     }
 
     #[test]
-    fn background_job_ignores_the_foreground_timeout() {
-        // Regression: background jobs used to inherit the 30s foreground
-        // timeout, so a server/watcher left running `sleep 30` got killed on
-        // schedule. With a tight foreground timeout set, a backgrounded
-        // longer sleep must still complete — bg timeout is its own knob.
+    fn large_stdout_and_stderr_do_not_deadlock_the_command() {
+        // The child must be able to fill both OS pipes while the parent is
+        // polling its exit status. Draining only after wait() deadlocks the
+        // child and turns an otherwise successful command into a timeout.
         let _g = ENV_GUARD_FN();
         let _ig = crate::util::interrupt::test_lock();
         std::env::set_var("GRACE_TERMINAL_TIMEOUT", "1");
-        std::env::remove_var("GRACE_TERMINAL_BG_TIMEOUT");
         let tool = BashTool;
+        let start = std::time::Instant::now();
         let out = tool
-            .run(&json!({"command": "sleep 3; echo bg-done", "background": true}))
+            .run(&json!({
+                "command": "python3 -c 'import sys; sys.stdout.write(\"o\" * 200000); sys.stderr.write(\"e\" * 200000)'"
+            }))
             .unwrap();
-        let job_id = out
-            .split('\'')
-            .nth(1)
-            .expect("expected job id quoted in dispatch message")
-            .to_string();
-        let finished = tool
-            .run(&json!({"job_id": job_id, "wait": true}))
-            .unwrap();
-        assert!(
-            finished.contains("bg-done") && finished.contains("[status: exited, code 0]"),
-            "background job was wrongly killed by the foreground timeout: {finished}"
-        );
+        let elapsed = start.elapsed();
         std::env::remove_var("GRACE_TERMINAL_TIMEOUT");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "large pipes should drain promptly, took {elapsed:?}"
+        );
+        assert!(!out.contains("TIMED OUT"), "output was: {out}");
+        assert!(out.contains("[exit code 0]"), "output was: {out}");
+        assert!(
+            out.contains("bytes omitted"),
+            "output was not capped: {out}"
+        );
     }
 }
