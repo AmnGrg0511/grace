@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.1
+
+**Fixed**
+- Foreground `bash` no longer turns chatty successful commands into false
+  timeouts: stdout and stderr now drain on dedicated reader threads while the
+  parent polls the process. A regression test writes 200 KB to each pipe and
+  verifies clean exit plus bounded output. Process-group kills and Ctrl-C
+  behavior are unchanged; post-exit draining keeps a bounded safety deadline.
+
 ## v0.4.0
 
 **Added**
